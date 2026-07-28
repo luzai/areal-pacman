@@ -1,0 +1,194 @@
+experiment_name: pacman-agentic-rl
+trial_name: vision-qwen3p5-vlm-imageonly-multimaze-v1-base-notrain4sample-20260715
+
+seed: 1
+enable_offload: false
+enable_thinking: false
+legal_action_mask: false
+guided_action_choice: false
+legal_action_choice: false
+non_stay_legal_action_choice: false
+non_backtracking_legal_action_choice: true
+action_token_choice: false
+completion_api: chat
+parse_failure_penalty: -50
+reward_mode: sparse
+route_shaping_scale: 1.0
+observation_mode: image_only
+vision_tile_size: 32
+store_observation_images: false
+total_train_epochs: 1
+tokenizer_path: ${actor.path}
+
+workflow: areal_pacman.areal_workflow.PacmanImageOnlyVLMWorkflow
+eval_workflow: ${workflow}
+
+cluster:
+  n_nodes: 1
+  n_gpus_per_node: 8
+  fileroot: /home/z00819216/vla-research/areal-pacman/run_artifacts/areal_vision_imageonly_multimaze_v1_notrain
+  name_resolve:
+    type: nfs
+    nfs_record_root: /home/z00819216/vla-research/areal-pacman/run_artifacts/name_resolve_vision_imageonly_multimaze_v1_notrain
+
+scheduler:
+  type: local
+
+rollout:
+  backend: "vllm:d4p1t1"
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  tokenizer_path: ${tokenizer_path}
+  max_concurrent_rollouts: 4
+  queue_size: null
+  consumer_batch_size: ${train_dataset.batch_size}
+  max_head_offpolicyness: 0
+  enable_rollout_tracing: false
+  scheduling_spec: ${actor.scheduling_spec}
+  dump_to_file: true
+  agent:
+    mode: inline
+    export_style: individual
+    turn_discount: 1.0
+
+gconfig:
+  n_samples: 4
+  min_new_tokens: 0
+  max_new_tokens: 8
+  max_tokens: 1024
+  greedy: false
+  temperature: 1.0
+  top_p: 0.95
+
+actor:
+  backend: "fsdp:d4p1t1"
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: Qwen/Qwen3.5-9B
+  attn_impl: sdpa
+  init_from_scratch: false
+  disable_dropout: true
+  gradient_checkpointing: true
+  dtype: bfloat16
+  mb_spec:
+    max_tokens_per_mb: 1024
+  optimizer:
+    type: adam
+    lr: 0.0
+    weight_decay: 0.0
+    beta1: 0.9
+    beta2: 0.999
+    eps: 1e-8
+    lr_scheduler_type: constant
+    gradient_clipping: 1.0
+    warmup_steps_proportion: 0.0
+  eps_clip: 0.0
+  temperature: ${gconfig.temperature}
+  reward_scaling: 1.0
+  reward_bias: 0.0
+  kl_ctl: 0.0
+  ppo_n_minibatches: 1
+  recompute_logprob: false
+  use_decoupled_loss: false
+  rejection_sampling:
+    metric: ratio
+    upper: 5.0
+  reward_norm:
+    mean_level: group
+    std_level: group
+    group_size: ${gconfig.n_samples}
+  adv_norm:
+    mean_level: batch
+    std_level: batch
+  weight_update_mode: xccl
+  max_new_tokens: ${gconfig.max_new_tokens}
+  scheduling_spec:
+    - task_type: worker
+      port_count: 2
+      gpu: 1
+      cmd: python3 -m areal.infra.rpc.rpc_server
+      env_vars:
+        NCCL_DEBUG: "WARN"
+
+ref:
+  backend: ${actor.backend}
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: ${actor.path}
+  attn_impl: ${actor.attn_impl}
+  init_from_scratch: false
+  disable_dropout: true
+  dtype: ${actor.dtype}
+  mb_spec:
+    max_tokens_per_mb: 1024
+  optimizer: null
+  scheduling_strategy:
+    type: colocation
+    target: actor
+  scheduling_spec: ${actor.scheduling_spec}
+
+sglang:
+  model_path: ${actor.path}
+  random_seed: ${seed}
+  skip_tokenizer_init: true
+  dtype: ${actor.dtype}
+  max_running_requests: 16
+  context_length: 1024
+  mem_fraction_static: 0.65
+
+vllm:
+  model: ${actor.path}
+  seed: ${seed}
+  skip_tokenizer_init: false
+  dtype: ${actor.dtype}
+  max_model_len: 1024
+  gpu_memory_utilization: 0.65
+  enforce_eager: true
+
+train_dataset:
+  batch_size: 8
+  shuffle: true
+  pin_memory: true
+  num_workers: 0
+  path: /home/z00819216/vla-research/areal-pacman/run_artifacts/multi_maze_v1/train_hf_dataset
+  type: rl
+  max_length: 1024
+
+valid_dataset:
+  batch_size: 8
+  shuffle: false
+  pin_memory: true
+  num_workers: 0
+  path: /home/z00819216/vla-research/areal-pacman/run_artifacts/multi_maze_v1/validation_hf_dataset
+  type: rl
+  max_length: 1024
+
+saver:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: null
+  freq_steps: null
+  freq_secs: null
+
+recover:
+  mode: disabled
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+
+evaluator:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: 1
+  freq_steps: null
+  freq_secs: null
+
+stats_logger:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  wandb:
+    mode: disabled

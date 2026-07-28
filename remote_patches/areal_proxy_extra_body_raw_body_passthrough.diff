@@ -1,0 +1,53 @@
+diff --git a/areal/experimental/openai/proxy/proxy_rollout_server.py b/areal/experimental/openai/proxy/proxy_rollout_server.py
+index b96cbd55..02e2b8bb 100644
+--- a/areal/experimental/openai/proxy/proxy_rollout_server.py
++++ b/areal/experimental/openai/proxy/proxy_rollout_server.py
+@@ -562,6 +562,27 @@ async def _call_client_create(
+     )
+ 
+     kwargs = request.model_dump() if isinstance(request, BaseModel) else dict(request)
++
++    # OpenAI Python extra_body is merged into the HTTP request body as
++    # top-level keys. The internal AReaL client expects these keys under
++    # extra_body, so move them back before signature-based filtering drops them.
++    extra_body_keys = ("chat_template_kwargs", "structured_outputs")
++    extra_body = kwargs.get("extra_body")
++    if extra_body is None:
++        extra_body = {}
++    elif isinstance(extra_body, dict):
++        extra_body = dict(extra_body)
++    else:
++        raise HTTPException(
++            status_code=400,
++            detail=f"extra_body must be a dict if provided, got {type(extra_body).__name__}",
++        )
++    for key in extra_body_keys:
++        if key in kwargs:
++            extra_body[key] = kwargs.pop(key)
++    if extra_body:
++        kwargs["extra_body"] = extra_body
++
+     dropped_args = []
+     for k, v in kwargs.items():
+         if k not in areal_client_allowed_args:
+@@ -618,7 +639,7 @@ async def _call_client_create(
+     response_model=None,
+ )
+ async def chat_completions(
+-    request: CompletionCreateParams, session_id: str = Depends(_require_session_key)
++    raw_request: Request, session_id: str = Depends(_require_session_key)
+ ) -> ChatCompletion | StreamingResponse:
+     """OpenAI-compatible chat completions endpoint.
+ 
+@@ -632,7 +653,10 @@ async def chat_completions(
+             detail='Proxy server not initialized. Send requests to /create_engine then /call "initialize" first.',
+         )
+ 
+-    # CompletionCreateParams is a TypedDict (dict subclass), so use dict access.
++    # Read the raw request body so OpenAI SDK extra_body keys, which are merged
++    # into the top-level JSON body, survive until _call_client_create repacks
++    # them for the internal AReaL client.
++    request = await raw_request.json()
+     is_streaming = request.get("stream") is True
+ 
+     if is_streaming:

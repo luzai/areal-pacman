@@ -1,0 +1,10 @@
+*** Begin Patch
+*** Update File: /mnt/data/z00819216/xinglu/AReaL-VLA/areal/engine/vllm_ext/vllm_worker_extension.py
+@@
+-        except Exception as e:
+-            error_msg = f"Failed to update parameter! {e}."
++        except Exception as e:
++            error_msg = f"Failed to update parameter name={name!r} shape={shape!r} dtype={dtype!r}! {e}."
+             logger.error(error_msg)
+             return False, error_msg
+*** End Patch

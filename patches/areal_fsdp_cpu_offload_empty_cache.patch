@@ -1,0 +1,18 @@
+diff --git a/areal/engine/fsdp_engine.py b/areal/engine/fsdp_engine.py
+--- a/areal/engine/fsdp_engine.py
++++ b/areal/engine/fsdp_engine.py
+@@ -493,6 +493,14 @@ class FSDPEngine(TrainEngine):
+                 prefetch_layers=self.config.fsdp.optim_step_prefetch_layers,
+             )
+ 
++        # CPUOffloadPolicy has already moved the persistent FSDP parameter
++        # shards to CPU, but from_pretrained() can leave their former CUDA
++        # allocations in this process's caching allocator. Release that
++        # unused cache so a colocated engine can use the memory.
++        if self.cpu_offload is not None:
++            gc.collect()
++            current_platform.empty_cache()
++
+         self._initialized = True
+ 
+     @property

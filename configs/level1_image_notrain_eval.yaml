@@ -1,0 +1,15 @@
+recipe_version: maapacman-level1-v1
+artifact_root: run_artifacts/level1_overfit
+model: Qwen/Qwen3.5-9B
+workflow: areal_pacman.workflow.PacmanImageOnlyWorkflow
+environment_api: "1.0"
+level: 1
+seed: 0
+max_steps: 287
+episodes: 4
+temperature: 0.0
+top_p: 1.0
+max_completion_tokens: 3
+action_tokens: [U, D, L, R, S]
+progress_scale: 784.0
+wall_penalty: 1.0

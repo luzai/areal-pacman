@@ -1,0 +1,35 @@
+diff --git a/areal/engine/fsdp_engine.py b/areal/engine/fsdp_engine.py
+--- a/areal/engine/fsdp_engine.py
++++ b/areal/engine/fsdp_engine.py
+@@ -210,7 +210,9 @@ def _prepare_multimodal_forward_inputs(
+     if multi_modal_input is not None:
+         for key in _MULTIMODAL_FORWARD_KEYS:
+             values = [item[key] for item in multi_modal_input if key in item]
+             if values:
+-                padded_mb[key] = torch.cat(values, dim=0)
++                padded_mb[key] = torch.cat(values, dim=0).to(
++                    padded_mb["input_ids"].device
++                )
+ 
+     _drop_multimodal_payloads(mb)
+@@ -1839,7 +1841,9 @@ class FSDPEngine(TrainEngine):
+                     if "image_grid_thw" in m
+                 ]
+                 if image_grid_thw_list:
+-                    image_grid_thw = torch.cat(image_grid_thw_list)
++                    image_grid_thw = torch.cat(image_grid_thw_list).to(
++                        input_ids.device
++                    )
+                 video_grid_thw_list = [
+                     m["video_grid_thw"]
+                     for m in multi_modal_input
+@@ -1847,6 +1851,8 @@ class FSDPEngine(TrainEngine):
+                     if "video_grid_thw" in m
+                 ]
+                 if video_grid_thw_list:
+-                    video_grid_thw = torch.cat(video_grid_thw_list)
++                    video_grid_thw = torch.cat(video_grid_thw_list).to(
++                        input_ids.device
++                    )
+ 
+             position_ids = self.model.model.compute_3d_position_ids(

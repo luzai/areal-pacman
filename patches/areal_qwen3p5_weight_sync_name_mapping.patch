@@ -1,0 +1,21 @@
+*** Begin Patch
+*** Update File: /mnt/data/z00819216/xinglu/AReaL-VLA/areal/engine/fsdp_engine.py
+@@
+-        if self.is_vision_model and is_qwen_vl_model(self.model_config.model_type):
++        if self.is_vision_model and is_qwen_vl_model(self.model_config.model_type):
+             for name, value in name_params_iterator:
+                 if meta.gen_allocation.backend == "sglang":
+@@
+                 yield new_name, value
++        elif is_qwen3_5_model(self.model_config.model_type):
++            for name, value in name_params_iterator:
++                new_name = name.removeprefix("model.")
++                if new_name.startswith(("embed_tokens.", "layers.", "norm.")):
++                    new_name = f"language_model.model.{new_name}"
++                elif new_name.startswith("lm_head."):
++                    new_name = f"language_model.{new_name}"
++                elif new_name.startswith("language_model.") or new_name.startswith("visual."):
++                    pass
++                yield new_name, value
+         elif self.is_vision_model and is_gemma3_model(self.model_config.model_type):
+*** End Patch
