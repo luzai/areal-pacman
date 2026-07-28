@@ -8,9 +8,9 @@ from pathlib import Path
 from typing import Any
 
 from .areal_workflow import build_observation_turn, parse_action_for_prompt
-from .dataset import system_prompt
-from .env import LAYOUTS, PacmanEnv
-from .vision import env_png_bytes
+from .synthetic.dataset import system_prompt
+from .synthetic.env import LAYOUTS, PacmanEnv
+from .synthetic.vision import env_png_bytes
 
 
 DEFAULT_MODEL = "Qwen/Qwen3.5-9B"

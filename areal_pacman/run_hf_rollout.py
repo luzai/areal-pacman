@@ -12,8 +12,8 @@ os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 from .areal_workflow import parse_action_for_prompt
-from .dataset import system_prompt
-from .env import LAYOUTS, PacmanEnv
+from .synthetic.dataset import system_prompt
+from .synthetic.env import LAYOUTS, PacmanEnv
 
 
 def load_model(model_name: str):

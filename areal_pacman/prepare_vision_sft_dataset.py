@@ -6,9 +6,9 @@ from pathlib import Path
 from uuid import uuid4
 
 from .areal_workflow import build_observation_turn
-from .dataset import system_prompt
-from .env import LAYOUTS, PacmanEnv
-from .vision import env_png_bytes
+from .synthetic.dataset import system_prompt
+from .synthetic.env import LAYOUTS, PacmanEnv
+from .synthetic.vision import env_png_bytes
 
 
 def shortest_route_action(env: PacmanEnv, avoid_stay: bool = True) -> str:

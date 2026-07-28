@@ -8,9 +8,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
-from .dataset import system_prompt
-from .env import ACTIONS, PacmanEnv, PacmanState
-from .vision import env_png_bytes, image_data_url, image_sha256
+from .synthetic.dataset import system_prompt
+from .synthetic.env import ACTIONS, PacmanEnv, PacmanState
+from .synthetic.vision import env_png_bytes, image_data_url, image_sha256
 
 
 PARSE_FAILED_ACTION = "__parse_failed__"

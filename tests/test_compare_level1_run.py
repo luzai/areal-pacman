@@ -8,7 +8,13 @@ import sys
 import pytest
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "compare_level1_run.py"
+SCRIPT = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "level1"
+    / "evaluate"
+    / "compare_level1_run.py"
+)
 SPEC = importlib.util.spec_from_file_location("compare_level1_run", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)

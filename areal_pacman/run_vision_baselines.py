@@ -13,9 +13,9 @@ from uuid import uuid4
 
 from PIL import Image, ImageDraw, ImageFont
 
-from .baselines import GreedyPelletAgent, RandomAgent
-from .env import ACTIONS, LAYOUTS, PacmanEnv
-from .vision import env_png_bytes, image_sha256, render_env_image
+from .synthetic.baselines import GreedyPelletAgent, RandomAgent
+from .synthetic.env import ACTIONS, LAYOUTS, PacmanEnv
+from .synthetic.vision import env_png_bytes, image_sha256, render_env_image
 
 
 @dataclass

@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .dataset import LAYOUTS, SPLIT_SIZES, write_jsonl
+from .synthetic.dataset import LAYOUTS, SPLIT_SIZES, write_jsonl
 
 
 def main() -> None:

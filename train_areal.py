@@ -79,7 +79,7 @@ def _production_dry_run(
     text = config_path.read_text(encoding="utf-8")
     if "recipe_version: maapacman-level1-v1" not in text:
         return False
-    from areal_pacman.level1_dataset import validate_episode_row
+    from areal_pacman.level1.level1_dataset import validate_episode_row
     from maapacman.env import PygamePacmanEnv
 
     epochs = int(_yaml_scalar(text, "total_train_epochs"))
@@ -126,7 +126,7 @@ def _production_dry_run(
     print(f"action_tokens={','.join(spec.action_tokens)}")
     if validate_areal:
         from areal.api.cli_args import load_expr_config
-        from areal_pacman.configs import PacmanAgentConfig
+        from areal_pacman.synthetic.configs import PacmanAgentConfig
 
         config, _ = load_expr_config(
             ["--config", str(config_path)], PacmanAgentConfig
@@ -285,7 +285,7 @@ def main(args: list[str]) -> None:
     from areal.api.cli_args import load_expr_config
     from areal.dataset import get_custom_dataset
     from areal.utils.hf_utils import load_hf_tokenizer
-    from areal_pacman.configs import PacmanAgentConfig
+    from areal_pacman.synthetic.configs import PacmanAgentConfig
     from datasets import load_from_disk
 
     config, _ = load_expr_config(args, PacmanAgentConfig)

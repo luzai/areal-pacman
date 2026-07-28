@@ -9,6 +9,8 @@ import sys
 SCRIPT = (
     Path(__file__).resolve().parents[1]
     / "scripts"
+    / "level1"
+    / "evaluate"
     / "compare_level1_sampled_run.py"
 )
 SPEC = importlib.util.spec_from_file_location(

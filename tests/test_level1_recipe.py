@@ -52,6 +52,7 @@ from areal_pacman.workflow import (
     ModelTurn,
     PacmanImageOnlyWorkflow,
     PacmanNativeVisionWorkflow,
+    install_vllm_allowed_token_ids_adapter,
 )
 from train_areal import _build_workflow_kwargs
 
@@ -601,6 +602,10 @@ class WorkflowContractTests(unittest.TestCase):
             engine.request.metadata["allowed_token_ids"],
             [40, 41, 42, 43],
         )
+        self.assertEqual(
+            engine.request.metadata["chat_template_kwargs"],
+            {"enable_thinking": False},
+        )
         json.dumps(engine.request.vision_msg_vllm)
         self.assertEqual(
             engine.request.vision_msg_vllm[0][1]["content"][1]["image_url"],
@@ -608,6 +613,42 @@ class WorkflowContractTests(unittest.TestCase):
         )
         self.assertIn(
             "pixel_values", result["multi_modal_input"][0]
+        )
+
+    def test_native_vllm_adapter_forwards_no_thinking_and_action_mask(
+        self,
+    ) -> None:
+        class FakeVLLMBackend:
+            def build_generation_request(self, req, with_lora, version):
+                return SimpleNamespace(payload={"temperature": 0.7})
+
+        fake_vllm_remote = SimpleNamespace(VLLMBackend=FakeVLLMBackend)
+        with patch.dict(
+            sys.modules,
+            {
+                "areal": SimpleNamespace(),
+                "areal.engine": SimpleNamespace(),
+                "areal.engine.vllm_remote": fake_vllm_remote,
+            },
+        ):
+            install_vllm_allowed_token_ids_adapter()
+
+        req = SimpleNamespace(
+            metadata={
+                "allowed_token_ids": [40, 43],
+                "chat_template_kwargs": {"enable_thinking": False},
+            }
+        )
+        request = FakeVLLMBackend().build_generation_request(
+            req,
+            with_lora=False,
+            version=0,
+        )
+
+        self.assertEqual(request.payload["allowed_token_ids"], [40, 43])
+        self.assertEqual(
+            request.payload["chat_template_kwargs"],
+            {"enable_thinking": False},
         )
 
     def test_workflow_defaults_to_thinking_disabled_and_rejects_true(self) -> None:
@@ -924,8 +965,8 @@ class WorkflowContractTests(unittest.TestCase):
         )
         self.assertIn(
             (
-                "Exits previously attempted from "
-                f"({initial_position[0]},{initial_position[1]}): U"
+                f"At this cell ({initial_position[0]},{initial_position[1]}), "
+                "directions already taken before: U."
             ),
             second["model_user_instruction"],
         )
@@ -1087,10 +1128,26 @@ class WorkflowContractTests(unittest.TestCase):
         asyncio.run(scenario())
 
     def test_production_workflow_does_not_import_private_environment(self) -> None:
-        source = (Path(__file__).parents[1] / "areal_pacman" / "workflow.py").read_text(encoding="utf-8")
+        source = (
+            Path(__file__).parents[1]
+            / "areal_pacman"
+            / "level1"
+            / "workflow.py"
+        ).read_text(encoding="utf-8")
         self.assertIn("from maapacman.env import", source)
         self.assertNotIn("from .env import", source)
         self.assertNotIn("from areal_pacman.env import", source)
+
+    def test_workflow_import_shim_preserves_public_classes(self) -> None:
+        from areal_pacman.level1.workflow import (
+            PacmanImageOnlyWorkflow as CanonicalImageOnlyWorkflow,
+        )
+        from areal_pacman.level1.workflow import (
+            PacmanNativeVisionWorkflow as CanonicalNativeVisionWorkflow,
+        )
+
+        self.assertIs(PacmanImageOnlyWorkflow, CanonicalImageOnlyWorkflow)
+        self.assertIs(PacmanNativeVisionWorkflow, CanonicalNativeVisionWorkflow)
 
 
 class TrainerGenerationContractTests(unittest.TestCase):
@@ -1154,6 +1211,8 @@ class TrainerGenerationContractTests(unittest.TestCase):
         config = (
             Path(__file__).parents[1]
             / "configs"
+            / "level1"
+            / "archive"
             / "level1_image_overfit_4epoch_group12_8gpu.yaml"
         ).read_text(encoding="utf-8")
         eval_block = config.split("eval_gconfig:", 1)[1].split("actor:", 1)[0]
@@ -1166,6 +1225,8 @@ class TrainerGenerationContractTests(unittest.TestCase):
         config = (
             Path(__file__).parents[1]
             / "configs"
+            / "level1"
+            / "archive"
             / "level1_image_anticollapse_4update_group12_8gpu.yaml"
         ).read_text(encoding="utf-8")
         self.assertIn("total_train_epochs: 2", config)
@@ -1207,6 +1268,8 @@ class TrainerGenerationContractTests(unittest.TestCase):
         config = (
             Path(__file__).parents[1]
             / "configs"
+            / "level1"
+            / "archive"
             / "level1_image_progress_4update_group12_8gpu.yaml"
         ).read_text(encoding="utf-8")
         for expected in (
@@ -1238,6 +1301,8 @@ class TrainerGenerationContractTests(unittest.TestCase):
         config = (
             Path(__file__).parents[1]
             / "configs"
+            / "level1"
+            / "archive"
             / "level1_live_state_4update_group12_8gpu.yaml"
         ).read_text(encoding="utf-8")
         for expected in (
@@ -1268,9 +1333,9 @@ class TrainerGenerationContractTests(unittest.TestCase):
         patch = (
             root / "patches" / "areal_pacman_action_logprobs.patch"
         ).read_text(encoding="utf-8")
-        launcher = (root / "scripts" / "run_level1_training.sh").read_text(
-            encoding="utf-8"
-        )
+        launcher = (
+            root / "scripts" / "level1" / "train" / "run_level1_training.sh"
+        ).read_text(encoding="utf-8")
         self.assertIn("_apply_pacman_action_mask", patch)
         self.assertIn('logprobs_mode: str = "raw_logprobs"', patch)
         self.assertIn("areal_pacman_action_logprobs_patch=ok", launcher)
@@ -1280,9 +1345,9 @@ class TrainerGenerationContractTests(unittest.TestCase):
         patch = (
             root / "patches" / "areal_fsdp_cpu_offload_empty_cache.patch"
         ).read_text(encoding="utf-8")
-        launcher = (root / "scripts" / "run_level1_training.sh").read_text(
-            encoding="utf-8"
-        )
+        launcher = (
+            root / "scripts" / "level1" / "train" / "run_level1_training.sh"
+        ).read_text(encoding="utf-8")
         marker = "CPUOffloadPolicy has already moved the persistent FSDP parameter"
         self.assertIn(marker, patch)
         self.assertIn("areal_fsdp_cpu_offload_empty_cache_patch=ok", launcher)
@@ -1290,7 +1355,11 @@ class TrainerGenerationContractTests(unittest.TestCase):
 
     def test_training_launcher_uses_ephemeral_nondefault_admin_key(self) -> None:
         launcher = (
-            Path(__file__).parents[1] / "scripts" / "run_level1_training.sh"
+            Path(__file__).parents[1]
+            / "scripts"
+            / "level1"
+            / "train"
+            / "run_level1_training.sh"
         ).read_text(encoding="utf-8")
         self.assertIn("secrets.token_urlsafe(32)", launcher)
         self.assertIn('export AREAL_ADMIN_API_KEY', launcher)
@@ -1301,7 +1370,11 @@ class TrainerGenerationContractTests(unittest.TestCase):
 
     def test_training_launcher_prefers_official_areal_worktree(self) -> None:
         launcher = (
-            Path(__file__).parents[1] / "scripts" / "run_level1_training.sh"
+            Path(__file__).parents[1]
+            / "scripts"
+            / "level1"
+            / "train"
+            / "run_level1_training.sh"
         ).read_text(encoding="utf-8")
         self.assertIn('AREAL_ROOT="${AREAL_ROOT:-${OWNER_ROOT}/xinglu/AReaL}"', launcher)
         self.assertIn(
@@ -1314,6 +1387,8 @@ class TrainerGenerationContractTests(unittest.TestCase):
         config = (
             Path(__file__).parents[1]
             / "configs"
+            / "level1"
+            / "archive"
             / "level1_official_areal_smoke_3b_4gpu.yaml"
         ).read_text(encoding="utf-8")
         self.assertIn("total_train_epochs: 2", config)
@@ -1335,7 +1410,11 @@ class TrainerGenerationContractTests(unittest.TestCase):
 
     def test_run_evaluator_can_resume_and_matches_sampled_served_name(self) -> None:
         evaluator = (
-            Path(__file__).parents[1] / "scripts" / "evaluate_level1_run.sh"
+            Path(__file__).parents[1]
+            / "scripts"
+            / "level1"
+            / "evaluate"
+            / "evaluate_level1_run.sh"
         ).read_text(encoding="utf-8")
         self.assertIn(
             'if [[ -f "${EVAL_ROOT}/${label}/greedy.json" ]]', evaluator

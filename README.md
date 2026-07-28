@@ -2,7 +2,7 @@
 
 ## Architecture design
 
-- [AReaL Pacman RL Recipe Design](AREAL_RECIPE_DESIGN.md)
+- [AReaL Pacman RL Recipe Design](docs/architecture/AREAL_RECIPE_DESIGN.md)
 - [Companion MaaPacman Environment Interface Design](../MaaPacman/PACMAN_ENV_DESIGN.md)
 
 ## Current Level-1 run
@@ -46,7 +46,7 @@ python -m pip install -e ".[dev,dataset,agent]"
 Prepare the short-horizon Level-1 dataset:
 
 ```powershell
-python scripts\prepare_level1_dataset.py `
+python scripts\level1\dataset\prepare_level1_dataset.py `
   --output-root run_artifacts\level1_dataset_step32 `
   --train-episodes 8 `
   --validation-episodes 2 `
@@ -59,9 +59,9 @@ checkout, the MaaPacman environment, and a local model checkpoint:
 ```bash
 export AREAL_ROOT=/home/ubuntu/z00819216/xinglu/AReaL
 export MODEL_PATH=/home/ubuntu/z00819216/models/Qwen3.5-9B
-export CONFIG="$PWD/configs/level1_live_state_step32_16update_group12_8gpu.yaml"
+export CONFIG="$PWD/configs/level1/train/level1_live_state_step32_16update_group12_8gpu.yaml"
 export DATASET_MAX_STEPS=32
-bash scripts/run_level1_training.sh
+bash scripts/level1/train/run_level1_training.sh
 ```
 
 The launcher verifies that `areal` resolves from `AREAL_ROOT`, prepares the
@@ -78,23 +78,27 @@ MaaPacman repository / maapacman package
     legal/open actions, rewards, termination, and gameplay metrics.
 
 areal-pacman repository (this repository)
-  areal_pacman/workflow.py
+  areal_pacman/level1/workflow.py
     Connects image plus live game state to AReaL rollout generation.
     PacmanNativeVisionWorkflow applies no-thinking decoding and the dynamic
     open-action mask used by production training.
-  areal_pacman/level1_dataset.py
+  areal_pacman/level1/level1_dataset.py
     Builds deterministic train/validation rows backed by PygamePacmanEnv.
-  areal_pacman/rewards.py
+  areal_pacman/level1/rewards.py
     Defines recipe-side reward composition and reporting.
-  areal_pacman/env.py
+  areal_pacman/synthetic/env.py
     Historical synthetic text/maze environment only; not production Level-1.
   configs/
-    Reproducible AReaL experiment configurations.
-  scripts/run_level1_training.sh
+    Production Level-1 train/eval configs plus archived experiment configs.
+    See configs/README.md.
+  scripts/
+    Level-1 train/evaluate/dataset/report tools and historical synthetic tools.
+    See scripts/README.md.
+  scripts/level1/train/run_level1_training.sh
     Validated Linux/H100 training entry point.
-  scripts/evaluate_level1.py
+  scripts/level1/evaluate/evaluate_level1.py
     Independent checkpoint evaluator.
-  scripts/summarize_level1_trajectories.py
+  scripts/level1/report/summarize_level1_trajectories.py
     Audits parsing, action-mask compliance, collisions, and rollout metrics.
   tests/
     CPU contract tests for dataset, workflow, masking, rewards, and utilities.
@@ -105,9 +109,11 @@ Official AReaL checkout
 ```
 
 The boundaries are intentional: MaaPacman owns the game, this repository owns
-the RL recipe, and official AReaL owns distributed training. Do not copy the
-game implementation into this package or run production Level-1 through the
-historical `areal_pacman.env.PacmanEnv`.
+the RL recipe, and official AReaL owns distributed training. Root modules such
+as `areal_pacman.workflow` and `areal_pacman.env` are backward-compatible
+import shims. New code should use `areal_pacman.level1.*` or
+`areal_pacman.synthetic.*`. Do not run production Level-1 through the
+historical `areal_pacman.synthetic.env.PacmanEnv`.
 
 ## Official AReaL checkout policy
 
@@ -125,7 +131,7 @@ now deliberately separated:
 ```
 
 The `maapacman-rl` Conda environment and
-`scripts/run_level1_training.sh` resolve `areal` from the clean official
+`scripts/level1/train/run_level1_training.sh` resolve `areal` from the clean official
 `AReaL` worktree. Do not run Pacman training from `AReaL-VLA`.
 
 The 2026-07-23 official-main GPU compatibility probe reached real
@@ -135,7 +141,7 @@ the OpenAI proxy trajectory omitted `mm_token_type_ids` and
 `multi_modal_input`, which official Qwen-VL FSDP requires. The optional vLLM
 `awex_adapter`/Megatron warning was not the failure.
 
-`areal_pacman.workflow.PacmanNativeVisionWorkflow` now implements the
+`areal_pacman.level1.workflow.PacmanNativeVisionWorkflow` now implements the
 recipe-owned native AReaL `RolloutWorkflow` contract. Each action request is
 processed once and returns aligned `input_ids`, `mm_token_type_ids`,
 `pixel_values`, `image_grid_thw`, rollout log-probs, versions, masks, and the
@@ -146,7 +152,8 @@ reference log-prob, optimizer step, and checkpoint reload are still required
 before official-main training is accepted.
 
 The production level-1 recipe consumes MaaPacman's public
-`maapacman.env.PygamePacmanEnv`. The separate `areal_pacman.env.PacmanEnv`
+`maapacman.env.PygamePacmanEnv`. The separate
+`areal_pacman.synthetic.env.PacmanEnv`
 class remains only for historical synthetic/multi-maze research. It is not the
 original pygame environment and must not be used by the production level-1
 recipe. The design document records its future rename to `SyntheticMazeEnv`.
@@ -156,51 +163,51 @@ recipe. The design document records its future rename to `SyntheticMazeEnv`.
 ## 文件
 
 - [pyproject.toml](pyproject.toml): package metadata 和 pytest config.
-- [areal_pacman/env.py](areal_pacman/env.py): deterministic text PacMan environment.
-- [areal_pacman/baselines.py](areal_pacman/baselines.py): random 和 greedy baseline agents.
-- [areal_pacman/evaluate.py](areal_pacman/evaluate.py): episode evaluator.
-- [areal_pacman/dataset.py](areal_pacman/dataset.py): JSONL prompt dataset generator.
-- [areal_pacman/maze_suite.py](areal_pacman/maze_suite.py): `multi_maze_v1` manifest loader, split/hash validation, and registry.
-- [multi_maze_v1.json](areal_pacman/maze_suites/multi_maze_v1.json): deterministic `64/16/32` train/validation/test maze manifest with oracle solutions.
+- [areal_pacman/synthetic/env.py](areal_pacman/synthetic/env.py): deterministic text PacMan environment.
+- [areal_pacman/synthetic/baselines.py](areal_pacman/synthetic/baselines.py): random 和 greedy baseline agents.
+- [areal_pacman/synthetic/evaluate.py](areal_pacman/synthetic/evaluate.py): episode evaluator.
+- [areal_pacman/synthetic/dataset.py](areal_pacman/synthetic/dataset.py): JSONL prompt dataset generator.
+- [areal_pacman/synthetic/maze_suite.py](areal_pacman/synthetic/maze_suite.py): `multi_maze_v1` manifest loader, split/hash validation, and registry.
+- [multi_maze_v1.json](areal_pacman/synthetic/maze_suites/multi_maze_v1.json): deterministic `64/16/32` train/validation/test maze manifest with oracle solutions.
 - [areal_pacman/prepare_hf_dataset.py](areal_pacman/prepare_hf_dataset.py): JSONL 到 Hugging Face dataset 的 export.
 - [areal_pacman/areal_workflow.py](areal_pacman/areal_workflow.py): AReaL-compatible workflow adapter skeleton.
 - [train_areal.py](train_areal.py): AReaL trainer entry, 带 dry-run mode.
-- [remote_supervise_multimaze_v1.sh](scripts/remote_supervise_multimaze_v1.sh): GPU-empty-gated base evaluation, multi-maze RL, complete checkpoint, and held-out evaluation pipeline.
-- [remote_supervise_multimaze_safeprogress_v1.sh](scripts/remote_supervise_multimaze_safeprogress_v1.sh): alpha-4 safe-progress GRPO, per-epoch validation selection, and selected-checkpoint train/test evaluation.
-- [config_pacman.yaml](config_pacman.yaml): minimal local-scheduler AReaL config.
+- [remote_supervise_multimaze_v1.sh](scripts/synthetic/remote_supervise_multimaze_v1.sh): GPU-empty-gated base evaluation, multi-maze RL, complete checkpoint, and held-out evaluation pipeline.
+- [remote_supervise_multimaze_safeprogress_v1.sh](scripts/synthetic/remote_supervise_multimaze_safeprogress_v1.sh): alpha-4 safe-progress GRPO, per-epoch validation selection, and selected-checkpoint train/test evaluation.
+- [configs/archive/text/config_pacman.yaml](configs/archive/text/config_pacman.yaml): minimal local-scheduler AReaL config.
 - [reports/](../reports/): grouped experiment reports and status updates.
 - [trajectories/](../trajectories/): grouped rollout and failure/success trajectory samples.
-- [config_text_rollout.yaml](config_text_rollout.yaml): minimal pure text episode rollout smoke.
-- [config_text_rollout_longer.yaml](config_text_rollout_longer.yaml): slightly larger pure text rollout, for short reward and trajectory checks.
-- [config_text_rollout_1p5b.yaml](config_text_rollout_1p5b.yaml): same rollout as longer, but with `Qwen/Qwen2.5-1.5B-Instruct`.
-- [config_text_rollout_1p5b_legal.yaml](config_text_rollout_1p5b_legal.yaml): 1.5B legal-action prompt and illegal-action penalty ablation.
-- [config_text_rollout_1p5b_rules.yaml](config_text_rollout_1p5b_rules.yaml): 1.5B explicit game-rules prompt PPO baseline.
-- [config_text_rollout_1p5b_grpo.yaml](config_text_rollout_1p5b_grpo.yaml): 1.5B GRPO-style config with `n_samples=4` and group reward normalization.
-- [config_text_rollout_1p5b_overfit_grpo.yaml](config_text_rollout_1p5b_overfit_grpo.yaml): 1.5B 4-episode overfit gate with `prompt_style=ghost_legal`.
-- [config_text_rollout_1p5b_tiny_overfit_grpo.yaml](config_text_rollout_1p5b_tiny_overfit_grpo.yaml): 1.5B tiny sparse curriculum overfit gate, no teacher hint.
-- [config_text_rollout_1p5b_teacher_overfit_grpo.yaml](config_text_rollout_1p5b_teacher_overfit_grpo.yaml): 1.5B teacher-hint overfit warm-start gate.
-- [config_text_rollout_1p5b_teacher_pure_overfit_grpo.yaml](config_text_rollout_1p5b_teacher_pure_overfit_grpo.yaml): 1.5B pure hint-only overfit gate, no execution-time teacher override.
-- [config_text_rollout_1p5b_long_debug_grpo.yaml](config_text_rollout_1p5b_long_debug_grpo.yaml): larger debug config to use only after the overfit gate passes.
-- [config_text_rollout_7b_overfit_grpo.yaml](config_text_rollout_7b_overfit_grpo.yaml): 7B default-map sparse overfit config, single-GPU attempt OOMed during optimizer state allocation.
-- [config_text_rollout_7b_overfit_grpo_8gpu.yaml](config_text_rollout_7b_overfit_grpo_8gpu.yaml): 7B default-map sparse overfit config using 8 GPUs with `vllm:d4p1t1` rollout and `fsdp:d4p1t1` actor.
-- [config_text_rollout_7b_medium_default_overfit_grpo_8gpu.yaml](config_text_rollout_7b_medium_default_overfit_grpo_8gpu.yaml): 7B medium-map sparse overfit config using `layout_name=medium_default` and `prompt_style=ghost_legal_strict`.
-- [config_text_rollout_7b_medium_default_reason_debug_8gpu.yaml](config_text_rollout_7b_medium_default_reason_debug_8gpu.yaml): 7B medium-map debug config using `prompt_style=ghost_legal_reason` and `max_new_tokens=96` so trajectories can include short reasons plus `Action: <token>`.
-- [config_text_rollout_qwen3p5_9b_json_medium_overfit_grpo_6epoch_8gpu.yaml](config_text_rollout_qwen3p5_9b_json_medium_overfit_grpo_6epoch_8gpu.yaml): Qwen3.5-9B strict no-BFS `ghost_legal_json` 6epoch overfit config using the current `2/12` no-training baseline setting.
-- [config_text_rollout_qwen3p5_9b_jsonfirst_medium_overfit_grpo_6epoch_1024_8gpu.yaml](config_text_rollout_qwen3p5_9b_jsonfirst_medium_overfit_grpo_6epoch_1024_8gpu.yaml): Qwen3.5-9B no-BFS `ghost_legal_json_first` 6epoch overfit config, using JSON-first prompt and `max_new_tokens=1024` to test whether the `256` run was bottlenecked by verbose pre-JSON output.
-- [config_text_rollout_qwen3p5_9b_jsonfirst_medium_overfit_grpo_6epoch_256_8gpu.yaml](config_text_rollout_qwen3p5_9b_jsonfirst_medium_overfit_grpo_6epoch_256_8gpu.yaml): Qwen3.5-9B no-BFS JSON-first short-output diagnostic config.
-- [config_text_rollout_qwen3p5_9b_actiononly_medium_overfit_grpo_6epoch_8tok_8gpu.yaml](config_text_rollout_qwen3p5_9b_actiononly_medium_overfit_grpo_6epoch_8tok_8gpu.yaml): Qwen3.5-9B no-BFS action-only diagnostic config with `max_new_tokens=8`.
-- [config_text_rollout_qwen3p5_9b_actiononly_guided_medium_overfit_grpo_6epoch_8192_8gpu.yaml](config_text_rollout_qwen3p5_9b_actiononly_guided_medium_overfit_grpo_6epoch_8192_8gpu.yaml): Qwen3.5-9B no-BFS action-only guided-choice overfit config with `max_new_tokens=8192`.
-- [config_text_rollout_qwen3p5_9b_actiononly_medium_overfit_grpo_6epoch_8192_parserfix_8gpu.yaml](config_text_rollout_qwen3p5_9b_actiononly_medium_overfit_grpo_6epoch_8192_parserfix_8gpu.yaml): Qwen3.5-9B no-BFS action-only parser-fix config with `max_new_tokens=8192`.
-- [level1_image_anticollapse_4update_group12_8gpu.yaml](configs/level1_image_anticollapse_4update_group12_8gpu.yaml): production original-pygame image-only gate with group size 12, exactly four updates, temperature `0.7`, LR `1.5e-6`, KL `0.01`, and separate greedy validation.
-- [level1_image_progress_4update_group12_8gpu.yaml](configs/level1_image_progress_4update_group12_8gpu.yaml): isolated nearest-pellet alpha-1 follow-up with matched sampled12 in-training validation and separately reported greedy1 validation.
-- [level1_live_state_4update_group12_8gpu.yaml](configs/level1_live_state_4update_group12_8gpu.yaml): live-state follow-up with `open_action_mask: true`; every model request is dynamically constrained to the current engine-reported open movement actions, and [areal_pacman_action_logprobs.patch](patches/areal_pacman_action_logprobs.patch) applies the identical mask and temperature to actor/reference log-probabilities. This config uses `top_p=1.0` and vLLM `processed_logprobs` so cached old and recomputed new probabilities describe the same policy.
-- [evaluate_level1.py](scripts/evaluate_level1.py): thinking-disabled greedy or sampled level-1 evaluator with independent decoding, prompt selection, parallel episodes, and collision-free trajectories.
-- [reevaluate_level1_group12.sh](scripts/reevaluate_level1_group12.sh): corrected base/all-checkpoint greedy evaluation plus 24 matched sampled final episodes.
-- [run_level1_prompt_ab.sh](scripts/run_level1_prompt_ab.sh): base/final `minimal_v1` versus static live-inspired image-only prompt A/B.
-- [summarize_level1_trajectories.py](scripts/summarize_level1_trajectories.py): collision-free chronological train/validation batch audit.
-- [evaluate_level1_run.sh](scripts/evaluate_level1_run.sh): sequential one-GPU dual validation for base plus all four updates: greedy1 at `0/1.0` and sampled12 at the training `0.7/0.95` decoding.
-- [compare_level1_run.py](scripts/compare_level1_run.py): deterministic dual-validation report builder with separate sampled-primary and greedy checkpoint labels.
-- [smoke_tms_offload.py](scripts/smoke_tms_offload.py): H100 torch-memory-saver pause/resume integration smoke.
+- [configs/archive/text/config_text_rollout.yaml](configs/archive/text/config_text_rollout.yaml): minimal pure text episode rollout smoke.
+- [configs/archive/text/config_text_rollout_longer.yaml](configs/archive/text/config_text_rollout_longer.yaml): slightly larger pure text rollout, for short reward and trajectory checks.
+- [configs/archive/text/config_text_rollout_1p5b.yaml](configs/archive/text/config_text_rollout_1p5b.yaml): same rollout as longer, but with `Qwen/Qwen2.5-1.5B-Instruct`.
+- [configs/archive/text/config_text_rollout_1p5b_legal.yaml](configs/archive/text/config_text_rollout_1p5b_legal.yaml): 1.5B legal-action prompt and illegal-action penalty ablation.
+- [configs/archive/text/config_text_rollout_1p5b_rules.yaml](configs/archive/text/config_text_rollout_1p5b_rules.yaml): 1.5B explicit game-rules prompt PPO baseline.
+- [configs/archive/text/config_text_rollout_1p5b_grpo.yaml](configs/archive/text/config_text_rollout_1p5b_grpo.yaml): 1.5B GRPO-style config with `n_samples=4` and group reward normalization.
+- [configs/archive/text/config_text_rollout_1p5b_overfit_grpo.yaml](configs/archive/text/config_text_rollout_1p5b_overfit_grpo.yaml): 1.5B 4-episode overfit gate with `prompt_style=ghost_legal`.
+- [configs/archive/text/config_text_rollout_1p5b_tiny_overfit_grpo.yaml](configs/archive/text/config_text_rollout_1p5b_tiny_overfit_grpo.yaml): 1.5B tiny sparse curriculum overfit gate, no teacher hint.
+- [configs/archive/text/config_text_rollout_1p5b_teacher_overfit_grpo.yaml](configs/archive/text/config_text_rollout_1p5b_teacher_overfit_grpo.yaml): 1.5B teacher-hint overfit warm-start gate.
+- [configs/archive/text/config_text_rollout_1p5b_teacher_pure_overfit_grpo.yaml](configs/archive/text/config_text_rollout_1p5b_teacher_pure_overfit_grpo.yaml): 1.5B pure hint-only overfit gate, no execution-time teacher override.
+- [configs/archive/text/config_text_rollout_1p5b_long_debug_grpo.yaml](configs/archive/text/config_text_rollout_1p5b_long_debug_grpo.yaml): larger debug config to use only after the overfit gate passes.
+- [configs/archive/text/config_text_rollout_7b_overfit_grpo.yaml](configs/archive/text/config_text_rollout_7b_overfit_grpo.yaml): 7B default-map sparse overfit config, single-GPU attempt OOMed during optimizer state allocation.
+- [configs/archive/text/config_text_rollout_7b_overfit_grpo_8gpu.yaml](configs/archive/text/config_text_rollout_7b_overfit_grpo_8gpu.yaml): 7B default-map sparse overfit config using 8 GPUs with `vllm:d4p1t1` rollout and `fsdp:d4p1t1` actor.
+- [configs/archive/text/config_text_rollout_7b_medium_default_overfit_grpo_8gpu.yaml](configs/archive/text/config_text_rollout_7b_medium_default_overfit_grpo_8gpu.yaml): 7B medium-map sparse overfit config using `layout_name=medium_default` and `prompt_style=ghost_legal_strict`.
+- [configs/archive/text/config_text_rollout_7b_medium_default_reason_debug_8gpu.yaml](configs/archive/text/config_text_rollout_7b_medium_default_reason_debug_8gpu.yaml): 7B medium-map debug config using `prompt_style=ghost_legal_reason` and `max_new_tokens=96` so trajectories can include short reasons plus `Action: <token>`.
+- [configs/archive/text/config_text_rollout_qwen3p5_9b_json_medium_overfit_grpo_6epoch_8gpu.yaml](configs/archive/text/config_text_rollout_qwen3p5_9b_json_medium_overfit_grpo_6epoch_8gpu.yaml): Qwen3.5-9B strict no-BFS `ghost_legal_json` 6epoch overfit config using the current `2/12` no-training baseline setting.
+- [configs/archive/text/config_text_rollout_qwen3p5_9b_jsonfirst_medium_overfit_grpo_6epoch_1024_8gpu.yaml](configs/archive/text/config_text_rollout_qwen3p5_9b_jsonfirst_medium_overfit_grpo_6epoch_1024_8gpu.yaml): Qwen3.5-9B no-BFS `ghost_legal_json_first` 6epoch overfit config, using JSON-first prompt and `max_new_tokens=1024` to test whether the `256` run was bottlenecked by verbose pre-JSON output.
+- [configs/archive/text/config_text_rollout_qwen3p5_9b_jsonfirst_medium_overfit_grpo_6epoch_256_8gpu.yaml](configs/archive/text/config_text_rollout_qwen3p5_9b_jsonfirst_medium_overfit_grpo_6epoch_256_8gpu.yaml): Qwen3.5-9B no-BFS JSON-first short-output diagnostic config.
+- [configs/archive/text/config_text_rollout_qwen3p5_9b_actiononly_medium_overfit_grpo_6epoch_8tok_8gpu.yaml](configs/archive/text/config_text_rollout_qwen3p5_9b_actiononly_medium_overfit_grpo_6epoch_8tok_8gpu.yaml): Qwen3.5-9B no-BFS action-only diagnostic config with `max_new_tokens=8`.
+- [configs/archive/text/config_text_rollout_qwen3p5_9b_actiononly_guided_medium_overfit_grpo_6epoch_8192_8gpu.yaml](configs/archive/text/config_text_rollout_qwen3p5_9b_actiononly_guided_medium_overfit_grpo_6epoch_8192_8gpu.yaml): Qwen3.5-9B no-BFS action-only guided-choice overfit config with `max_new_tokens=8192`.
+- [configs/archive/text/config_text_rollout_qwen3p5_9b_actiononly_medium_overfit_grpo_6epoch_8192_parserfix_8gpu.yaml](configs/archive/text/config_text_rollout_qwen3p5_9b_actiononly_medium_overfit_grpo_6epoch_8192_parserfix_8gpu.yaml): Qwen3.5-9B no-BFS action-only parser-fix config with `max_new_tokens=8192`.
+- [level1_image_anticollapse_4update_group12_8gpu.yaml](configs/level1/archive/level1_image_anticollapse_4update_group12_8gpu.yaml): production original-pygame image-only gate with group size 12, exactly four updates, temperature `0.7`, LR `1.5e-6`, KL `0.01`, and separate greedy validation.
+- [level1_image_progress_4update_group12_8gpu.yaml](configs/level1/archive/level1_image_progress_4update_group12_8gpu.yaml): isolated nearest-pellet alpha-1 follow-up with matched sampled12 in-training validation and separately reported greedy1 validation.
+- [level1_live_state_4update_group12_8gpu.yaml](configs/level1/archive/level1_live_state_4update_group12_8gpu.yaml): live-state follow-up with `open_action_mask: true`; every model request is dynamically constrained to the current engine-reported open movement actions, and [areal_pacman_action_logprobs.patch](patches/areal_pacman_action_logprobs.patch) applies the identical mask and temperature to actor/reference log-probabilities. This config uses `top_p=1.0` and vLLM `processed_logprobs` so cached old and recomputed new probabilities describe the same policy.
+- [evaluate_level1.py](scripts/level1/evaluate/evaluate_level1.py): thinking-disabled greedy or sampled level-1 evaluator with independent decoding, prompt selection, parallel episodes, and collision-free trajectories.
+- [reevaluate_level1_group12.sh](scripts/level1/evaluate/reevaluate_level1_group12.sh): corrected base/all-checkpoint greedy evaluation plus 24 matched sampled final episodes.
+- [run_level1_prompt_ab.sh](scripts/level1/evaluate/run_level1_prompt_ab.sh): base/final `minimal_v1` versus static live-inspired image-only prompt A/B.
+- [summarize_level1_trajectories.py](scripts/level1/report/summarize_level1_trajectories.py): collision-free chronological train/validation batch audit.
+- [evaluate_level1_run.sh](scripts/level1/evaluate/evaluate_level1_run.sh): sequential one-GPU dual validation for base plus all four updates: greedy1 at `0/1.0` and sampled12 at the training `0.7/0.95` decoding.
+- [compare_level1_run.py](scripts/level1/evaluate/compare_level1_run.py): deterministic dual-validation report builder with separate sampled-primary and greedy checkpoint labels.
+- [smoke_tms_offload.py](scripts/level1/report/smoke_tms_offload.py): H100 torch-memory-saver pause/resume integration smoke.
 - [sitecustomize.py](sitecustomize.py): optional forced-host-IP patch for node5, used with `AREAL_FORCE_HOST_IP=10.0.12.183` to avoid AReaL advertising `169.254.100.1`.
 - [example_trajectory_1p5b.md](../trajectories/example_trajectory_1p5b.md): readable first trajectory from the 1.5B H100 rollout.
 - [failed_trajectory_7b_medium_default.md](../trajectories/failed_trajectory_7b_medium_default.md): readable failed 7B medium-map sparse trajectory, showing the `down/up` loop.
@@ -224,9 +231,9 @@ recipe. The design document records its future rename to `SyntheticMazeEnv`.
 ```bash
 cd /home/xinglu/life/vla-research/areal-pacman
 python3 -m pytest -q
-python3 -m areal_pacman.evaluate --agent greedy --episodes 20
-python3 -m areal_pacman.dataset --output run_artifacts/pacman_prompts.jsonl --episodes 5
-python3 -m areal_pacman.dataset --mode episode --output run_artifacts/pacman_episode_specs.jsonl --episodes 5
+python3 -m areal_pacman.synthetic.evaluate --agent greedy --episodes 20
+python3 -m areal_pacman.synthetic.dataset --output run_artifacts/pacman_prompts.jsonl --episodes 5
+python3 -m areal_pacman.synthetic.dataset --mode episode --output run_artifacts/pacman_episode_specs.jsonl --episodes 5
 ```
 
 ## Trajectory Logging
@@ -234,7 +241,7 @@ python3 -m areal_pacman.dataset --mode episode --output run_artifacts/pacman_epi
 Set `PACMAN_TRAJECTORY_DIR` to save one JSON file per rollout episode:
 
 ```bash
-PACMAN_TRAJECTORY_DIR=run_artifacts/trajectories python3 train_areal.py --config config_text_rollout.yaml
+PACMAN_TRAJECTORY_DIR=run_artifacts/trajectories python3 train_areal.py --config configs/archive/text/config_text_rollout.yaml
 ```
 
 Production level-1 filenames include both the dataset row ID and a random
@@ -257,20 +264,20 @@ Summarize saved trajectories:
 ```bash
 python3 -m areal_pacman.analyze_trajectories run_artifacts/trajectories
 python3 -m areal_pacman.analyze_trajectories run_artifacts/trajectories --show-first --steps 8
-python3 -m areal_pacman.dataset --mode episode --output run_artifacts/pacman_episode_legal_specs.jsonl --episodes 8 --max-steps 30 --prompt-style legal --illegal-action-penalty -4
+python3 -m areal_pacman.synthetic.dataset --mode episode --output run_artifacts/pacman_episode_legal_specs.jsonl --episodes 8 --max-steps 30 --prompt-style legal --illegal-action-penalty -4
 ```
 
 ## Multi-Maze V1
 
 `multi_maze_v1` contains `64` train, `16` validation, and `32` held-out test layouts. All `112` full-layout hashes and all `112` wall-topology hashes are unique across splits. Every maze has exactly five pellets and a successful oracle replay under the real ghost dynamics, legal non-stay decoding, and no-immediate-backtracking rule within `30` steps.
 
-Completed result: the `24/24`-step GRPO run raised train macro pass rate from `3.9%` to `5.5%`, but validation fell from `12.5%` to `4.7%` and held-out test fell from `5.1%` to `3.1%`. The pipeline is operational, but this short sparse-GRPO recipe did not generalize. See the [detailed report](../reports/multi_maze_vlm_rl_report_2026-07-15.md) and [comparison JSON](run_artifacts/multi_maze_v1_20260715/comparison.json).
+Completed result: the `24/24`-step GRPO run raised train macro pass rate from `3.9%` to `5.5%`, but validation fell from `12.5%` to `4.7%` and held-out test fell from `5.1%` to `3.1%`. The pipeline is operational, but this short sparse-GRPO recipe did not generalize. See the [detailed report](../reports/multi_maze_vlm_rl_report_2026-07-15.md); the ignored local comparison artifact is `run_artifacts/multi_maze_v1_20260715/comparison.json`.
 
-The alpha-4 safe-progress ablation also completed `24/24` updates. Validation selected epoch 0 from macro rates `12.91% / 10.07% / 10.63%`; selected train/validation/test rates were `5.08% / 12.91% / 0.00%` versus frozen baseline `3.91% / 12.50% / 5.08%`. Reward audit covered `18,032` training steps with zero alpha/formula mismatch. Denser safe progress alone did not improve held-out topology generalization. See the [safe-progress comparison](run_artifacts/multi_maze_v1_safeprogress_alpha4_20260715/comparison.json).
+The alpha-4 safe-progress ablation also completed `24/24` updates. Validation selected epoch 0 from macro rates `12.91% / 10.07% / 10.63%`; selected train/validation/test rates were `5.08% / 12.91% / 0.00%` versus frozen baseline `3.91% / 12.50% / 5.08%`. Reward audit covered `18,032` training steps with zero alpha/formula mismatch. Denser safe progress alone did not improve held-out topology generalization. The ignored local comparison artifact is `run_artifacts/multi_maze_v1_safeprogress_alpha4_20260715/comparison.json`.
 
 ```bash
 cd /home/xinglu/life/vla-research/areal-pacman
-python scripts/build_multi_maze_suite.py
+python scripts/synthetic/build_multi_maze_suite.py
 pytest -q tests/test_env.py tests/test_dataset_workflow.py
 
 for split in train validation test; do
@@ -286,15 +293,15 @@ for split in train validation test; do
 done
 ```
 
-Training uses [multi-maze GRPO config](config_vision_rollout_qwen3p5_9b_imageonly_multimaze_v1_grpo_3epoch_4sample_8gpu.yaml): `64` train mazes, `n_samples=4`, `3` epochs, `batch_size=8`, and `24` optimizer steps. Frozen base/post-RL evaluation uses [multi-maze no-train config](config_vision_rollout_qwen3p5_9b_imageonly_multimaze_v1_notrain_4sample_8gpu.yaml), with `lr=0`, `eps_clip=0`, and no actor update.
+Training uses [multi-maze GRPO config](configs/archive/vision/config_vision_rollout_qwen3p5_9b_imageonly_multimaze_v1_grpo_3epoch_4sample_8gpu.yaml): `64` train mazes, `n_samples=4`, `3` epochs, `batch_size=8`, and `24` optimizer steps. Frozen base/post-RL evaluation uses [multi-maze no-train config](configs/archive/vision/config_vision_rollout_qwen3p5_9b_imageonly_multimaze_v1_notrain_4sample_8gpu.yaml), with `lr=0`, `eps_clip=0`, and no actor update.
 
-The [safe-progress config](config_vision_rollout_qwen3p5_9b_imageonly_multimaze_v1_safeprogress_grpo_3epoch_4sample_8gpu.yaml) keeps those settings fixed and adds `reward_mode=safe_progress`, `safe_progress_alpha=4.0`.
+The [safe-progress config](configs/archive/vision/config_vision_rollout_qwen3p5_9b_imageonly_multimaze_v1_safeprogress_grpo_3epoch_4sample_8gpu.yaml) keeps those settings fixed and adds `reward_mode=safe_progress`, `safe_progress_alpha=4.0`.
 
 On an idle node5, run the complete guarded pipeline:
 
 ```bash
 cd /home/z00819216/vla-research/areal-pacman
-nohup bash scripts/remote_supervise_multimaze_v1.sh \
+nohup bash scripts/synthetic/remote_supervise_multimaze_v1.sh \
   > run_artifacts/multi_maze_v1_20260715_supervisor.log 2>&1 &
 ```
 
@@ -303,7 +310,7 @@ The supervisor aborts if any GPU compute process exists. It never stops an exist
 If node5 is busy with a known non-Dummy workload, use the detached waiter. It requires two consecutive empty-GPU checks one minute apart, uses a lock to prevent duplicate launches, and never kills a process:
 
 ```bash
-nohup bash scripts/remote_wait_for_idle_multimaze_v1.sh \
+nohup bash scripts/synthetic/remote_wait_for_idle_multimaze_v1.sh \
   > run_artifacts/multi_maze_v1_20260715_waiter.log 2>&1 &
 ```
 
@@ -312,29 +319,29 @@ nohup bash scripts/remote_wait_for_idle_multimaze_v1.sh \
 ```bash
 cd /home/z00819216/vla-research/areal-pacman
 /home/z00819216/miniconda/envs/areal-vla/bin/python -m areal_pacman.prepare_hf_dataset --episodes 5
-/home/z00819216/miniconda/envs/areal-vla/bin/python train_areal.py --config config_pacman.yaml --dry-run
+/home/z00819216/miniconda/envs/areal-vla/bin/python train_areal.py --config configs/archive/text/config_pacman.yaml --dry-run
 /home/z00819216/miniconda/envs/areal-vla/bin/python -m areal_pacman.prepare_hf_dataset --mode episode --jsonl run_artifacts/pacman_episode_specs.jsonl --hf-dir run_artifacts/pacman_episode_hf_dataset --episodes 5
-/home/z00819216/miniconda/envs/areal-vla/bin/python train_areal.py --config config_text_rollout.yaml --dry-run
+/home/z00819216/miniconda/envs/areal-vla/bin/python train_areal.py --config configs/archive/text/config_text_rollout.yaml --dry-run
 /home/z00819216/miniconda/envs/areal-vla/bin/python -m areal_pacman.prepare_hf_dataset --mode episode --jsonl run_artifacts/pacman_episode_longer_specs.jsonl --hf-dir run_artifacts/pacman_episode_longer_hf_dataset --episodes 8 --max-steps 30
-/home/z00819216/miniconda/envs/areal-vla/bin/python train_areal.py --config config_text_rollout_longer.yaml --dry-run
-/home/z00819216/miniconda/envs/areal-vla/bin/python train_areal.py --config config_text_rollout_1p5b.yaml --dry-run
+/home/z00819216/miniconda/envs/areal-vla/bin/python train_areal.py --config configs/archive/text/config_text_rollout_longer.yaml --dry-run
+/home/z00819216/miniconda/envs/areal-vla/bin/python train_areal.py --config configs/archive/text/config_text_rollout_1p5b.yaml --dry-run
 /home/z00819216/miniconda/envs/areal-vla/bin/python -m areal_pacman.prepare_hf_dataset --mode episode --jsonl run_artifacts/pacman_episode_legal_specs.jsonl --hf-dir run_artifacts/pacman_episode_legal_hf_dataset --episodes 8 --max-steps 30 --prompt-style legal --illegal-action-penalty -4
-/home/z00819216/miniconda/envs/areal-vla/bin/python train_areal.py --config config_text_rollout_1p5b_legal.yaml --dry-run
+/home/z00819216/miniconda/envs/areal-vla/bin/python train_areal.py --config configs/archive/text/config_text_rollout_1p5b_legal.yaml --dry-run
 /home/z00819216/miniconda/envs/areal-vla/bin/python -m areal_pacman.prepare_hf_dataset --mode episode --jsonl run_artifacts/pacman_episode_rules_specs.jsonl --hf-dir run_artifacts/pacman_episode_rules_hf_dataset --episodes 8 --max-steps 30 --prompt-style default --illegal-action-penalty 0
-/home/z00819216/miniconda/envs/areal-vla/bin/python train_areal.py --config config_text_rollout_1p5b_rules.yaml --dry-run
-/home/z00819216/miniconda/envs/areal-vla/bin/python train_areal.py --config config_text_rollout_1p5b_grpo.yaml --dry-run
+/home/z00819216/miniconda/envs/areal-vla/bin/python train_areal.py --config configs/archive/text/config_text_rollout_1p5b_rules.yaml --dry-run
+/home/z00819216/miniconda/envs/areal-vla/bin/python train_areal.py --config configs/archive/text/config_text_rollout_1p5b_grpo.yaml --dry-run
 /home/z00819216/miniconda/envs/areal-vla/bin/python -m areal_pacman.prepare_hf_dataset --mode episode --jsonl run_artifacts/pacman_episode_overfit_specs.jsonl --hf-dir run_artifacts/pacman_episode_overfit_hf_dataset --episodes 4 --max-steps 30 --prompt-style ghost_legal --illegal-action-penalty -4
-/home/z00819216/miniconda/envs/areal-vla/bin/python train_areal.py --config config_text_rollout_1p5b_overfit_grpo.yaml --dry-run
+/home/z00819216/miniconda/envs/areal-vla/bin/python train_areal.py --config configs/archive/text/config_text_rollout_1p5b_overfit_grpo.yaml --dry-run
 /home/z00819216/miniconda/envs/areal-vla/bin/python -m areal_pacman.prepare_hf_dataset --mode episode --jsonl run_artifacts/pacman_episode_tiny_overfit_specs.jsonl --hf-dir run_artifacts/pacman_episode_tiny_overfit_hf_dataset --episodes 4 --max-steps 4 --prompt-style ghost_legal --illegal-action-penalty -4 --layout-name tiny_corridor
-/home/z00819216/miniconda/envs/areal-vla/bin/python train_areal.py --config config_text_rollout_1p5b_tiny_overfit_grpo.yaml --dry-run
+/home/z00819216/miniconda/envs/areal-vla/bin/python train_areal.py --config configs/archive/text/config_text_rollout_1p5b_tiny_overfit_grpo.yaml --dry-run
 /home/z00819216/miniconda/envs/areal-vla/bin/python -m areal_pacman.prepare_hf_dataset --mode episode --jsonl run_artifacts/pacman_episode_teacher_overfit_specs.jsonl --hf-dir run_artifacts/pacman_episode_teacher_overfit_hf_dataset --episodes 4 --max-steps 30 --prompt-style teacher_hint --illegal-action-penalty -4
-/home/z00819216/miniconda/envs/areal-vla/bin/python train_areal.py --config config_text_rollout_1p5b_teacher_overfit_grpo.yaml --dry-run
+/home/z00819216/miniconda/envs/areal-vla/bin/python train_areal.py --config configs/archive/text/config_text_rollout_1p5b_teacher_overfit_grpo.yaml --dry-run
 /home/z00819216/miniconda/envs/areal-vla/bin/python -m areal_pacman.prepare_hf_dataset --mode episode --jsonl run_artifacts/pacman_episode_teacher_pure_overfit_specs.jsonl --hf-dir run_artifacts/pacman_episode_teacher_pure_overfit_hf_dataset --episodes 4 --max-steps 30 --prompt-style teacher_hint_pure --illegal-action-penalty -4
-/home/z00819216/miniconda/envs/areal-vla/bin/python train_areal.py --config config_text_rollout_1p5b_teacher_pure_overfit_grpo.yaml --dry-run
+/home/z00819216/miniconda/envs/areal-vla/bin/python train_areal.py --config configs/archive/text/config_text_rollout_1p5b_teacher_pure_overfit_grpo.yaml --dry-run
 /home/z00819216/miniconda/envs/areal-vla/bin/python -m areal_pacman.prepare_hf_dataset --mode episode --jsonl run_artifacts/pacman_episode_medium_default_specs.jsonl --hf-dir run_artifacts/pacman_episode_medium_default_hf_dataset --episodes 4 --max-steps 20 --prompt-style ghost_legal_strict --illegal-action-penalty -4 --layout-name medium_default
-PYTHONPATH=/home/z00819216/vla-research/areal-pacman:$PYTHONPATH AREAL_FORCE_HOST_IP=10.0.12.183 /home/z00819216/miniconda/envs/areal-vla/bin/python train_areal.py --config config_text_rollout_7b_medium_default_overfit_grpo_8gpu.yaml --dry-run
+PYTHONPATH=/home/z00819216/vla-research/areal-pacman:$PYTHONPATH AREAL_FORCE_HOST_IP=10.0.12.183 /home/z00819216/miniconda/envs/areal-vla/bin/python train_areal.py --config configs/archive/text/config_text_rollout_7b_medium_default_overfit_grpo_8gpu.yaml --dry-run
 /home/z00819216/miniconda/envs/areal-vla/bin/python -m areal_pacman.prepare_hf_dataset --mode episode --jsonl run_artifacts/pacman_episode_medium_default_reason_specs.jsonl --hf-dir run_artifacts/pacman_episode_medium_default_reason_hf_dataset --episodes 4 --max-steps 20 --prompt-style ghost_legal_reason --illegal-action-penalty -4 --layout-name medium_default
-PYTHONPATH=/home/z00819216/vla-research/areal-pacman:$PYTHONPATH AREAL_FORCE_HOST_IP=10.0.12.183 /home/z00819216/miniconda/envs/areal-vla/bin/python train_areal.py --config config_text_rollout_7b_medium_default_reason_debug_8gpu.yaml --dry-run
+PYTHONPATH=/home/z00819216/vla-research/areal-pacman:$PYTHONPATH AREAL_FORCE_HOST_IP=10.0.12.183 /home/z00819216/miniconda/envs/areal-vla/bin/python train_areal.py --config configs/archive/text/config_text_rollout_7b_medium_default_reason_debug_8gpu.yaml --dry-run
 ```
 
 ## AReaL 方向
@@ -343,7 +350,7 @@ PYTHONPATH=/home/z00819216/vla-research/areal-pacman:$PYTHONPATH AREAL_FORCE_HOS
 
 ## Prompt 方向
 
-当前 [dataset.py](areal_pacman/dataset.py) 的 system prompt 已经写明 text PacMan 规则: `#` wall, `P` PacMan, `G` ghost, `.` pellet, wall move penalty, pellet objective, ghost terminal, win condition, and one-token action output. 这是为了以后迁移到更复杂 true PacMan 时, prompt contract 可以逐步扩展, 而不是只靠 observation 里的 `Legal actions`.
+当前 [dataset.py](areal_pacman/synthetic/dataset.py) 的 system prompt 已经写明 text PacMan 规则: `#` wall, `P` PacMan, `G` ghost, `.` pellet, wall move penalty, pellet objective, ghost terminal, win condition, and one-token action output. 这是为了以后迁移到更复杂 true PacMan 时, prompt contract 可以逐步扩展, 而不是只靠 observation 里的 `Legal actions`.
 
 `prompt_style=ghost_legal` 会在 observation 里额外写出 `Unsafe immediate ghost actions`, 用来测试模型能不能同时遵守 legal action 和避开下一步 ghost.
 
@@ -365,35 +372,35 @@ PYTHONPATH=/home/z00819216/vla-research/areal-pacman:$PYTHONPATH AREAL_FORCE_HOS
 
 ## 当前两个 workflow
 
-- [config_pacman.yaml](config_pacman.yaml): 单步 smoke, 使用 baseline 生成的 `answer` 给 `0/1` reward.
-- [config_text_rollout.yaml](config_text_rollout.yaml): pure text episode rollout, 不使用 ground truth answer, reward 来自 [PacmanEnv.step](areal_pacman/env.py).
-- [config_text_rollout_longer.yaml](config_text_rollout_longer.yaml): 比 smoke 稍大的 text rollout, 用于检查多 episode reward 和 trajectory 分布.
-- [config_text_rollout_1p5b.yaml](config_text_rollout_1p5b.yaml): 1.5B model-size ablation, 用同一套 episode 和 analyzer 对比 0.5B.
-- [config_text_rollout_1p5b_legal.yaml](config_text_rollout_1p5b_legal.yaml): 1.5B legal-action ablation, 用 `prompt_style=legal` 和 `illegal_action_penalty=-4`.
-- [config_text_rollout_1p5b_rules.yaml](config_text_rollout_1p5b_rules.yaml): 1.5B rules-prompt PPO baseline, 用 expanded system prompt 但不加 illegal-action penalty.
-- [config_text_rollout_1p5b_grpo.yaml](config_text_rollout_1p5b_grpo.yaml): 1.5B GRPO-style ablation, same rules dataset, `n_samples=4`, group reward normalization.
-- [config_text_rollout_1p5b_overfit_grpo.yaml](config_text_rollout_1p5b_overfit_grpo.yaml): 1.5B overfit gate, 4 fixed episodes, `prompt_style=ghost_legal`, `illegal_action_penalty=-4`, `total_train_epochs=8`.
-- [config_text_rollout_1p5b_tiny_overfit_grpo.yaml](config_text_rollout_1p5b_tiny_overfit_grpo.yaml): 1.5B tiny sparse overfit gate, `layout_name=tiny_corridor`, `prompt_style=ghost_legal`, no teacher hint.
-- [config_text_rollout_1p5b_teacher_overfit_grpo.yaml](config_text_rollout_1p5b_teacher_overfit_grpo.yaml): 1.5B teacher-hint overfit gate, 4 fixed episodes, `prompt_style=teacher_hint`, `illegal_action_penalty=-4`.
-- [config_text_rollout_1p5b_teacher_pure_overfit_grpo.yaml](config_text_rollout_1p5b_teacher_pure_overfit_grpo.yaml): 1.5B pure hint-only overfit gate, 4 fixed episodes, `prompt_style=teacher_hint_pure`, `greedy=false`, `temperature=0.1`, no execution-time teacher override.
-- [config_text_rollout_1p5b_long_debug_grpo.yaml](config_text_rollout_1p5b_long_debug_grpo.yaml): larger debug config, only after overfit succeeds.
-- [config_text_rollout_7b_overfit_grpo_8gpu.yaml](config_text_rollout_7b_overfit_grpo_8gpu.yaml): 7B default-map sparse overfit on 8 GPUs, no teacher hint.
-- [config_text_rollout_7b_medium_default_overfit_grpo_8gpu.yaml](config_text_rollout_7b_medium_default_overfit_grpo_8gpu.yaml): 7B medium-map sparse overfit on 8 GPUs, no teacher hint.
+- [configs/archive/text/config_pacman.yaml](configs/archive/text/config_pacman.yaml): 单步 smoke, 使用 baseline 生成的 `answer` 给 `0/1` reward.
+- [configs/archive/text/config_text_rollout.yaml](configs/archive/text/config_text_rollout.yaml): pure text episode rollout, 不使用 ground truth answer, reward 来自 [PacmanEnv.step](areal_pacman/synthetic/env.py).
+- [configs/archive/text/config_text_rollout_longer.yaml](configs/archive/text/config_text_rollout_longer.yaml): 比 smoke 稍大的 text rollout, 用于检查多 episode reward 和 trajectory 分布.
+- [configs/archive/text/config_text_rollout_1p5b.yaml](configs/archive/text/config_text_rollout_1p5b.yaml): 1.5B model-size ablation, 用同一套 episode 和 analyzer 对比 0.5B.
+- [configs/archive/text/config_text_rollout_1p5b_legal.yaml](configs/archive/text/config_text_rollout_1p5b_legal.yaml): 1.5B legal-action ablation, 用 `prompt_style=legal` 和 `illegal_action_penalty=-4`.
+- [configs/archive/text/config_text_rollout_1p5b_rules.yaml](configs/archive/text/config_text_rollout_1p5b_rules.yaml): 1.5B rules-prompt PPO baseline, 用 expanded system prompt 但不加 illegal-action penalty.
+- [configs/archive/text/config_text_rollout_1p5b_grpo.yaml](configs/archive/text/config_text_rollout_1p5b_grpo.yaml): 1.5B GRPO-style ablation, same rules dataset, `n_samples=4`, group reward normalization.
+- [configs/archive/text/config_text_rollout_1p5b_overfit_grpo.yaml](configs/archive/text/config_text_rollout_1p5b_overfit_grpo.yaml): 1.5B overfit gate, 4 fixed episodes, `prompt_style=ghost_legal`, `illegal_action_penalty=-4`, `total_train_epochs=8`.
+- [configs/archive/text/config_text_rollout_1p5b_tiny_overfit_grpo.yaml](configs/archive/text/config_text_rollout_1p5b_tiny_overfit_grpo.yaml): 1.5B tiny sparse overfit gate, `layout_name=tiny_corridor`, `prompt_style=ghost_legal`, no teacher hint.
+- [configs/archive/text/config_text_rollout_1p5b_teacher_overfit_grpo.yaml](configs/archive/text/config_text_rollout_1p5b_teacher_overfit_grpo.yaml): 1.5B teacher-hint overfit gate, 4 fixed episodes, `prompt_style=teacher_hint`, `illegal_action_penalty=-4`.
+- [configs/archive/text/config_text_rollout_1p5b_teacher_pure_overfit_grpo.yaml](configs/archive/text/config_text_rollout_1p5b_teacher_pure_overfit_grpo.yaml): 1.5B pure hint-only overfit gate, 4 fixed episodes, `prompt_style=teacher_hint_pure`, `greedy=false`, `temperature=0.1`, no execution-time teacher override.
+- [configs/archive/text/config_text_rollout_1p5b_long_debug_grpo.yaml](configs/archive/text/config_text_rollout_1p5b_long_debug_grpo.yaml): larger debug config, only after overfit succeeds.
+- [configs/archive/text/config_text_rollout_7b_overfit_grpo_8gpu.yaml](configs/archive/text/config_text_rollout_7b_overfit_grpo_8gpu.yaml): 7B default-map sparse overfit on 8 GPUs, no teacher hint.
+- [configs/archive/text/config_text_rollout_7b_medium_default_overfit_grpo_8gpu.yaml](configs/archive/text/config_text_rollout_7b_medium_default_overfit_grpo_8gpu.yaml): 7B medium-map sparse overfit on 8 GPUs, no teacher hint.
 
 ## 当前 H100 对比
 
 | Config | Episodes | Wins | Avg reward | Illegal actions | Terminal reasons |
 | --- | ---: | ---: | ---: | ---: | --- |
-| [config_text_rollout_longer.yaml](config_text_rollout_longer.yaml) | 20 | 0 | -20.00 | n/a | `max_steps=20` |
-| [config_text_rollout_1p5b.yaml](config_text_rollout_1p5b.yaml) | 20 | 0 | 3.65 | n/a | `caught=3`, `max_steps=17` |
-| [config_text_rollout_1p5b_legal.yaml](config_text_rollout_1p5b_legal.yaml) | 20 | 0 | -10.90 | 1 | `caught=4`, `max_steps=16` |
-| [config_text_rollout_1p5b_rules.yaml](config_text_rollout_1p5b_rules.yaml) | 20 | 0 | 5.20 | 350 | `caught=3`, `max_steps=17` |
-| [config_text_rollout_1p5b_grpo.yaml](config_text_rollout_1p5b_grpo.yaml) | 64 | 0 | 0.30 | 148 | `caught=12`, `max_steps=52` |
-| [config_text_rollout_1p5b_overfit_grpo.yaml](config_text_rollout_1p5b_overfit_grpo.yaml) | 264 | 0 | -56.51 | 3879 | `caught=6`, `max_steps=258` |
-| [config_text_rollout_1p5b_tiny_overfit_grpo.yaml](config_text_rollout_1p5b_tiny_overfit_grpo.yaml) tiny sparse | 12 | 12 | 118.00 | 0 | `all_pellets=12` |
-| [config_text_rollout_1p5b_teacher_overfit_grpo.yaml](config_text_rollout_1p5b_teacher_overfit_grpo.yaml) teacher-enforced | 40 | 40 | 264.00 | 0 | `all_pellets=40` |
-| [config_text_rollout_1p5b_teacher_pure_overfit_grpo.yaml](config_text_rollout_1p5b_teacher_pure_overfit_grpo.yaml) pure hint-only | 12 | 12 | 264.00 | 0 | `all_pellets=12` |
-| [config_text_rollout_7b_overfit_grpo_8gpu.yaml](config_text_rollout_7b_overfit_grpo_8gpu.yaml) default sparse 8GPU | 256 | 0 | -78.93 | 3569 | `max_steps=256` |
-| [config_text_rollout_7b_medium_default_overfit_grpo_8gpu.yaml](config_text_rollout_7b_medium_default_overfit_grpo_8gpu.yaml) medium sparse 8GPU | 207 | 0 | -78.91 | 2541 | `max_steps=207` |
+| [configs/archive/text/config_text_rollout_longer.yaml](configs/archive/text/config_text_rollout_longer.yaml) | 20 | 0 | -20.00 | n/a | `max_steps=20` |
+| [configs/archive/text/config_text_rollout_1p5b.yaml](configs/archive/text/config_text_rollout_1p5b.yaml) | 20 | 0 | 3.65 | n/a | `caught=3`, `max_steps=17` |
+| [configs/archive/text/config_text_rollout_1p5b_legal.yaml](configs/archive/text/config_text_rollout_1p5b_legal.yaml) | 20 | 0 | -10.90 | 1 | `caught=4`, `max_steps=16` |
+| [configs/archive/text/config_text_rollout_1p5b_rules.yaml](configs/archive/text/config_text_rollout_1p5b_rules.yaml) | 20 | 0 | 5.20 | 350 | `caught=3`, `max_steps=17` |
+| [configs/archive/text/config_text_rollout_1p5b_grpo.yaml](configs/archive/text/config_text_rollout_1p5b_grpo.yaml) | 64 | 0 | 0.30 | 148 | `caught=12`, `max_steps=52` |
+| [configs/archive/text/config_text_rollout_1p5b_overfit_grpo.yaml](configs/archive/text/config_text_rollout_1p5b_overfit_grpo.yaml) | 264 | 0 | -56.51 | 3879 | `caught=6`, `max_steps=258` |
+| [configs/archive/text/config_text_rollout_1p5b_tiny_overfit_grpo.yaml](configs/archive/text/config_text_rollout_1p5b_tiny_overfit_grpo.yaml) tiny sparse | 12 | 12 | 118.00 | 0 | `all_pellets=12` |
+| [configs/archive/text/config_text_rollout_1p5b_teacher_overfit_grpo.yaml](configs/archive/text/config_text_rollout_1p5b_teacher_overfit_grpo.yaml) teacher-enforced | 40 | 40 | 264.00 | 0 | `all_pellets=40` |
+| [configs/archive/text/config_text_rollout_1p5b_teacher_pure_overfit_grpo.yaml](configs/archive/text/config_text_rollout_1p5b_teacher_pure_overfit_grpo.yaml) pure hint-only | 12 | 12 | 264.00 | 0 | `all_pellets=12` |
+| [configs/archive/text/config_text_rollout_7b_overfit_grpo_8gpu.yaml](configs/archive/text/config_text_rollout_7b_overfit_grpo_8gpu.yaml) default sparse 8GPU | 256 | 0 | -78.93 | 3569 | `max_steps=256` |
+| [configs/archive/text/config_text_rollout_7b_medium_default_overfit_grpo_8gpu.yaml](configs/archive/text/config_text_rollout_7b_medium_default_overfit_grpo_8gpu.yaml) medium sparse 8GPU | 207 | 0 | -78.91 | 2541 | `max_steps=207` |
 
 Interpretation: the expanded game-rules prompt helps reward, but still allows many wall moves. The GRPO-style config reduces illegal actions relative to rules PPO, but creates many `stay` actions, so reward drops. The default-map pure sparse-reward overfit gate failed even on 4 fixed episodes. 7B plus 8 GPUs fixes the system-capacity/OOM problem, but not the learning problem. The medium-map run shows a different failure mode: strict legal prompt reduces some wall-repeat behavior but learns a `down/up` loop without eating pellets. The tiny sparse gate passed with `has_teacher_hint=False`, `has_teacher_action=False`, and `all_exact=True`, proving a no-teacher curriculum path works only at the smallest scale. The pure hint-only gate also passed on the default map, but it is still a warm-start/action-prior gate, not yet sparse-reward learning from scratch.

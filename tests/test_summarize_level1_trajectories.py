@@ -11,6 +11,8 @@ import pytest
 SCRIPT = (
     Path(__file__).resolve().parents[1]
     / "scripts"
+    / "level1"
+    / "report"
     / "summarize_level1_trajectories.py"
 )
 SPEC = importlib.util.spec_from_file_location(
