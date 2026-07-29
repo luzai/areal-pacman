@@ -1,0 +1,17 @@
+diff --git a/src/transformers/models/qwen3_5/modeling_qwen3_5.py b/src/transformers/models/qwen3_5/modeling_qwen3_5.py
+--- a/src/transformers/models/qwen3_5/modeling_qwen3_5.py
++++ b/src/transformers/models/qwen3_5/modeling_qwen3_5.py
+@@ -1086,7 +1086,12 @@ class Qwen3_5VisionModel(Qwen3_5PreTrainedModel):
+         grid_ts = [row[0] for row in grid_thw_list]
+         grid_hs = [row[1] for row in grid_thw_list]
+         grid_ws = [row[2] for row in grid_thw_list]
+-        device = self.pos_embed.weight.device
++        # Under FSDP CPU parameter offload, the embedding weight can still be
++        # on CPU here and be materialized on CUDA only by the embedding's own
++        # pre-forward hook. The multimodal input is already placed on the
++        # active compute device, so use it for interpolation indices/weights.
++        # Otherwise CPU indices race with the CUDA weight in F.embedding.
++        device = grid_thw.device
+ 
+         idx_list = [[] for _ in range(4)]
+         weight_list = [[] for _ in range(4)]
