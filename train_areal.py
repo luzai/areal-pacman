@@ -87,7 +87,10 @@ def _production_dry_run(
     if epochs < 2:
         raise ValueError("production level-1 training must run at least two epochs")
     workflow_cls = _load_workflow(workflow_path)
-    if workflow_cls.__module__ != "areal_pacman.workflow":
+    if workflow_cls.__module__ not in {
+        "areal_pacman.workflow",
+        "areal_pacman.level1.workflow",
+    }:
         raise ValueError("production config must use areal_pacman.workflow")
 
     dataset_matches = re.findall(r"(?m)^\s+path:\s*([^#\r\n]+)", text)
@@ -97,7 +100,7 @@ def _production_dry_run(
     for raw_path in dataset_matches[-2:]:
         dataset_path = Path(raw_path.strip().strip('"\''))
         if not dataset_path.is_absolute():
-            dataset_path = (config_path.parent.parent / dataset_path).resolve()
+            dataset_path = (Path(__file__).resolve().parent / dataset_path).resolve()
         if dataset_path.suffix == ".jsonl":
             jsonl = dataset_path
         elif dataset_path.name.endswith("_hf"):
