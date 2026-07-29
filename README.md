@@ -69,6 +69,41 @@ dataset, checks the configured GPU topology, and writes checkpoints,
 trajectories, and logs beneath `ARTIFACT_ROOT`. Set `ARTIFACT_ROOT` explicitly
 for durable or shared storage.
 
+### Reproduce the 200-update Level-1 run on H100
+
+Before launching, verify that all eight GPUs on the selected node are free.
+The following detached command creates a unique UTC-stamped trial and artifact
+directory, so it does not overwrite the original run:
+
+```bash
+export AREAL_PACMAN_ROOT=/mnt/data/z00819216/maapacman-stack/areal-pacman-r13-20260728T221500Z
+export MODEL_PATH=/mnt/data/z00819216/models/Qwen3.5-9B
+
+cd "${AREAL_PACMAN_ROOT}"
+
+RUN_TS="$(date -u +%Y%m%dT%H%M%SZ)"
+TRIAL_NAME="overfit-openmask200-step32-r14-repro-${RUN_TS}"
+ARTIFACT_ROOT="/mnt/data/z00819216/run_artifacts/maapacman-rl/${TRIAL_NAME}"
+
+mkdir -p "${ARTIFACT_ROOT}"
+
+nohup /mnt/data/z00819216/conda_env/maapacman-rl/bin/python train_areal.py \
+  --config "${AREAL_PACMAN_ROOT}/configs/level1/train/level1_live_state_step32_200update_group12_8gpu.yaml" \
+  artifact_root="${ARTIFACT_ROOT}" \
+  cluster.fileroot="${ARTIFACT_ROOT}/training" \
+  cluster.name_resolve.nfs_record_root="${ARTIFACT_ROOT}/name_resolve" \
+  actor.path="${MODEL_PATH}" \
+  experiment_name=maapacman-level1 \
+  trial_name="${TRIAL_NAME}" \
+  > "${ARTIFACT_ROOT}/launcher.log" 2>&1 < /dev/null &
+
+PID=$!
+echo "PID=${PID}"
+echo "TRIAL_NAME=${TRIAL_NAME}"
+echo "ARTIFACT_ROOT=${ARTIFACT_ROOT}"
+echo "LOG=${ARTIFACT_ROOT}/launcher.log"
+```
+
 ## Environment and code layout
 
 ```text
