@@ -24,6 +24,7 @@ from maapacman.env import (
 from areal_pacman.actions import ActionParseError, parse_action
 from areal_pacman.level1_dataset import (
     ENV_BACKEND,
+    LONG_HORIZON_MAX_STEPS,
     PRODUCTION_MAX_STEPS,
     SHORT_HORIZON_MAX_STEPS,
     environment_metadata,
@@ -48,6 +49,9 @@ from areal_pacman.prompts import (
 )
 from areal_pacman.rewards import RewardConfig, audit_reward, shape_reward
 from areal_pacman.trajectories import audit_trajectory, summarize_episodes
+from areal_pacman.level1.workflow import (
+    _nearest_reachable_distance_with_diagnostics,
+)
 from areal_pacman.workflow import (
     ModelTurn,
     PacmanImageOnlyWorkflow,
@@ -125,6 +129,15 @@ class TwoStepEnv(PygamePacmanEnv):
 
 
 class DatasetContractTests(unittest.TestCase):
+    def test_long_horizon_256_step_rows_are_supported(self) -> None:
+        row = make_episode_row(
+            1,
+            split="train",
+            max_steps=LONG_HORIZON_MAX_STEPS,
+        )
+        validate_episode_row(row)
+        self.assertEqual(row["env"]["max_steps"], 256)
+
     def test_balanced_corridor_splits_are_disjoint_and_defeat_constant_actions(
         self,
     ) -> None:
@@ -349,6 +362,42 @@ class PromptAndActionTests(unittest.TestCase):
 
 
 class RewardAndTrajectoryTests(unittest.TestCase):
+    def test_unreachable_bfs_logs_debug_state_and_fails(self) -> None:
+        level = load_bundled_level(1)
+        start = Position(12, 10)
+        targets = {Position(16, 9), Position(16, 11)}
+        with (
+            patch(
+                "areal_pacman.level1.workflow.nearest_reachable_distance",
+                side_effect=ValueError(
+                    "no target is reachable from the requested position"
+                ),
+            ),
+            self.assertLogs(
+                "areal_pacman.level1.workflow",
+                level="ERROR",
+            ) as captured,
+            self.assertRaisesRegex(
+                RuntimeError,
+                '"phase": "after_step"',
+            ),
+        ):
+            _nearest_reachable_distance_with_diagnostics(
+                level,
+                start,
+                targets,
+                phase="after_step",
+                previous_position=(12, 9),
+                action="R",
+                live_legal_actions=["L", "R"],
+            )
+        message = captured.output[0]
+        self.assertIn('"start_position": [12, 10]', message)
+        self.assertIn('"remaining_normal_pellet_count": 2', message)
+        self.assertIn('"previous_position": [12, 9]', message)
+        self.assertIn('"action": "R"', message)
+        self.assertIn('"live_legal_actions": ["L", "R"]', message)
+
     def test_reward_formula_and_audit(self) -> None:
         result = shape_reward(
             10.0,
@@ -385,6 +434,154 @@ class RewardAndTrajectoryTests(unittest.TestCase):
         broken["shaped_reward"] = 99.0
         with self.assertRaises(ValueError):
             audit_reward(broken)
+
+    def test_explicit_task_and_late_bfs_distance_reward_formula(self) -> None:
+        config = RewardConfig(
+            use_base_reward=False,
+            normal_pellet_reward=1.0,
+            power_pellet_reward=1.0,
+            completion_reward=50.0,
+            step_penalty=0.05,
+            wall_penalty=0.5,
+            nearest_pellet_alpha=0.1,
+            nearest_pellet_remaining_ratio_threshold=0.25,
+            nearest_pellet_skip_on_eat=True,
+        )
+        ordinary = shape_reward(
+            123.0,
+            {},
+            {"wall_collision": False, "pellet_eaten": False},
+            config,
+            normal_pellet_remaining_ratio=0.5,
+            nearest_pellet_distance_before=3,
+            nearest_pellet_distance_after=2,
+        )
+        self.assertAlmostEqual(ordinary.shaped_reward, -0.05)
+        self.assertEqual(ordinary.base_reward_contribution, 0.0)
+        self.assertFalse(ordinary.nearest_pellet_shaping_active)
+
+        closer = shape_reward(
+            0.0,
+            {},
+            {"wall_collision": False, "pellet_eaten": False},
+            config,
+            normal_pellet_remaining_ratio=0.25,
+            nearest_pellet_distance_before=3,
+            nearest_pellet_distance_after=2,
+        )
+        self.assertAlmostEqual(closer.shaped_reward, 0.05)
+        self.assertTrue(closer.nearest_pellet_shaping_active)
+
+        farther = shape_reward(
+            0.0,
+            {},
+            {"wall_collision": False, "pellet_eaten": False},
+            config,
+            normal_pellet_remaining_ratio=0.2,
+            nearest_pellet_distance_before=2,
+            nearest_pellet_distance_after=3,
+        )
+        self.assertAlmostEqual(farther.shaped_reward, -0.15)
+        audit_reward(farther.as_dict())
+
+        wall = shape_reward(
+            0.0,
+            {},
+            {"wall_collision": True, "pellet_eaten": False},
+            config,
+            normal_pellet_remaining_ratio=0.5,
+            nearest_pellet_distance_before=2,
+            nearest_pellet_distance_after=2,
+        )
+        self.assertAlmostEqual(wall.shaped_reward, -0.55)
+
+        pellet = shape_reward(
+            10.0,
+            {},
+            {"wall_collision": False, "pellet_eaten": True},
+            config,
+            normal_pellet_remaining_ratio=0.2,
+            nearest_pellet_distance_before=1,
+            nearest_pellet_distance_after=12,
+        )
+        self.assertAlmostEqual(pellet.shaped_reward, 0.95)
+        self.assertEqual(pellet.normal_pellet_reward, 1.0)
+        self.assertFalse(pellet.nearest_pellet_shaping_active)
+        self.assertEqual(pellet.nearest_pellet_progress_reward, 0.0)
+
+        power_pellet = shape_reward(
+            50.0,
+            {},
+            {
+                "wall_collision": False,
+                "pellet_eaten": False,
+                "power_pellet_eaten": True,
+            },
+            config,
+            normal_pellet_remaining_ratio=0.5,
+            nearest_pellet_distance_before=2,
+            nearest_pellet_distance_after=2,
+        )
+        self.assertAlmostEqual(power_pellet.shaped_reward, 0.95)
+        self.assertTrue(power_pellet.power_pellet_eaten)
+        self.assertEqual(power_pellet.power_pellet_reward, 1.0)
+        audit_reward(power_pellet.as_dict())
+
+        completion = shape_reward(
+            10.0,
+            {},
+            {
+                "wall_collision": False,
+                "pellet_eaten": True,
+                "terminal_reason": "all_normal_pellets",
+                "normal_pellets_remaining": 0,
+            },
+            config,
+            normal_pellet_remaining_ratio=0.0,
+            nearest_pellet_distance_before=1,
+            nearest_pellet_distance_after=0,
+        )
+        self.assertAlmostEqual(completion.shaped_reward, 50.95)
+        self.assertTrue(completion.level_completed)
+        audit_reward(completion.as_dict())
+
+    def test_reward_config_rejects_invalid_shaping_parameters(self) -> None:
+        with self.assertRaisesRegex(ValueError, "normal_pellet_reward"):
+            RewardConfig(normal_pellet_reward=-1.0)
+        with self.assertRaisesRegex(ValueError, "power_pellet_reward"):
+            RewardConfig(power_pellet_reward=-1.0)
+        with self.assertRaisesRegex(ValueError, "completion_reward"):
+            RewardConfig(completion_reward=-1.0)
+        with self.assertRaisesRegex(ValueError, "ratio_threshold"):
+            RewardConfig(
+                nearest_pellet_remaining_ratio_threshold=1.1
+            )
+
+    def test_step256_reward_config_contract(self) -> None:
+        config = (
+            Path(__file__).parents[1]
+            / "configs"
+            / "level1"
+            / "train"
+            / "level1_live_state_step256_100update_group12_8gpu.yaml"
+        ).read_text(encoding="utf-8")
+        for expected in (
+            "total_train_epochs: 50",
+            "validation_contract: sampled12_uniform_shaped",
+            "use_base_reward: false",
+            "normal_pellet_reward: 1.0",
+            "power_pellet_reward: 1.0",
+            "completion_reward: 50.0",
+            "step_penalty: 0.05",
+            "wall_penalty: 0.5",
+            "nearest_pellet_alpha: 0.1",
+            "nearest_pellet_remaining_ratio_threshold: 0.25",
+            "nearest_pellet_skip_on_eat: true",
+            "run_artifacts/level1_dataset_step256/train_hf",
+            "run_artifacts/level1_dataset_step256/validation_hf",
+        ):
+            self.assertIn(expected, config)
+        self.assertNotIn("revisit_penalty:", config)
 
     def test_summary_counts_acceptance_metrics(self) -> None:
         summary = summarize_episodes(

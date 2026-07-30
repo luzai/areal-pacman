@@ -27,12 +27,46 @@ class PacmanAgentConfig(PPOConfig):
         default=1.0,
         metadata={"help": "Non-negative shaped penalty for a move into a wall."},
     )
+    use_base_reward: bool = field(
+        default=True,
+        metadata={"help": "Include the original Pacman score delta in reward."},
+    )
+    normal_pellet_reward: float = field(
+        default=0.0,
+        metadata={"help": "Explicit reward for eating one normal pellet."},
+    )
+    power_pellet_reward: float = field(
+        default=0.0,
+        metadata={"help": "Explicit reward for eating one power pellet."},
+    )
+    completion_reward: float = field(
+        default=0.0,
+        metadata={"help": "Terminal reward for clearing all normal pellets."},
+    )
     nearest_pellet_alpha: float = field(
         default=0.0,
         metadata={
             "help": (
                 "Alpha for level-1 nearest-normal-pellet distance progress; "
                 "zero preserves the sparse reward contract."
+            )
+        },
+    )
+    nearest_pellet_remaining_ratio_threshold: float = field(
+        default=1.0,
+        metadata={
+            "help": (
+                "Enable nearest-pellet shaping at or below this fraction "
+                "of remaining normal pellets."
+            )
+        },
+    )
+    nearest_pellet_skip_on_eat: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Disable nearest-pellet distance shaping on steps that eat "
+                "a normal pellet."
             )
         },
     )

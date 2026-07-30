@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import base64
+import json
+import logging
 import os
+import time
 import uuid
 from contextvars import ContextVar
 from copy import deepcopy
@@ -43,6 +46,57 @@ ACTION_MASK_BIT = {
     action: 1 << index for index, action in enumerate(MOVEMENT_ACTIONS)
 }
 OPPOSITE_ACTION = {"U": "D", "D": "U", "L": "R", "R": "L"}
+LOGGER = logging.getLogger(__name__)
+
+
+def _nearest_reachable_distance_with_diagnostics(
+    level: Any,
+    start: Position,
+    targets: set[Position],
+    *,
+    phase: str,
+    previous_position: tuple[int, int] | None = None,
+    action: str | None = None,
+    live_legal_actions: list[str] | None = None,
+) -> int:
+    if not targets:
+        return 0
+    try:
+        return nearest_reachable_distance(level, start, targets)
+    except ValueError as exc:
+        if str(exc) != "no target is reachable from the requested position":
+            raise
+        diagnostic = {
+            "phase": phase,
+            "start_position": [start.row, start.col],
+            "start_in_bounds": bool(level.in_bounds(start)),
+            "start_tile": (
+                int(level.tile_at(start)) if level.in_bounds(start) else None
+            ),
+            "previous_position": (
+                list(previous_position)
+                if previous_position is not None
+                else None
+            ),
+            "action": action,
+            "live_legal_actions": list(live_legal_actions or []),
+            "remaining_normal_pellet_count": len(targets),
+            "remaining_normal_pellet_positions": [
+                [position.row, position.col]
+                for position in sorted(
+                    targets,
+                    key=lambda position: (position.row, position.col),
+                )
+            ],
+            "level_height": int(level.height),
+            "level_width": int(level.width),
+            "level_revision": str(level.revision),
+        }
+        encoded = json.dumps(diagnostic, sort_keys=True)
+        LOGGER.error("nearest-pellet BFS unreachable: %s", encoded)
+        raise RuntimeError(
+            f"nearest-pellet BFS unreachable: {encoded}"
+        ) from exc
 
 
 def install_vllm_allowed_token_ids_adapter() -> None:
@@ -198,8 +252,25 @@ class PacmanImageOnlyWorkflow:
         reward_config = RewardConfig(
             step_penalty=float(options.get("step_penalty", 1.0)),
             wall_penalty=float(options.get("wall_penalty", 1.0)),
+            use_base_reward=bool(options.get("use_base_reward", True)),
+            normal_pellet_reward=float(
+                options.get("normal_pellet_reward", 0.0)
+            ),
+            power_pellet_reward=float(
+                options.get("power_pellet_reward", 0.0)
+            ),
+            completion_reward=float(options.get("completion_reward", 0.0)),
             nearest_pellet_alpha=float(
                 options.get("nearest_pellet_alpha", 0.0)
+            ),
+            nearest_pellet_remaining_ratio_threshold=float(
+                options.get(
+                    "nearest_pellet_remaining_ratio_threshold",
+                    1.0,
+                )
+            ),
+            nearest_pellet_skip_on_eat=bool(
+                options.get("nearest_pellet_skip_on_eat", False)
             ),
         )
         parse_failure_penalty = float(options.get("parse_failure_penalty", -50.0))
@@ -216,6 +287,18 @@ class PacmanImageOnlyWorkflow:
         cell_exit_history: dict[tuple[int, int], list[str]] = {}
         recent_actions: list[str] = []
         recent_positions: list[tuple[int, int]] = []
+        wall_clock_limit_seconds = options.get("wall_clock_limit_seconds")
+        if wall_clock_limit_seconds is not None:
+            wall_clock_limit_seconds = float(wall_clock_limit_seconds)
+            if wall_clock_limit_seconds <= 0:
+                raise ValueError("wall_clock_limit_seconds must be positive")
+        stuck_no_progress_steps = options.get("stuck_no_progress_steps")
+        if stuck_no_progress_steps is not None:
+            stuck_no_progress_steps = int(stuck_no_progress_steps)
+            if stuck_no_progress_steps <= 0:
+                raise ValueError("stuck_no_progress_steps must be positive")
+        no_progress_steps = 0
+        episode_started_at = time.monotonic()
         level = (
             load_bundled_level(config.level)
             if reward_config.nearest_pellet_alpha > 0
@@ -402,8 +485,23 @@ class PacmanImageOnlyWorkflow:
                         "action": None,
                         "parse_failed": True,
                         "base_reward": 0.0,
+                        "base_reward_contribution": 0.0,
+                        "normal_pellet_eaten": False,
+                        "normal_pellet_reward": 0.0,
+                        "power_pellet_eaten": False,
+                        "power_pellet_reward": 0.0,
+                        "level_completed": False,
+                        "completion_reward": 0.0,
                         "step_penalty": 0.0,
                         "wall_penalty": 0.0,
+                        "normal_pellet_remaining_ratio": (
+                            int(previous_info["normal_pellets_remaining"])
+                            / initial_normal_pellets
+                        ),
+                        "nearest_pellet_shaping_active": False,
+                        "nearest_pellet_distance_before": None,
+                        "nearest_pellet_distance_after": None,
+                        "nearest_pellet_progress_reward": 0.0,
                         "shaped_reward": parse_failure_penalty,
                         "pellet_clear_rate": float(previous_info["pellet_clear_rate"]),
                         "pellets_remaining": int(previous_info["pellets_remaining"]),
@@ -439,10 +537,15 @@ class PacmanImageOnlyWorkflow:
                 distance_before = None
                 if level is not None and remaining_normal_pellets is not None:
                     before_row, before_col = previous_info["pacman_position"]
-                    distance_before = nearest_reachable_distance(
-                        level,
-                        Position(int(before_row), int(before_col)),
-                        remaining_normal_pellets,
+                    distance_before = (
+                        _nearest_reachable_distance_with_diagnostics(
+                            level,
+                            Position(int(before_row), int(before_col)),
+                            remaining_normal_pellets,
+                            phase="before_step",
+                            action=action.value,
+                            live_legal_actions=current_open_actions,
+                        )
                     )
                 source_position = (
                     int(previous_info["pacman_position"][0]),
@@ -460,8 +563,38 @@ class PacmanImageOnlyWorkflow:
                     recent_actions[-1] if recent_actions else None
                 )
                 next_image, base_reward, terminated, truncated, info = env.step(action)
+                info = dict(info)
+                score_progress = int(info["score"]) != int(previous_info["score"])
+                pellet_progress = int(info["normal_pellets_remaining"]) != int(
+                    previous_info["normal_pellets_remaining"]
+                )
+                no_progress_steps = (
+                    0 if score_progress or pellet_progress else no_progress_steps + 1
+                )
+                safety_reason = None
+                if not (terminated or truncated):
+                    if (
+                        wall_clock_limit_seconds is not None
+                        and time.monotonic() - episode_started_at
+                        >= wall_clock_limit_seconds
+                    ):
+                        safety_reason = "safety_timeout"
+                    elif (
+                        stuck_no_progress_steps is not None
+                        and no_progress_steps >= stuck_no_progress_steps
+                    ):
+                        safety_reason = "stuck"
+                elif (
+                    truncated
+                    and int(info["step"]) >= config.max_steps
+                    and config.max_steps == 2000
+                ):
+                    safety_reason = "safety_step_limit"
+                if safety_reason is not None:
+                    info["terminal_reason"] = safety_reason
+                    terminated = False
+                    truncated = True
                 if single_step and not (terminated or truncated):
-                    info = dict(info)
                     info["terminal_reason"] = "single_step_complete"
                     terminated = True
                 next_position = (
@@ -473,6 +606,10 @@ class PacmanImageOnlyWorkflow:
                     and next_position == recent_positions[-2]
                     and action.value
                     == OPPOSITE_ACTION.get(previous_action or "")
+                )
+                normal_pellet_remaining_ratio = (
+                    int(info["normal_pellets_remaining"])
+                    / initial_normal_pellets
                 )
                 distance_after = None
                 if level is not None and remaining_normal_pellets is not None:
@@ -490,16 +627,25 @@ class PacmanImageOnlyWorkflow:
                         raise RuntimeError(
                             "nearest-pellet tracker diverged from the live game"
                         )
-                    distance_after = nearest_reachable_distance(
-                        level,
-                        after_position,
-                        remaining_normal_pellets,
+                    distance_after = (
+                        _nearest_reachable_distance_with_diagnostics(
+                            level,
+                            after_position,
+                            remaining_normal_pellets,
+                            phase="after_step",
+                            previous_position=source_position,
+                            action=action.value,
+                            live_legal_actions=list(info["legal_actions"]),
+                        )
                     )
                 reward = shape_reward(
                     base_reward,
                     previous_info,
                     info,
                     reward_config,
+                    normal_pellet_remaining_ratio=(
+                        normal_pellet_remaining_ratio
+                    ),
                     nearest_pellet_distance_before=distance_before,
                     nearest_pellet_distance_after=distance_after,
                 )
@@ -511,8 +657,19 @@ class PacmanImageOnlyWorkflow:
                     immediate_reward = 1.0 if avoided_wall else -1.0
                     reward = RewardBreakdown(
                         base_reward=immediate_reward,
+                        base_reward_contribution=immediate_reward,
+                        normal_pellet_eaten=False,
+                        normal_pellet_reward=0.0,
+                        power_pellet_eaten=False,
+                        power_pellet_reward=0.0,
+                        level_completed=False,
+                        completion_reward=0.0,
                         step_penalty=0.0,
                         wall_penalty=0.0,
+                        normal_pellet_remaining_ratio=(
+                            normal_pellet_remaining_ratio
+                        ),
+                        nearest_pellet_shaping_active=False,
                         nearest_pellet_distance_before=None,
                         nearest_pellet_distance_after=None,
                         nearest_pellet_progress_reward=0.0,
@@ -615,7 +772,23 @@ class PacmanImageOnlyWorkflow:
                 },
                 "step_penalty_coefficient": reward_config.step_penalty,
                 "wall_penalty_coefficient": reward_config.wall_penalty,
+                "use_base_reward": reward_config.use_base_reward,
+                "normal_pellet_reward_coefficient": (
+                    reward_config.normal_pellet_reward
+                ),
+                "power_pellet_reward_coefficient": (
+                    reward_config.power_pellet_reward
+                ),
+                "completion_reward_coefficient": (
+                    reward_config.completion_reward
+                ),
                 "nearest_pellet_alpha": reward_config.nearest_pellet_alpha,
+                "nearest_pellet_remaining_ratio_threshold": (
+                    reward_config.nearest_pellet_remaining_ratio_threshold
+                ),
+                "nearest_pellet_skip_on_eat": (
+                    reward_config.nearest_pellet_skip_on_eat
+                ),
                 "nearest_pellet_topology_revision": (
                     level.revision if level is not None else None
                 ),

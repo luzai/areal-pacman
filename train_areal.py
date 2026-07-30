@@ -54,7 +54,31 @@ def _build_workflow_kwargs(config, generation_config) -> dict[str, object]:
         safe_progress_alpha=config.safe_progress_alpha,
         step_penalty=config.step_penalty,
         wall_penalty=config.wall_penalty,
+        use_base_reward=getattr(config, "use_base_reward", True),
+        normal_pellet_reward=getattr(
+            config,
+            "normal_pellet_reward",
+            0.0,
+        ),
+        power_pellet_reward=getattr(
+            config,
+            "power_pellet_reward",
+            0.0,
+        ),
+        completion_reward=getattr(config, "completion_reward", 0.0),
         nearest_pellet_alpha=config.nearest_pellet_alpha,
+        nearest_pellet_remaining_ratio_threshold=(
+            getattr(
+                config,
+                "nearest_pellet_remaining_ratio_threshold",
+                1.0,
+            )
+        ),
+        nearest_pellet_skip_on_eat=getattr(
+            config,
+            "nearest_pellet_skip_on_eat",
+            False,
+        ),
         observation_mode=config.observation_mode,
         vision_tile_size=config.vision_tile_size,
         store_observation_images=config.store_observation_images,
@@ -169,6 +193,7 @@ def _production_dry_run(
         elif config.validation_contract in (
             "sampled12_and_greedy1",
             "sampled12_uniform",
+            "sampled12_uniform_shaped",
         ):
             if config.eval_gconfig.greedy:
                 raise ValueError(
@@ -190,11 +215,15 @@ def _production_dry_run(
                 raise ValueError(
                     "sampled validation temperature/top_p must match training"
                 )
-            if config.validation_contract == "sampled12_uniform":
+            if config.validation_contract in (
+                "sampled12_uniform",
+                "sampled12_uniform_shaped",
+            ):
                 if config.image_prompt_style != "live_state_v3":
                     raise ValueError(
-                        "sampled12_uniform requires live_state_v3"
+                        "uniform sampled validation requires live_state_v3"
                     )
+            if config.validation_contract == "sampled12_uniform":
                 if config.nearest_pellet_alpha != 0.0:
                     raise ValueError(
                         "sampled12_uniform disables nearest-pellet shaping"

@@ -7,6 +7,9 @@
     training run.
   - `level1_live_state_step32_200update_group12_8gpu.yaml`: next long-run
     configuration.
+  - `level1_live_state_step256_100update_group12_8gpu.yaml`: 256-step,
+    50-epoch configuration (100 optimizer updates) with explicit
+    pellet/completion rewards and late-game BFS nearest-pellet guidance.
 - `level1/eval/`: evaluation-only configurations.
 - `level1/archive/`: earlier Level-1 gates and smoke configurations retained
   for reproducibility.
