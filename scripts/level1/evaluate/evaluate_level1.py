@@ -25,6 +25,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--max-completion-tokens", type=int, default=3)
+    parser.add_argument("--wall-clock-limit-seconds", type=float)
+    parser.add_argument("--stuck-no-progress-steps", type=int)
+    parser.add_argument("--open-action-mask", action="store_true")
+    parser.add_argument("--tokenizer-path", type=Path)
     parser.add_argument(
         "--prompt-style",
         choices=PROMPT_STYLES,
@@ -63,7 +67,10 @@ async def evaluate(args: argparse.Namespace) -> dict[str, object]:
                 seed=args.seed,
                 max_steps=args.max_steps,
             )
-            workflow = PacmanImageOnlyWorkflow()
+            workflow = PacmanImageOnlyWorkflow(
+                open_action_mask=args.open_action_mask,
+                tokenizer_path=args.tokenizer_path,
+            )
             await workflow.run(
                 row,
                 model=args.model,
@@ -76,6 +83,8 @@ async def evaluate(args: argparse.Namespace) -> dict[str, object]:
                 image_prompt_style=args.prompt_style,
                 pacman_python_root=args.pacman_python_root,
                 trajectory_dir=trajectory_dir,
+                wall_clock_limit_seconds=args.wall_clock_limit_seconds,
+                stuck_no_progress_steps=args.stuck_no_progress_steps,
             )
             assert workflow.last_episode is not None
             return workflow.last_episode
@@ -88,6 +97,10 @@ async def evaluate(args: argparse.Namespace) -> dict[str, object]:
         "seed": args.seed,
         "max_steps": args.max_steps,
         "concurrency": args.concurrency,
+        "safety_limits": {
+            "wall_clock_limit_seconds": args.wall_clock_limit_seconds,
+            "stuck_no_progress_steps": args.stuck_no_progress_steps,
+        },
         "image_prompt_style": args.prompt_style,
         "pacman_python_root": (
             str(args.pacman_python_root)

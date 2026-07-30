@@ -31,6 +31,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--visual-prefix", default="model.visual.")
+    parser.add_argument(
+        "--restore-all-missing",
+        action="store_true",
+        help="Restore every base-model tensor absent from the trained checkpoint.",
+    )
     parser.add_argument("--base-revision")
     parser.add_argument("--expected-base-revision")
     return parser.parse_args()
@@ -72,40 +77,49 @@ def main() -> None:
 
     base_index = json.loads(base_index_file.read_text(encoding="utf-8"))
     base_weight_map: dict[str, str] = base_index["weight_map"]
-    visual_keys = sorted(
+    missing_keys = sorted(
         key
         for key in base_weight_map
-        if key.startswith(args.visual_prefix) and key not in trained_keys
+        if key not in trained_keys
+        and (args.restore_all_missing or key.startswith(args.visual_prefix))
     )
-    if not visual_keys:
-        raise ValueError("No missing visual weights found in the base checkpoint")
+    if not missing_keys:
+        scope = "base" if args.restore_all_missing else "visual"
+        raise ValueError(f"No missing {scope} weights found in the base checkpoint")
 
-    visual_tensors = {}
+    restored_tensors = {}
     keys_by_shard: dict[str, list[str]] = {}
-    for key in visual_keys:
+    for key in missing_keys:
         keys_by_shard.setdefault(base_weight_map[key], []).append(key)
     for shard_name, keys in sorted(keys_by_shard.items()):
         with safe_open(args.base_dir / shard_name, framework="pt", device="cpu") as handle:
             for key in keys:
-                visual_tensors[key] = handle.get_tensor(key)
+                restored_tensors[key] = handle.get_tensor(key)
 
-    visual_file = args.output_dir / "visual-model.safetensors"
-    save_file(visual_tensors, visual_file, metadata={"format": "pt"})
-    del visual_tensors
+    restored_file = args.output_dir / (
+        "restored-base-model.safetensors"
+        if args.restore_all_missing
+        else "visual-model.safetensors"
+    )
+    save_file(restored_tensors, restored_file, metadata={"format": "pt"})
+    del restored_tensors
 
     trained_copy = args.output_dir / "trained-model.safetensors"
     shutil.copy2(trained_file, trained_copy)
-    restored_keys = set(visual_keys)
+    restored_keys = set(missing_keys)
     overlap = trained_keys & restored_keys
     if overlap:
         raise ValueError(f"trained and restored keys overlap: {sorted(overlap)[:5]}")
     weight_map = {key: trained_copy.name for key in sorted(trained_keys)}
-    weight_map.update({key: visual_file.name for key in visual_keys})
+    weight_map.update({key: restored_file.name for key in missing_keys})
     index = {
         "metadata": {
-            "total_size": trained_copy.stat().st_size + visual_file.stat().st_size,
+            "total_size": trained_copy.stat().st_size + restored_file.stat().st_size,
             "trained_key_count": len(trained_keys),
-            "restored_visual_key_count": len(visual_keys),
+            "restored_base_key_count": len(missing_keys),
+            "restored_visual_key_count": sum(
+                key.startswith(args.visual_prefix) for key in missing_keys
+            ),
         },
         "weight_map": weight_map,
     }
@@ -128,12 +142,19 @@ def main() -> None:
         "base_checkpoint": str(args.base_dir.resolve()),
         "base_model_revision": base_revision,
         "trained_key_count": len(trained_keys),
-        "restored_visual_key_count": len(visual_keys),
-        "visual_shard_bytes": visual_file.stat().st_size,
+        "restore_all_missing": args.restore_all_missing,
+        "restored_base_key_count": len(missing_keys),
+        "restored_visual_key_count": sum(
+            key.startswith(args.visual_prefix) for key in missing_keys
+        ),
+        "restored_base_shard_bytes": restored_file.stat().st_size,
         "trained_model_sha256": sha256_file(trained_copy),
-        "visual_model_sha256": sha256_file(visual_file),
+        "restored_base_model_sha256": sha256_file(restored_file),
         "output_index_sha256": sha256_file(args.output_dir / "model.safetensors.index.json"),
     }
+    if not args.restore_all_missing:
+        manifest["visual_shard_bytes"] = restored_file.stat().st_size
+        manifest["visual_model_sha256"] = sha256_file(restored_file)
     (args.output_dir / "merge_manifest.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
     )
