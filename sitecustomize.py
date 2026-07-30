@@ -1,11 +1,4 @@
-"""Local startup patch for single-node AReaL runs on node5.
-
-Python imports this module automatically when the project root is on
-``sys.path``. The node5 host exposes ``tmfifo_net0`` as ``169.254.100.1``,
-which AReaL may choose as a worker address. That address is not reachable by
-peer local workers, so proxy readiness checks can time out. Setting
-``AREAL_FORCE_HOST_IP`` pins hostname resolution to the normal host IP.
-"""
+"""Local startup patches for AReaL MaaPacman workers."""
 
 from __future__ import annotations
 
@@ -70,12 +63,17 @@ def _patch_tms_preload_resolution() -> None:
 
 def _disable_cudnn_sdpa() -> None:
     """Avoid cuDNN frontend plan failures in AReaL reference log-probs."""
-    if os.environ.get("AREAL_DISABLE_CUDNN_SDPA") != "1":
+    enabled = (
+        os.environ.get("MAAPACMAN_DISABLE_CUDNN_SDPA") == "1"
+        or os.environ.get("AREAL_DISABLE_CUDNN_SDPA") == "1"
+    )
+    if not enabled:
         return
     try:
         import torch
     except ImportError:
         return
+
     torch.backends.cuda.enable_cudnn_sdp(False)
 
 

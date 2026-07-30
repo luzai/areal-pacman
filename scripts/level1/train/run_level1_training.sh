@@ -165,6 +165,10 @@ export HF_HOME="${HF_HOME:-${OWNER_ROOT}/hf-cache}"
 export USE_TF=0
 export TRANSFORMERS_NO_TF=1
 export TORCH_COMPILE_DISABLE=1
+# PyTorch 2.11 + CUDA 13 can select cuDNN SDPA for Qwen3.5 shapes that
+# cuDNN cannot plan. sitecustomize.py applies this before every controller
+# and RPC worker imports AReaL/torch, preserving SDPA with another backend.
+export MAAPACMAN_DISABLE_CUDNN_SDPA="${MAAPACMAN_DISABLE_CUDNN_SDPA:-1}"
 export PYGAME_HIDE_SUPPORT_PROMPT=1
 export SDL_VIDEODRIVER=dummy
 export SDL_AUDIODRIVER=dummy
