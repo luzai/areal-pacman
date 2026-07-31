@@ -577,10 +577,17 @@ class RewardAndTrajectoryTests(unittest.TestCase):
             "nearest_pellet_alpha: 0.1",
             "nearest_pellet_remaining_ratio_threshold: 0.25",
             "nearest_pellet_skip_on_eat: true",
+            "enable_offload: true",
+            "max_tokens_per_mb: 512",
+            "offload: true",
             "run_artifacts/level1_dataset_step256/train_hf",
             "run_artifacts/level1_dataset_step256/validation_hf",
         ):
             self.assertIn(expected, config)
+        actor_section = config.split("\nref:\n", 1)[0].split("\nactor:\n", 1)[1]
+        ref_section = config.split("\nref:\n", 1)[1].split("\nvllm:\n", 1)[0]
+        self.assertIn("\n  offload: true", "\n" + actor_section)
+        self.assertIn("\n  offload: true", "\n" + ref_section)
         self.assertNotIn("revisit_penalty:", config)
 
     def test_summary_counts_acceptance_metrics(self) -> None:

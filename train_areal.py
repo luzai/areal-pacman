@@ -249,10 +249,10 @@ def _production_dry_run(
                     "positive-KL level-1 training requires bfloat16 reference "
                     "parameter storage for the accepted split 4+4/3+3 topology"
                 )
-            if config.enable_offload or config.ref.offload:
+            if config.enable_offload != config.ref.offload:
                 raise ValueError(
-                    "the accepted positive-KL topology keeps the BF16 reference "
-                    "resident; TMS reference offload is not supported"
+                    "positive-KL reference offload requires enable_offload and "
+                    "ref.offload to be enabled or disabled together"
                 )
             ref_degree = _backend_degree(config.ref.backend)
             if config.ref.scheduling_strategy.type == "colocation":

@@ -16,7 +16,9 @@ seed: 1
 # - screenshot plus live engine state and bounded navigation history
 # - every generated action is masked to current open movement actions
 # - save every 10 updates to bound checkpoint storage
-enable_offload: false
+# - TMS alternates the colocated actor and reference model: actor is offloaded
+#   during rollout/ref log-prob, then reference is offloaded before actor update
+enable_offload: true
 enable_thinking: false
 validation_contract: sampled12_uniform_shaped
 image_prompt_style: live_state_v3
@@ -96,11 +98,15 @@ actor:
   attn_impl: sdpa
   init_from_scratch: false
   disable_dropout: true
+  offload: true
   gradient_checkpointing: true
   dtype: bfloat16
   optimizer_dtype: bfloat16
   mb_spec:
-    max_tokens_per_mb: 640
+    # 640 tokens left too little headroom for NCCL's grad-norm all-reduce.
+    # 512 covers the observed <=493-token samples while preserving the
+    # effective batch, and completed the first PPO update on the 8-GPU run.
+    max_tokens_per_mb: 512
   optimizer:
     type: adam_bf16
     lr: 1.0e-6
@@ -150,9 +156,9 @@ ref:
   dtype: ${actor.dtype}
   optimizer_dtype: bfloat16
   mb_spec:
-    max_tokens_per_mb: 640
+    max_tokens_per_mb: 512
   optimizer: null
-  offload: false
+  offload: true
   fsdp:
     offload_params: true
   scheduling_strategy:
