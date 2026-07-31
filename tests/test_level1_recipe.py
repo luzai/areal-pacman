@@ -1059,6 +1059,32 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn("distance", combined_prompt.lower())
         audit_trajectory(payload)
 
+    def test_workflow_skips_bfs_above_late_shaping_threshold(self) -> None:
+        workflow = PacmanImageOnlyWorkflow(env_factory=OneStepEnv)
+        with patch(
+            "areal_pacman.level1.workflow."
+            "_nearest_reachable_distance_with_diagnostics"
+        ) as distance:
+            asyncio.run(
+                workflow.run(
+                    make_episode_row(1, split="train"),
+                    scripted_actions=["L"],
+                    nearest_pellet_alpha=0.1,
+                    nearest_pellet_remaining_ratio_threshold=0.25,
+                    nearest_pellet_skip_on_eat=True,
+                )
+            )
+
+        distance.assert_not_called()
+        payload = workflow.last_episode
+        assert payload is not None
+        step = payload["trajectory"][0]
+        self.assertGreater(step["normal_pellet_remaining_ratio"], 0.25)
+        self.assertFalse(step["nearest_pellet_shaping_active"])
+        self.assertIsNone(step["nearest_pellet_distance_before"])
+        self.assertIsNone(step["nearest_pellet_distance_after"])
+        audit_trajectory(payload)
+
     def test_parse_failure_is_terminal_and_never_forwarded(self) -> None:
         class CountingEnv(PygamePacmanEnv):
             steps_called = 0

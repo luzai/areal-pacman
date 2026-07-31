@@ -536,17 +536,32 @@ class PacmanImageOnlyWorkflow:
 
                 distance_before = None
                 if level is not None and remaining_normal_pellets is not None:
-                    before_row, before_col = previous_info["pacman_position"]
-                    distance_before = (
-                        _nearest_reachable_distance_with_diagnostics(
-                            level,
-                            Position(int(before_row), int(before_col)),
-                            remaining_normal_pellets,
-                            phase="before_step",
-                            action=action.value,
-                            live_legal_actions=current_open_actions,
+                    # A step can consume at most one normal pellet.  Avoid
+                    # consulting the hidden BFS topology while its reward term
+                    # cannot activate; in skip-on-eat mode even a threshold-
+                    # crossing pellet step does not need distances.
+                    earliest_ratio_after_step = (
+                        len(remaining_normal_pellets)
+                        if reward_config.nearest_pellet_skip_on_eat
+                        else max(0, len(remaining_normal_pellets) - 1)
+                    ) / initial_normal_pellets
+                    if (
+                        earliest_ratio_after_step
+                        <= reward_config.nearest_pellet_remaining_ratio_threshold
+                    ):
+                        before_row, before_col = previous_info[
+                            "pacman_position"
+                        ]
+                        distance_before = (
+                            _nearest_reachable_distance_with_diagnostics(
+                                level,
+                                Position(int(before_row), int(before_col)),
+                                remaining_normal_pellets,
+                                phase="before_step",
+                                action=action.value,
+                                live_legal_actions=current_open_actions,
+                            )
                         )
-                    )
                 source_position = (
                     int(previous_info["pacman_position"][0]),
                     int(previous_info["pacman_position"][1]),
@@ -627,17 +642,26 @@ class PacmanImageOnlyWorkflow:
                         raise RuntimeError(
                             "nearest-pellet tracker diverged from the live game"
                         )
-                    distance_after = (
-                        _nearest_reachable_distance_with_diagnostics(
-                            level,
-                            after_position,
-                            remaining_normal_pellets,
-                            phase="after_step",
-                            previous_position=source_position,
-                            action=action.value,
-                            live_legal_actions=list(info["legal_actions"]),
+                    if (
+                        distance_before is not None
+                        and normal_pellet_remaining_ratio
+                        <= reward_config.nearest_pellet_remaining_ratio_threshold
+                        and not (
+                            reward_config.nearest_pellet_skip_on_eat
+                            and bool(info["pellet_eaten"])
                         )
-                    )
+                    ):
+                        distance_after = (
+                            _nearest_reachable_distance_with_diagnostics(
+                                level,
+                                after_position,
+                                remaining_normal_pellets,
+                                phase="after_step",
+                                previous_position=source_position,
+                                action=action.value,
+                                live_legal_actions=list(info["legal_actions"]),
+                            )
+                        )
                 reward = shape_reward(
                     base_reward,
                     previous_info,
