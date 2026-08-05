@@ -269,6 +269,11 @@ class PacmanImageOnlyWorkflow:
                     1.0,
                 )
             ),
+            nearest_pellet_scale_by_cleared_ratio=bool(
+                options.get(
+                    "nearest_pellet_scale_by_cleared_ratio", False
+                )
+            ),
             nearest_pellet_skip_on_eat=bool(
                 options.get("nearest_pellet_skip_on_eat", False)
             ),
@@ -501,6 +506,7 @@ class PacmanImageOnlyWorkflow:
                         "nearest_pellet_shaping_active": False,
                         "nearest_pellet_distance_before": None,
                         "nearest_pellet_distance_after": None,
+                        "nearest_pellet_progress_weight": 0.0,
                         "nearest_pellet_progress_reward": 0.0,
                         "shaped_reward": parse_failure_penalty,
                         "pellet_clear_rate": float(previous_info["pellet_clear_rate"]),
@@ -696,6 +702,7 @@ class PacmanImageOnlyWorkflow:
                         nearest_pellet_shaping_active=False,
                         nearest_pellet_distance_before=None,
                         nearest_pellet_distance_after=None,
+                        nearest_pellet_progress_weight=0.0,
                         nearest_pellet_progress_reward=0.0,
                         shaped_reward=immediate_reward,
                     )
@@ -809,6 +816,9 @@ class PacmanImageOnlyWorkflow:
                 "nearest_pellet_alpha": reward_config.nearest_pellet_alpha,
                 "nearest_pellet_remaining_ratio_threshold": (
                     reward_config.nearest_pellet_remaining_ratio_threshold
+                ),
+                "nearest_pellet_scale_by_cleared_ratio": (
+                    reward_config.nearest_pellet_scale_by_cleared_ratio
                 ),
                 "nearest_pellet_skip_on_eat": (
                     reward_config.nearest_pellet_skip_on_eat

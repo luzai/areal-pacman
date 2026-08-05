@@ -61,6 +61,15 @@ class PacmanAgentConfig(PPOConfig):
             )
         },
     )
+    nearest_pellet_scale_by_cleared_ratio: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Scale nearest-pellet distance progress by the cleared "
+                "normal-pellet ratio (1 - remaining ratio)."
+            )
+        },
+    )
     nearest_pellet_skip_on_eat: bool = field(
         default=False,
         metadata={

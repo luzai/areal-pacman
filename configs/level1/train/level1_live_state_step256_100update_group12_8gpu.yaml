@@ -12,7 +12,7 @@ seed: 1
 # - no scheduled validation rollouts
 # - training samples at temperature=0.7, top_p=1.0
 # - explicit +1 normal-pellet, +1 power-pellet, and +50 completion rewards
-# - BFS nearest-pellet guidance only at or below 25% remaining normal pellets
+# - BFS nearest-pellet guidance scaled smoothly by normal-pellet clear ratio
 # - screenshot plus live engine state and bounded navigation history
 # - every generated action is masked to current open movement actions
 # - save every 10 updates to bound checkpoint storage
@@ -34,7 +34,8 @@ completion_reward: 50.0
 step_penalty: 0.05
 wall_penalty: 0.5
 nearest_pellet_alpha: 0.1
-nearest_pellet_remaining_ratio_threshold: 0.25
+nearest_pellet_remaining_ratio_threshold: 1.0
+nearest_pellet_scale_by_cleared_ratio: true
 nearest_pellet_skip_on_eat: true
 observation_mode: rgb
 action_token_choice: true

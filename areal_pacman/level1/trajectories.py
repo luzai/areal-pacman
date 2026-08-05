@@ -47,6 +47,7 @@ REQUIRED_STEP_FIELDS = {
     "nearest_pellet_shaping_active",
     "nearest_pellet_distance_before",
     "nearest_pellet_distance_after",
+    "nearest_pellet_progress_weight",
     "nearest_pellet_progress_reward",
     "shaped_reward",
     "pellet_clear_rate",

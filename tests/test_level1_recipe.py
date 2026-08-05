@@ -428,12 +428,51 @@ class RewardAndTrajectoryTests(unittest.TestCase):
             nearest_pellet_distance_after=2,
         )
         self.assertEqual(progress.nearest_pellet_progress_reward, 1.0)
+        self.assertEqual(progress.nearest_pellet_progress_weight, 1.0)
         self.assertEqual(progress.shaped_reward, 0.0)
         audit_reward(progress.as_dict())
         broken = result.as_dict()
         broken["shaped_reward"] = 99.0
         with self.assertRaises(ValueError):
             audit_reward(broken)
+
+    def test_nearest_pellet_progress_scales_by_cleared_ratio(self) -> None:
+        config = RewardConfig(
+            step_penalty=0.05,
+            nearest_pellet_alpha=0.1,
+            nearest_pellet_scale_by_cleared_ratio=True,
+        )
+        early = shape_reward(
+            0.0,
+            {},
+            {"wall_collision": False, "pellet_eaten": False},
+            config,
+            normal_pellet_remaining_ratio=0.75,
+            nearest_pellet_distance_before=3,
+            nearest_pellet_distance_after=2,
+        )
+        late = shape_reward(
+            0.0,
+            {},
+            {"wall_collision": False, "pellet_eaten": False},
+            config,
+            normal_pellet_remaining_ratio=0.10,
+            nearest_pellet_distance_before=2,
+            nearest_pellet_distance_after=3,
+        )
+
+        self.assertAlmostEqual(early.nearest_pellet_progress_weight, 0.025)
+        self.assertAlmostEqual(early.nearest_pellet_progress_reward, 0.025)
+        self.assertAlmostEqual(early.shaped_reward, -0.025)
+        self.assertAlmostEqual(late.nearest_pellet_progress_weight, 0.09)
+        self.assertAlmostEqual(late.nearest_pellet_progress_reward, -0.09)
+        self.assertAlmostEqual(late.shaped_reward, -0.14)
+        audit_reward(early.as_dict())
+        audit_reward(late.as_dict())
+        broken_progress = early.as_dict()
+        broken_progress["nearest_pellet_progress_reward"] = 0.5
+        with self.assertRaisesRegex(ValueError, "nearest-pellet reward audit"):
+            audit_reward(broken_progress)
 
     def test_explicit_task_and_late_bfs_distance_reward_formula(self) -> None:
         config = RewardConfig(
@@ -575,7 +614,8 @@ class RewardAndTrajectoryTests(unittest.TestCase):
             "step_penalty: 0.05",
             "wall_penalty: 0.5",
             "nearest_pellet_alpha: 0.1",
-            "nearest_pellet_remaining_ratio_threshold: 0.25",
+            "nearest_pellet_remaining_ratio_threshold: 1.0",
+            "nearest_pellet_scale_by_cleared_ratio: true",
             "nearest_pellet_skip_on_eat: true",
             "enable_offload: true",
             "max_tokens_per_mb: 512",

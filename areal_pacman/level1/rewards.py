@@ -16,6 +16,7 @@ class RewardConfig:
     completion_reward: float = 0.0
     nearest_pellet_alpha: float = 0.0
     nearest_pellet_remaining_ratio_threshold: float = 1.0
+    nearest_pellet_scale_by_cleared_ratio: bool = False
     nearest_pellet_skip_on_eat: bool = False
 
     def __post_init__(self) -> None:
@@ -53,6 +54,7 @@ class RewardBreakdown:
     nearest_pellet_shaping_active: bool
     nearest_pellet_distance_before: int | None
     nearest_pellet_distance_after: int | None
+    nearest_pellet_progress_weight: float
     nearest_pellet_progress_reward: float
     shaped_reward: float
 
@@ -107,12 +109,16 @@ def shape_reward(
             and normal_pellet_eaten
         )
     )
+    progress_weight = 0.0
     progress_reward = 0.0
     if shaping_active and (
         nearest_pellet_distance_before is not None
         and nearest_pellet_distance_after is not None
     ):
-        progress_reward = config.nearest_pellet_alpha * (
+        progress_weight = config.nearest_pellet_alpha
+        if config.nearest_pellet_scale_by_cleared_ratio:
+            progress_weight *= 1.0 - normal_pellet_remaining_ratio
+        progress_reward = progress_weight * (
             nearest_pellet_distance_before - nearest_pellet_distance_after
         )
     shaped = (
@@ -141,12 +147,30 @@ def shape_reward(
         nearest_pellet_shaping_active=shaping_active,
         nearest_pellet_distance_before=nearest_pellet_distance_before,
         nearest_pellet_distance_after=nearest_pellet_distance_after,
+        nearest_pellet_progress_weight=progress_weight,
         nearest_pellet_progress_reward=progress_reward,
         shaped_reward=shaped,
     )
 
 
 def audit_reward(record: Mapping[str, Any], *, tolerance: float = 1e-9) -> None:
+    progress_weight = float(record.get("nearest_pellet_progress_weight", 0.0))
+    progress_reward = float(record.get("nearest_pellet_progress_reward", 0.0))
+    distance_before = record.get("nearest_pellet_distance_before")
+    distance_after = record.get("nearest_pellet_distance_after")
+    if bool(record.get("nearest_pellet_shaping_active", False)):
+        if distance_before is None or distance_after is None:
+            raise ValueError("active nearest-pellet shaping requires both distances")
+        expected_progress = progress_weight * (
+            int(distance_before) - int(distance_after)
+        )
+        if abs(expected_progress - progress_reward) > tolerance:
+            raise ValueError(
+                "nearest-pellet reward audit failed: "
+                f"expected {expected_progress}, got {progress_reward}"
+            )
+    elif abs(progress_reward) > tolerance or abs(progress_weight) > tolerance:
+        raise ValueError("inactive nearest-pellet shaping must have zero reward and weight")
     expected = (
         float(record.get("base_reward_contribution", record["base_reward"]))
         + float(record.get("normal_pellet_reward", 0.0))
@@ -154,7 +178,7 @@ def audit_reward(record: Mapping[str, Any], *, tolerance: float = 1e-9) -> None:
         + float(record.get("completion_reward", 0.0))
         - float(record["step_penalty"])
         - float(record["wall_penalty"])
-        + float(record.get("nearest_pellet_progress_reward", 0.0))
+        + progress_reward
     )
     if abs(expected - float(record["shaped_reward"])) > tolerance:
         raise ValueError(
