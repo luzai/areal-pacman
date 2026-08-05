@@ -207,10 +207,15 @@ saver:
   freq_secs: null
 
 recover:
-  mode: disabled
+  # Keep one-step recovery checkpoints so an inference-worker failure during
+  # a long 256-step PPO iteration costs at most the current update.
+  mode: auto
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
+  freq_epochs: null
+  freq_steps: 1
+  freq_secs: null
 
 evaluator:
   experiment_name: ${experiment_name}
