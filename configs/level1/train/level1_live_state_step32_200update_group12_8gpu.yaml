@@ -1,5 +1,5 @@
 recipe_version: maapacman-level1-v1
-artifact_root: run_artifacts/level1_live_state_openmask_step32_200update
+artifact_root: artifacts/runs/generated/level1_live_state_openmask_step32_200update
 trajectory_dir: ${artifact_root}/trajectories
 experiment_name: pacman-agentic-rl
 trial_name: level1-live-state-openmask-step32-qwen3p5-9b-200update-group12
@@ -168,7 +168,7 @@ train_dataset:
   shuffle: true
   pin_memory: true
   num_workers: 0
-  path: run_artifacts/level1_dataset_step32/train_hf
+  path: artifacts/datasets/level1_dataset_step32/train_hf
   type: rl
   max_length: 1024
 
@@ -177,7 +177,7 @@ valid_dataset:
   shuffle: false
   pin_memory: true
   num_workers: 0
-  path: run_artifacts/level1_dataset_step32/validation_hf
+  path: artifacts/datasets/level1_dataset_step32/validation_hf
   type: rl
   max_length: 1024
 

@@ -13,7 +13,7 @@ from areal_pacman.level1.level1_dataset import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Prepare deterministic MaaPacman level-1 episode rows.")
-    parser.add_argument("--output-root", type=Path, default=Path("run_artifacts/level1_dataset"))
+    parser.add_argument("--output-root", type=Path, default=Path("artifacts/datasets/level1_dataset"))
     parser.add_argument("--train-episodes", type=int, default=8)
     parser.add_argument("--validation-episodes", type=int, default=2)
     parser.add_argument("--seed", type=int, default=0)

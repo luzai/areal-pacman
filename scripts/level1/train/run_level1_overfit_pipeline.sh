@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-ARTIFACT_ROOT="${ARTIFACT_ROOT:-${REPO_ROOT}/run_artifacts/level1_overfit}"
+ARTIFACT_ROOT="${ARTIFACT_ROOT:-${REPO_ROOT}/artifacts/runs/generated/level1_overfit}"
 BASE_MODEL="${BASE_MODEL:-Qwen/Qwen3.5-9B}"
 BASELINE_URL="${BASELINE_URL:-}"
 POST_TRAIN_URL="${POST_TRAIN_URL:-}"
@@ -30,7 +30,7 @@ cp configs/level1/archive/level1_image_overfit_2epoch.yaml "${ARTIFACT_ROOT}/con
 python scripts/level1/dataset/write_level1_manifest.py \
   --artifact-root "${ARTIFACT_ROOT}" \
   --model-revision "${BASE_MODEL}" \
-  --dataset-manifest "run_artifacts/level1_dataset/manifest.json"
+  --dataset-manifest "artifacts/datasets/level1_dataset/manifest.json"
 
 python scripts/level1/evaluate/evaluate_level1.py \
   --model "${BASE_MODEL}" \

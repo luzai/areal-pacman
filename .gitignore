@@ -10,6 +10,7 @@ dist/
 ~$*
 run_artifacts/
 run_reports/
+artifacts/
 reports/
 outputs/
 checkpoints/

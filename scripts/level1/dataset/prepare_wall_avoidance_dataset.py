@@ -18,7 +18,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-root",
         type=Path,
-        default=Path("run_artifacts/wall_avoidance_dataset"),
+        default=Path("artifacts/datasets/wall_avoidance_dataset"),
     )
     parser.add_argument("--train-states", type=int, default=32)
     parser.add_argument("--validation-states", type=int, default=16)

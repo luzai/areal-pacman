@@ -7,4 +7,5 @@
   the latest completed production-run summary.
 
 Generated reports, rendered slides, videos, and raw trajectories stay outside
-Git under the ignored `run_reports/` and `run_artifacts/` directories.
+Git under the ignored `artifacts/` directory. See `../RUN_ARTIFACTS.md` for the
+repository policy and reproducibility guidance.

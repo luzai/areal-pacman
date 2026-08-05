@@ -580,8 +580,8 @@ class RewardAndTrajectoryTests(unittest.TestCase):
             "enable_offload: true",
             "max_tokens_per_mb: 512",
             "offload: true",
-            "run_artifacts/level1_dataset_step256/train_hf",
-            "run_artifacts/level1_dataset_step256/validation_hf",
+            "artifacts/datasets/level1_dataset_step256/train_hf",
+            "artifacts/datasets/level1_dataset_step256/validation_hf",
         ):
             self.assertIn(expected, config)
         actor_section = config.split("\nref:\n", 1)[0].split("\nactor:\n", 1)[1]

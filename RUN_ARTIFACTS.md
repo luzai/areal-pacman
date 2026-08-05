@@ -49,8 +49,10 @@ set `ARTIFACT_ROOT` to storage appropriate for the target machine.
 
 ## What stays outside Git
 
-- `run_artifacts/`
-- `run_reports/`
+- `artifacts/runs/`
+- `artifacts/datasets/`
+- `artifacts/reports/`
+- `artifacts/workbench/`
 - Model checkpoints and `*.safetensors`
 - Generated datasets and trajectories
 - Logs

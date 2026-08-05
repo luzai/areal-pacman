@@ -159,7 +159,7 @@ backend: original-pygame
 
 ```bash
 python scripts/level1/dataset/prepare_level1_dataset.py \
-  --output-root run_artifacts/level1_dataset_step32 \
+  --output-root artifacts/datasets/level1_dataset_step32 \
   --train-episodes 8 \
   --validation-episodes 2 \
   --max-steps 32 \
@@ -170,7 +170,7 @@ python scripts/level1/dataset/prepare_level1_dataset.py \
 
 ```bash
 python scripts/level1/dataset/prepare_level1_dataset.py \
-  --output-root run_artifacts/level1_dataset_step256 \
+  --output-root artifacts/datasets/level1_dataset_step256 \
   --train-episodes 8 \
   --validation-episodes 2 \
   --max-steps 256 \
@@ -196,7 +196,7 @@ step256。
 export AREAL_ROOT=/home/ubuntu/z00819216/xinglu/AReaL
 export MODEL_PATH=/mnt/data/z00819216/models/Qwen3.5-9B
 export CONFIG="$PWD/configs/level1/train/level1_live_state_step256_100update_group12_8gpu.yaml"
-export DATASET_OUTPUT_ROOT="$PWD/run_artifacts/level1_dataset_step256"
+export DATASET_OUTPUT_ROOT="$PWD/artifacts/datasets/level1_dataset_step256"
 export DATASET_MAX_STEPS=256
 
 bash scripts/level1/train/run_level1_training.sh
