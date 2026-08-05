@@ -200,8 +200,11 @@ saver:
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   # Bound disk usage while preserving the two newest regular checkpoints.
-  # The separate recover_checkpoint is never pruned by this policy.
+  # Also save and preserve every newly observed global-best training reward;
+  # the separate recover_checkpoint is never pruned by this policy.
   keep_last: 2
+  keep_best_metric: ppo_actor/task_reward/avg
+  keep_best_mode: max
   freq_epochs: null
   freq_steps: 10
   freq_secs: null
