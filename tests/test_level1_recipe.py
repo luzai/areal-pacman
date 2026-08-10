@@ -398,6 +398,36 @@ class RewardAndTrajectoryTests(unittest.TestCase):
         self.assertIn('"action": "R"', message)
         self.assertIn('"live_legal_actions": ["L", "R"]', message)
 
+    def test_unreachable_bfs_can_truncate_a_trapped_rollout(self) -> None:
+        level = load_bundled_level(1)
+        start = Position(12, 10)
+        targets = {Position(16, 9), Position(16, 11)}
+        with (
+            patch(
+                "areal_pacman.level1.workflow.nearest_reachable_distance",
+                side_effect=ValueError(
+                    "no target is reachable from the requested position"
+                ),
+            ),
+            self.assertLogs(
+                "areal_pacman.level1.workflow",
+                level="WARNING",
+            ) as captured,
+        ):
+            distance = _nearest_reachable_distance_with_diagnostics(
+                level,
+                start,
+                targets,
+                phase="after_step",
+                previous_position=(11, 10),
+                action="D",
+                live_legal_actions=["U", "L", "R", "S"],
+                allow_unreachable=True,
+            )
+        self.assertIsNone(distance)
+        self.assertIn("truncating trapped rollout", captured.output[0])
+        self.assertIn('"start_position": [12, 10]', captured.output[0])
+
     def test_reward_formula_and_audit(self) -> None:
         result = shape_reward(
             10.0,
@@ -1445,6 +1475,7 @@ class TrainerGenerationContractTests(unittest.TestCase):
             step_penalty=1.0,
             wall_penalty=1.0,
             nearest_pellet_alpha=0.0,
+            nearest_pellet_scale_by_cleared_ratio=True,
             observation_mode="rgb",
             vision_tile_size=32,
             store_observation_images=False,
@@ -1479,6 +1510,14 @@ class TrainerGenerationContractTests(unittest.TestCase):
         self.assertEqual(evaluation["image_prompt_style"], "live_static_v2")
         self.assertIs(training["open_action_mask"], True)
         self.assertIs(evaluation["open_action_mask"], True)
+        self.assertIs(
+            training["nearest_pellet_scale_by_cleared_ratio"],
+            True,
+        )
+        self.assertIs(
+            evaluation["nearest_pellet_scale_by_cleared_ratio"],
+            True,
+        )
 
     def test_group12_config_declares_true_greedy_validation(self) -> None:
         config = (

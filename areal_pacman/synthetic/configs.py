@@ -107,6 +107,17 @@ class PacmanAgentConfig(PPOConfig):
             )
         },
     )
+    reward_objective_contract: str = field(
+        default="legacy",
+        metadata={
+            "help": (
+                "Training reward/advantage contract. step_local_raw_v1 keeps "
+                "Pacman's dense per-decision rewards uncentered so an action's "
+                "positive or negative sign is not replaced by trajectory-level "
+                "or batch-level normalization."
+            )
+        },
+    )
     enable_thinking: bool | None = field(
         default=None,
         metadata={"help": "Optional chat-template thinking toggle for Qwen-style models."},

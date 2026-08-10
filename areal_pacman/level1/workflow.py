@@ -58,7 +58,8 @@ def _nearest_reachable_distance_with_diagnostics(
     previous_position: tuple[int, int] | None = None,
     action: str | None = None,
     live_legal_actions: list[str] | None = None,
-) -> int:
+    allow_unreachable: bool = False,
+) -> int | None:
     if not targets:
         return 0
     try:
@@ -93,6 +94,12 @@ def _nearest_reachable_distance_with_diagnostics(
             "level_revision": str(level.revision),
         }
         encoded = json.dumps(diagnostic, sort_keys=True)
+        if allow_unreachable:
+            LOGGER.warning(
+                "nearest-pellet BFS unreachable; truncating trapped rollout: %s",
+                encoded,
+            )
+            return None
         LOGGER.error("nearest-pellet BFS unreachable: %s", encoded)
         raise RuntimeError(
             f"nearest-pellet BFS unreachable: {encoded}"
@@ -566,6 +573,7 @@ class PacmanImageOnlyWorkflow:
                                 phase="before_step",
                                 action=action.value,
                                 live_legal_actions=current_open_actions,
+                                allow_unreachable=True,
                             )
                         )
                 source_position = (
@@ -666,8 +674,13 @@ class PacmanImageOnlyWorkflow:
                                 previous_position=source_position,
                                 action=action.value,
                                 live_legal_actions=list(info["legal_actions"]),
+                                allow_unreachable=True,
                             )
                         )
+                        if distance_after is None:
+                            info["terminal_reason"] = "unreachable_normal_pellets"
+                            terminated = False
+                            truncated = True
                 reward = shape_reward(
                     base_reward,
                     previous_info,

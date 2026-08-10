@@ -31,6 +31,29 @@ def _backend_degree(backend: str) -> int:
     return int(match.group(1))
 
 
+def _validate_reward_objective_contract(config) -> None:
+    contract = config.reward_objective_contract
+    if contract == "legacy":
+        return
+    if contract != "step_local_raw_v1":
+        raise ValueError(f"unsupported reward_objective_contract: {contract}")
+    if not config.workflow.endswith(".PacmanNativeVisionWorkflow"):
+        raise ValueError(
+            "step_local_raw_v1 requires PacmanNativeVisionWorkflow"
+        )
+    if config.actor.reward_norm is not None:
+        raise ValueError(
+            "step_local_raw_v1 requires actor.reward_norm=null; Pacman emits "
+            "one dense reward per environment decision, while trajectory "
+            "group normalization changes the sign of state-local action rewards"
+        )
+    if config.actor.adv_norm is not None:
+        raise ValueError(
+            "step_local_raw_v1 requires actor.adv_norm=null; batch centering "
+            "creates a global action-token baseline across unrelated maze states"
+        )
+
+
 def _build_workflow_kwargs(config, generation_config) -> dict[str, object]:
     kwargs = dict(
         temperature=generation_config.temperature,
@@ -73,6 +96,11 @@ def _build_workflow_kwargs(config, generation_config) -> dict[str, object]:
                 "nearest_pellet_remaining_ratio_threshold",
                 1.0,
             )
+        ),
+        nearest_pellet_scale_by_cleared_ratio=getattr(
+            config,
+            "nearest_pellet_scale_by_cleared_ratio",
+            False,
         ),
         nearest_pellet_skip_on_eat=getattr(
             config,
@@ -158,6 +186,7 @@ def _production_dry_run(
         config, _ = load_expr_config(
             ["--config", str(config_path)], PacmanAgentConfig
         )
+        _validate_reward_objective_contract(config)
         gpu_count = config.cluster.n_gpus_per_node
         if gpu_count not in (4, 6, 8):
             raise ValueError(
