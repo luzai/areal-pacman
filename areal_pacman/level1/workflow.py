@@ -258,6 +258,9 @@ class PacmanImageOnlyWorkflow:
         )
         reward_config = RewardConfig(
             step_penalty=float(options.get("step_penalty", 1.0)),
+            step_penalty_cleared_ratio_scale=float(
+                options.get("step_penalty_cleared_ratio_scale", 0.0)
+            ),
             wall_penalty=float(options.get("wall_penalty", 1.0)),
             use_base_reward=bool(options.get("use_base_reward", True)),
             normal_pellet_reward=float(
@@ -640,6 +643,10 @@ class PacmanImageOnlyWorkflow:
                     int(info["normal_pellets_remaining"])
                     / initial_normal_pellets
                 )
+                normal_pellet_remaining_ratio_before = (
+                    int(previous_info["normal_pellets_remaining"])
+                    / initial_normal_pellets
+                )
                 distance_after = None
                 if level is not None and remaining_normal_pellets is not None:
                     after_row, after_col = info["pacman_position"]
@@ -688,6 +695,9 @@ class PacmanImageOnlyWorkflow:
                     reward_config,
                     normal_pellet_remaining_ratio=(
                         normal_pellet_remaining_ratio
+                    ),
+                    normal_pellet_remaining_ratio_before=(
+                        normal_pellet_remaining_ratio_before
                     ),
                     nearest_pellet_distance_before=distance_before,
                     nearest_pellet_distance_after=distance_after,
@@ -815,6 +825,9 @@ class PacmanImageOnlyWorkflow:
                     ),
                 },
                 "step_penalty_coefficient": reward_config.step_penalty,
+                "step_penalty_cleared_ratio_scale": (
+                    reward_config.step_penalty_cleared_ratio_scale
+                ),
                 "wall_penalty_coefficient": reward_config.wall_penalty,
                 "use_base_reward": reward_config.use_base_reward,
                 "normal_pellet_reward_coefficient": (

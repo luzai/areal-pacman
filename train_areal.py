@@ -76,6 +76,11 @@ def _build_workflow_kwargs(config, generation_config) -> dict[str, object]:
         route_shaping_scale=config.route_shaping_scale,
         safe_progress_alpha=config.safe_progress_alpha,
         step_penalty=config.step_penalty,
+        step_penalty_cleared_ratio_scale=getattr(
+            config,
+            "step_penalty_cleared_ratio_scale",
+            0.0,
+        ),
         wall_penalty=config.wall_penalty,
         use_base_reward=getattr(config, "use_base_reward", True),
         normal_pellet_reward=getattr(

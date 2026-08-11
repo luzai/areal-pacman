@@ -12,6 +12,8 @@ seed: 1
 # - no scheduled validation rollouts
 # - training samples at temperature=0.7, top_p=1.0
 # - explicit +1 normal-pellet, +1 power-pellet, and +50 completion rewards
+# - per-step penalty ramps from 0.05 to 0.50 with the pre-action normal-pellet
+#   cleared ratio: 0.05 + 0.45 * C_t
 # - BFS nearest-pellet guidance scaled smoothly by normal-pellet clear ratio
 # - screenshot plus live engine state and bounded navigation history
 # - every generated action is masked to current open movement actions
@@ -32,6 +34,7 @@ normal_pellet_reward: 1.0
 power_pellet_reward: 1.0
 completion_reward: 50.0
 step_penalty: 0.05
+step_penalty_cleared_ratio_scale: 0.45
 wall_penalty: 0.5
 nearest_pellet_alpha: 0.1
 nearest_pellet_remaining_ratio_threshold: 1.0

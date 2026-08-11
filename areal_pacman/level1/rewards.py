@@ -9,6 +9,7 @@ from typing import Any, Mapping
 @dataclass(frozen=True)
 class RewardConfig:
     step_penalty: float = 1.0
+    step_penalty_cleared_ratio_scale: float = 0.0
     wall_penalty: float = 1.0
     use_base_reward: bool = True
     normal_pellet_reward: float = 0.0
@@ -22,6 +23,10 @@ class RewardConfig:
     def __post_init__(self) -> None:
         if self.step_penalty < 0:
             raise ValueError("step_penalty must be non-negative")
+        if self.step_penalty_cleared_ratio_scale < 0:
+            raise ValueError(
+                "step_penalty_cleared_ratio_scale must be non-negative"
+            )
         if self.wall_penalty < 0:
             raise ValueError("wall_penalty must be non-negative")
         if self.normal_pellet_reward < 0:
@@ -69,6 +74,7 @@ def shape_reward(
     config: RewardConfig,
     *,
     normal_pellet_remaining_ratio: float = 1.0,
+    normal_pellet_remaining_ratio_before: float | None = None,
     nearest_pellet_distance_before: int | None = None,
     nearest_pellet_distance_after: int | None = None,
 ) -> RewardBreakdown:
@@ -91,10 +97,20 @@ def shape_reward(
     completion_reward = (
         config.completion_reward if level_completed else 0.0
     )
-    step_penalty = config.step_penalty
-    wall_penalty = config.wall_penalty if bool(info["wall_collision"]) else 0.0
     if not 0 <= normal_pellet_remaining_ratio <= 1:
         raise ValueError("normal_pellet_remaining_ratio must be in [0, 1]")
+    if normal_pellet_remaining_ratio_before is None:
+        normal_pellet_remaining_ratio_before = normal_pellet_remaining_ratio
+    if not 0 <= normal_pellet_remaining_ratio_before <= 1:
+        raise ValueError(
+            "normal_pellet_remaining_ratio_before must be in [0, 1]"
+        )
+    cleared_ratio_before = 1.0 - normal_pellet_remaining_ratio_before
+    step_penalty = (
+        config.step_penalty
+        + config.step_penalty_cleared_ratio_scale * cleared_ratio_before
+    )
+    wall_penalty = config.wall_penalty if bool(info["wall_collision"]) else 0.0
     distances_available = (
         nearest_pellet_distance_before is not None
         and nearest_pellet_distance_after is not None

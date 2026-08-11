@@ -23,6 +23,15 @@ class PacmanAgentConfig(PPOConfig):
         default=1.0,
         metadata={"help": "Penalty charged for every executed environment step."},
     )
+    step_penalty_cleared_ratio_scale: float = field(
+        default=0.0,
+        metadata={
+            "help": (
+                "Additional per-step penalty multiplied by the pre-action "
+                "normal-pellet cleared ratio."
+            )
+        },
+    )
     wall_penalty: float = field(
         default=1.0,
         metadata={"help": "Non-negative shaped penalty for a move into a wall."},

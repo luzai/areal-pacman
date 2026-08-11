@@ -504,6 +504,53 @@ class RewardAndTrajectoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "nearest-pellet reward audit"):
             audit_reward(broken_progress)
 
+    def test_step_penalty_scales_by_pre_action_cleared_ratio(self) -> None:
+        config = RewardConfig(
+            step_penalty=0.05,
+            step_penalty_cleared_ratio_scale=0.45,
+            wall_penalty=0.5,
+        )
+        early = shape_reward(
+            0.0,
+            {},
+            {"wall_collision": False},
+            config,
+            normal_pellet_remaining_ratio=0.99,
+            normal_pellet_remaining_ratio_before=1.0,
+        )
+        middle = shape_reward(
+            0.0,
+            {},
+            {"wall_collision": False},
+            config,
+            normal_pellet_remaining_ratio=0.49,
+            normal_pellet_remaining_ratio_before=0.5,
+        )
+        late = shape_reward(
+            0.0,
+            {},
+            {"wall_collision": False},
+            config,
+            normal_pellet_remaining_ratio=0.0,
+            normal_pellet_remaining_ratio_before=0.0,
+        )
+
+        self.assertAlmostEqual(early.step_penalty, 0.05)
+        self.assertAlmostEqual(middle.step_penalty, 0.275)
+        self.assertAlmostEqual(late.step_penalty, 0.5)
+        self.assertAlmostEqual(early.shaped_reward, -0.05)
+        self.assertAlmostEqual(middle.shaped_reward, -0.275)
+        self.assertAlmostEqual(late.shaped_reward, -0.5)
+        audit_reward(early.as_dict())
+        audit_reward(middle.as_dict())
+        audit_reward(late.as_dict())
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "step_penalty_cleared_ratio_scale must be non-negative",
+        ):
+            RewardConfig(step_penalty_cleared_ratio_scale=-0.1)
+
     def test_explicit_task_and_late_bfs_distance_reward_formula(self) -> None:
         config = RewardConfig(
             use_base_reward=False,
@@ -642,6 +689,7 @@ class RewardAndTrajectoryTests(unittest.TestCase):
             "power_pellet_reward: 1.0",
             "completion_reward: 50.0",
             "step_penalty: 0.05",
+            "step_penalty_cleared_ratio_scale: 0.45",
             "wall_penalty: 0.5",
             "nearest_pellet_alpha: 0.1",
             "nearest_pellet_remaining_ratio_threshold: 1.0",
