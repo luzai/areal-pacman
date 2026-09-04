@@ -1,0 +1,16 @@
+{
+  "format_version": 1,
+  "source_project": "pacman-python",
+  "source_commit": "2d178a8",
+  "levels": {
+    "1": {
+      "file": "1.txt",
+      "sha256": "71782b0a85fad625826500907e9d381e1b78b0af742dbc0185455c2417993efd",
+      "width": 21,
+      "height": 25,
+      "normal_pellets": 192,
+      "power_pellets": 4,
+      "ghosts": 4
+    }
+  }
+}
