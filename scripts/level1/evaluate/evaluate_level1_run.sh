@@ -10,6 +10,7 @@ SOURCE_RUN="${SOURCE_RUN:?SOURCE_RUN is required}"
 EVAL_ROOT="${EVAL_ROOT:-${SOURCE_RUN}/corrected_eval}"
 GPU_ID="${GPU_ID:-0}"
 PORT_BASE="${PORT_BASE:-18150}"
+CURRICULUM="${CURRICULUM:-2}"
 CHECKPOINT_ROOT="${CHECKPOINT_ROOT:?CHECKPOINT_ROOT is required}"
 
 if [[ ! -x "${PYTHON}" ]]; then
@@ -30,6 +31,10 @@ if [[ -e "${EVAL_ROOT}/comparison.json" ]]; then
 fi
 if [[ ! "${GPU_ID}" =~ ^[0-9]+$ ]]; then
   echo "GPU_ID must be numeric: ${GPU_ID}" >&2
+  exit 2
+fi
+if [[ ! "${CURRICULUM}" =~ ^(1|2)$ ]]; then
+  echo "CURRICULUM must be 1 or 2." >&2
   exit 2
 fi
 
@@ -150,6 +155,7 @@ for index in "${!LABELS[@]}"; do
     --model "${label}" \
     --base-url "http://127.0.0.1:${port}/v1" \
     --episodes 1 \
+    --curriculum "${CURRICULUM}" \
     --concurrency 1 \
     --temperature 0.0 \
     --top-p 1.0 \
@@ -189,6 +195,7 @@ for sampled_offset in "${!SAMPLED_LABELS[@]}"; do
     --model "${sampled_label}" \
     --base-url "http://127.0.0.1:${sampled_port}/v1" \
     --episodes 12 \
+    --curriculum "${CURRICULUM}" \
     --concurrency 4 \
     --temperature 0.7 \
     --top-p 0.95 \

@@ -7,27 +7,66 @@ OWNER_ROOT="${OWNER_ROOT:-${HOME:?HOME must be set}}"
 ENV_ROOT="${ENV_ROOT:-${OWNER_ROOT}/miniconda/envs/maapacman-rl}"
 PYTHON="${PYTHON:-${ENV_ROOT}/bin/python}"
 AREAL_ROOT="${AREAL_ROOT:-${WORKSPACE_ROOT}/AReaL}"
-MODEL_PATH="${MODEL_PATH:-${OWNER_ROOT}/models/Qwen3.5-9B}"
+MODEL_PATH="${MODEL_PATH:-}"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 ARTIFACT_ROOT="${ARTIFACT_ROOT:-${OWNER_ROOT}/run_artifacts/maapacman-rl/level1-overfit-${RUN_ID}}"
-CONFIG="${CONFIG:-${REPO_ROOT}/configs/level1/train/level1_edward_step512_2update_group12_8gpu.yaml}"
+CONFIG="${CONFIG:-${REPO_ROOT}/configs/level1/train/level1_curriculum1_step256_100update_group12_8gpu.yaml}"
 DATASET_OUTPUT_ROOT="${DATASET_OUTPUT_ROOT:-${ARTIFACT_ROOT}/dataset}"
-TRAIN_EPISODES="${TRAIN_EPISODES:-4}"
+SMOKE_TEST="${SMOKE_TEST:-0}"
+TRAIN_EPISODES="${TRAIN_EPISODES:-8}"
 VALIDATION_EPISODES="${VALIDATION_EPISODES:-2}"
-DATASET_MAX_STEPS="${DATASET_MAX_STEPS:-512}"
+DATASET_MAX_STEPS="${DATASET_MAX_STEPS:-256}"
+
+TRAIN_CONFIG_ARGS=()
+MANIFEST_CONFIG_ARGS=()
+if [[ "${SMOKE_TEST}" == "1" ]]; then
+  if ! grep -q '^curriculum:[[:space:]]*1' "${CONFIG}"; then
+    echo "SMOKE_TEST=1 requires the Curriculum 1 config." >&2
+    exit 2
+  fi
+  TRAIN_EPISODES="${SMOKE_TRAIN_EPISODES:-4}"
+  TRAIN_CONFIG_ARGS+=("total_train_epochs=2")
+  TRAIN_CONFIG_ARGS+=("saver.freq_steps=1")
+  MANIFEST_CONFIG_ARGS+=(--config-override "total_train_epochs=2")
+  MANIFEST_CONFIG_ARGS+=(--config-override "saver.freq_steps=1")
+elif [[ "${SMOKE_TEST}" != "0" ]]; then
+  echo "SMOKE_TEST must be 0 or 1." >&2
+  exit 2
+fi
 
 if [[ ! -x "${PYTHON}" ]]; then
   echo "Python is not executable: ${PYTHON}" >&2
-  exit 2
-fi
-if [[ ! -f "${MODEL_PATH}/config.json" ]]; then
-  echo "Model checkout is incomplete: ${MODEL_PATH}" >&2
   exit 2
 fi
 if [[ ! -f "${CONFIG}" ]]; then
   echo "Training config does not exist: ${CONFIG}" >&2
   exit 2
 fi
+CONFIG_CURRICULUM="$(
+  awk '/^curriculum:/ { print $2; exit }' "${CONFIG}"
+)"
+if [[ "${CONFIG_CURRICULUM}" == "1" ]]; then
+  MODEL_PATH="${MODEL_PATH:-${OWNER_ROOT}/models/Qwen3.5-9B}"
+elif [[ "${CONFIG_CURRICULUM}" == "2" ]]; then
+  if [[ -z "${CURRICULUM1_CHECKPOINT:-}" ]]; then
+    echo "Curriculum 2 requires CURRICULUM1_CHECKPOINT." >&2
+    exit 2
+  fi
+  MODEL_PATH="${CURRICULUM1_CHECKPOINT}"
+else
+  echo "Training config must declare curriculum: 1 or 2." >&2
+  exit 2
+fi
+if [[ ! -f "${MODEL_PATH}/config.json" ]]; then
+  echo "Model checkout is incomplete: ${MODEL_PATH}" >&2
+  exit 2
+fi
+if [[ ! -f "${MODEL_PATH}/model.safetensors" \
+  && ! -f "${MODEL_PATH}/model.safetensors.index.json" ]]; then
+  echo "Model weights are missing: ${MODEL_PATH}" >&2
+  exit 2
+fi
+MANIFEST_CONFIG_ARGS+=(--config-override "actor.path=${MODEL_PATH}")
 if [[ ! -f "${AREAL_ROOT}/areal/__init__.py" ]]; then
   echo "Selected AReaL checkout is incomplete: ${AREAL_ROOT}" >&2
   exit 2
@@ -264,14 +303,17 @@ fi
   --config "${CONFIG}" \
   --dry-run \
   --validate-areal \
+  "actor.path=${MODEL_PATH}" \
   "train_dataset.path=${DATASET_OUTPUT_ROOT}/train_hf" \
-  "valid_dataset.path=${DATASET_OUTPUT_ROOT}/validation_hf"
+  "valid_dataset.path=${DATASET_OUTPUT_ROOT}/validation_hf" \
+  "${TRAIN_CONFIG_ARGS[@]}"
 cp "${CONFIG}" "${ARTIFACT_ROOT}/config.yaml"
 "${PYTHON}" scripts/level1/dataset/write_level1_manifest.py \
   --artifact-root "${ARTIFACT_ROOT}" \
   --model-revision "${MODEL_PATH}" \
   --dataset-manifest "${DATASET_OUTPUT_ROOT}/manifest.json" \
-  --config "${CONFIG}"
+  --config "${CONFIG}" \
+  "${MANIFEST_CONFIG_ARGS[@]}"
 
 if [[ "${PREFLIGHT_ONLY:-0}" == "1" ]]; then
   echo "preflight=ok"
@@ -297,4 +339,5 @@ exec "${PYTHON}" train_areal.py \
   "train_dataset.path=${DATASET_OUTPUT_ROOT}/train_hf" \
   "valid_dataset.path=${DATASET_OUTPUT_ROOT}/validation_hf" \
   "experiment_name=maapacman-level1" \
-  "trial_name=overfit-${RUN_ID}"
+  "trial_name=overfit-${RUN_ID}" \
+  "${TRAIN_CONFIG_ARGS[@]}"

@@ -25,6 +25,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--script", required=True)
     parser.add_argument("--seed", required=True, type=int)
+    parser.add_argument("--curriculum", required=True, type=int, choices=(1, 2))
     return parser.parse_args()
 
 
@@ -217,6 +218,7 @@ class _PygameBridge:
             "pacman_speed": float(state["pacman_speed"]),
             "pacman_facing": str(state["facing"]),
             "level": int(state["level"]),
+            "curriculum": int(state["curriculum"]),
             "mode": int(state["mode"]),
             "mode_name": str(state["mode_name"]),
             "mode_timer": int(state["mode_timer"]),
@@ -392,6 +394,9 @@ class _PygameBridge:
         ghosts = globals_dict["ghosts"]
         fruit = globals_dict["thisFruit"]
         tile_ids = globals_dict.get("tileID", {})
+        curriculum = int(globals_dict.get("CURRICULUM_ID", 0))
+        if curriculum not in (1, 2):
+            raise RuntimeError("pacman-python did not expose curriculum 1 or 2")
         surface = pygame.display.get_surface()
         frame = pygame.surfarray.array3d(surface).swapaxes(0, 1).copy()
         raw = frame.tobytes(order="C")
@@ -469,6 +474,7 @@ class _PygameBridge:
                 "pacman_speed": float(player.speed),
                 "facing": player.lastMoveDir if player.lastMoveDir in "UDLRS" else "S",
                 "level": int(game.GetLevelNum()),
+                "curriculum": curriculum,
                 "mode": int(game.mode),
                 "mode_name": mode_names.get(int(game.mode), "unknown"),
                 "mode_timer": int(game.modeTimer),
@@ -579,7 +585,13 @@ def main() -> int:
     protocol_output = sys.stdout
     sys.stdout = sys.stderr
     sys.path[0] = str(script.parent)
-    sys.argv = [str(script), "--start-level", "1"]
+    sys.argv = [
+        str(script),
+        "--start-level",
+        "1",
+        "--curriculum",
+        str(args.curriculum),
+    ]
     random.seed(args.seed)
     os.environ["MAAPACMAN_PAUSE_ON_START"] = "1"
 

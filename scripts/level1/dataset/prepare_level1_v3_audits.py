@@ -148,6 +148,7 @@ def _metadata(env: PygamePacmanEnv) -> dict[str, Any]:
         "maapacman_planner_source_sha256": _planner_source_sha256(),
         "maapacman_dirty": recipe_revision["dirty"],
         "level": int(provenance["level"]),
+        "curriculum": int(provenance["curriculum"]),
         "level_revision": env.spec.level_revision,
         "renderer_revision": env.spec.renderer_revision,
         "ruleset_revision": env.spec.ruleset_revision,
@@ -173,6 +174,20 @@ def _reward_config(config_path: Path) -> tuple[RewardConfig, str]:
             raise ValueError(f"training config is missing {field.name}")
         values[field.name] = raw[field.name]
     return RewardConfig(**values), hashlib.sha256(config_bytes).hexdigest()
+
+
+def _curriculum_config(config_path: Path) -> int:
+    raw = yaml.safe_load(config_path.read_bytes())
+    if not isinstance(raw, Mapping):
+        raise ValueError("training config must be a mapping")
+    curriculum = raw.get("curriculum")
+    if (
+        not isinstance(curriculum, int)
+        or isinstance(curriculum, bool)
+        or curriculum not in (1, 2)
+    ):
+        raise ValueError("training config curriculum must be integer 1 or 2")
+    return int(curriculum)
 
 
 def _nearest_distance(level: Any, start: Position, targets: set[Position]) -> int:
@@ -271,6 +286,9 @@ def audit_planner_record(record: Mapping[str, Any]) -> None:
         or environment.get("name") != ENV_NAME
         or environment.get("backend") != "original-pygame"
         or environment.get("level") != 1
+        or not isinstance(environment.get("curriculum"), int)
+        or isinstance(environment.get("curriculum"), bool)
+        or environment.get("curriculum") not in (1, 2)
         or environment.get("dataset_contract_version")
         != DATASET_CONTRACT_VERSION
     ):
@@ -331,6 +349,14 @@ def audit_planner_record(record: Mapping[str, Any]) -> None:
         record["next_structured_state"]
     ):
         raise ValueError("planner audit next-state hash mismatch")
+    if any(
+        state.get("curriculum") != environment["curriculum"]
+        for state in (
+            record["structured_state"],
+            record["next_structured_state"],
+        )
+    ):
+        raise ValueError("planner audit state curriculum mismatch")
 
     legal_actions = record["legal_actions"]
     if (
@@ -641,6 +667,7 @@ def collect_initial_audit_anchor(
     seed: int,
     max_steps: int,
     reward_config: RewardConfig,
+    curriculum: int,
     pacman_python_root: str | None = None,
 ) -> dict[str, Any]:
     """Capture one real Edward transition without calling it a model rollout."""
@@ -648,6 +675,7 @@ def collect_initial_audit_anchor(
     env = PygamePacmanEnv(
         PygamePacmanEnvConfig(
             pacman_python_root=pacman_python_root,
+            curriculum=curriculum,
             max_steps=max_steps,
         )
     )
@@ -691,6 +719,7 @@ def main() -> None:
         raise ValueError("audit seeds must be unique")
     args.output_root.mkdir(parents=True, exist_ok=False)
     reward_config, config_sha256 = _reward_config(args.config)
+    curriculum = _curriculum_config(args.config)
     baseline: list[dict[str, Any]] = []
     metadata: dict[str, Any] | None = None
     per_seed_rows: dict[str, int] = {}
@@ -698,6 +727,7 @@ def main() -> None:
         env = PygamePacmanEnv(
             PygamePacmanEnvConfig(
                 pacman_python_root=args.pacman_python_root,
+                curriculum=curriculum,
                 max_steps=args.max_steps,
             )
         )

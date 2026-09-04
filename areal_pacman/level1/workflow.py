@@ -265,6 +265,8 @@ def validate_env_spec(
         raise RuntimeError("dataset environment ID does not match MaaPacman")
     if requested.get("backend") != "original-pygame":
         raise RuntimeError("production recipe requires original-pygame backend")
+    if requested.get("curriculum") != provenance.get("curriculum"):
+        raise RuntimeError("MaaPacman curriculum does not match dataset row")
     if requested.get("pacman_python_revision") != provenance.get(
         "pacman_python_commit"
     ):
@@ -347,6 +349,14 @@ class PacmanImageOnlyWorkflow:
         validate_episode_row(data)
         requested = data["env"]
         seed = int(requested["seed"])
+        requested_curriculum = int(requested["curriculum"])
+        configured_curriculum = int(
+            options.get("curriculum", requested_curriculum)
+        )
+        if configured_curriculum != requested_curriculum:
+            raise ValueError(
+                "workflow curriculum does not match the dataset row"
+            )
         state_prefix_actions = list(data.get("state_prefix_actions") or [])
         single_step = data.get("decision_steps") == 1
         options["single_step"] = single_step
@@ -356,6 +366,7 @@ class PacmanImageOnlyWorkflow:
         config = PygamePacmanEnvConfig(
             pacman_python_root=options.get("pacman_python_root"),
             level=int(requested["level"]),
+            curriculum=configured_curriculum,
             max_steps=int(requested["max_steps"]),
             video_driver=options.get("video_driver", "dummy"),
             audio_driver=options.get("audio_driver", "dummy"),
@@ -433,6 +444,13 @@ class PacmanImageOnlyWorkflow:
                     f"{EDWARD_OPTION_CONSTRAINT}"
                 )
             system_prompt = EDWARD_OPTION_CODE_V1_SYSTEM_PROMPT
+        if configured_curriculum == 1:
+            curriculum_note = (
+                "Curriculum 1 has no active ghosts and no fruit; collect "
+                "pellets safely."
+            )
+            system_prompt = f"{system_prompt} {curriculum_note}"
+            user_instruction = f"{user_instruction}\n\n{curriculum_note}"
         if edward_options and scripted:
             raise ValueError(
                 "edward_options uses scripted_objectives, not scripted_actions"
@@ -1302,6 +1320,7 @@ class PacmanImageOnlyWorkflow:
                 "level_revision": env.spec.level_revision,
                 "renderer_revision": env.spec.renderer_revision,
                 "level": config.level,
+                "curriculum": config.curriculum,
                 "seed": seed,
                 "max_steps": config.max_steps,
                 "state_prefix_actions": state_prefix_actions,

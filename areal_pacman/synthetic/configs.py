@@ -7,6 +7,15 @@ from areal.api.cli_args import PPOConfig
 
 @dataclass
 class PacmanAgentConfig(PPOConfig):
+    curriculum: int = field(
+        default=2,
+        metadata={
+            "help": (
+                "Level-1 curriculum: 1 is safe pellet collection with four "
+                "gone ghosts and no fruit; 2 is the full ghostdoor-v3 game."
+            )
+        },
+    )
     recipe_version: str = field(
         default="research-scaffold",
         metadata={"help": "Recipe contract identifier stored with run artifacts."},

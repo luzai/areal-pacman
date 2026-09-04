@@ -32,6 +32,7 @@ REQUIRED_ENV_FIELDS = {
     "reward_recipe_version",
     "level_revision",
     "renderer_revision",
+    "curriculum",
     "seed",
     "max_steps",
     "state_prefix_actions",
@@ -116,6 +117,7 @@ _REQUIRED_ATOMIC_FIELDS = {
     "pacman_position",
     "pacman_facing",
     "level",
+    "curriculum",
     "mode",
     "mode_name",
     "score",
@@ -223,6 +225,7 @@ def audit_step_environment_evidence(
     *,
     previous_score: int,
     previous_logic_frame: int,
+    expected_curriculum: int | None = None,
 ) -> tuple[int, int]:
     """Reconcile one recorded action with every API-v3 atomic frame."""
 
@@ -251,6 +254,14 @@ def audit_step_environment_evidence(
             raw_substep["logic_frame_index"], "logic_frame_index"
         ) != index:
             raise ValueError("logic-frame indexes are not contiguous")
+        curriculum = _integer(raw_substep["curriculum"], "curriculum")
+        if curriculum not in (1, 2):
+            raise ValueError("atomic curriculum must be 1 or 2")
+        if (
+            expected_curriculum is not None
+            and curriculum != expected_curriculum
+        ):
+            raise ValueError("atomic curriculum does not match trajectory")
         current_logic_frame = _integer(raw_substep["frame"], "frame")
         if current_logic_frame != logic_frame + 1:
             raise ValueError("source logic frames are not globally contiguous")
@@ -518,6 +529,9 @@ def audit_trajectory(payload: Mapping[str, Any]) -> None:
         raise ValueError("trajectory has the wrong environment ID")
     if payload["backend"] != "original-pygame":
         raise ValueError("trajectory backend must be original-pygame")
+    curriculum = _integer(payload.get("curriculum"), "curriculum")
+    if curriculum not in (1, 2):
+        raise ValueError("trajectory curriculum must be 1 or 2")
     if payload["dataset_contract_version"] != DATASET_CONTRACT_VERSION:
         raise ValueError("trajectory has the wrong dataset contract")
     source_revisions = payload["source_revisions"]
@@ -658,6 +672,7 @@ def audit_trajectory(payload: Mapping[str, Any]) -> None:
                 step,
                 previous_score=previous_score,
                 previous_logic_frame=previous_logic_frame,
+                expected_curriculum=curriculum,
             )
         if payload.get("action_constraint") == EDWARD_OPTION_CONSTRAINT:
             option_missing = {

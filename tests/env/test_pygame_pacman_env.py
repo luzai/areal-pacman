@@ -182,6 +182,7 @@ class PygamePacmanEnvTests(unittest.TestCase):
                     ],
                     "maapacman_dirty": info["maapacman_dirty"],
                     "level": 1,
+                    "curriculum": 2,
                     "level_revision": EXPECTED_LEVEL_REVISION,
                     "env_id": env.spec.env_id,
                     "api_version": "3.0",
@@ -198,6 +199,8 @@ class PygamePacmanEnvTests(unittest.TestCase):
             self.assertTrue(info["state"]["ghost_door"]["pacman_blocked"])
             self.assertFalse(info["state"]["ghost_door"]["ghost_blocked"])
             self.assertEqual(info["pellets_remaining"], 196)
+            self.assertEqual(info["curriculum"], 2)
+            self.assertEqual(info["state"]["curriculum"], 2)
             self.assertEqual(info["normal_pellets_remaining"], 192)
             self.assertEqual(info["power_pellets_remaining"], 4)
             self.assertEqual(len(info["ghosts"]), 4)
@@ -253,6 +256,80 @@ class PygamePacmanEnvTests(unittest.TestCase):
             self.assertIsNone(env.worker_runtime_dir)
             self.assertEqual(env.provenance["level"], 1)
             self.assertEqual(env.provenance["api_version"], "3.0")
+        finally:
+            env.close()
+
+    def test_curriculum_one_has_gone_ghosts_no_fruit_and_shared_timebase(self) -> None:
+        env = self.make_env(curriculum=1)
+        try:
+            _, info = env.reset(seed=7)
+            self.assertEqual(info["curriculum"], 1)
+            self.assertEqual(env.provenance["curriculum"], 1)
+            self.assertEqual(info["state"]["curriculum"], 1)
+            self.assertEqual(len(info["ghosts"]), 4)
+            self.assertTrue(
+                all(ghost["state"] == "gone" for ghost in info["ghosts"])
+            )
+            self.assertTrue(
+                all(ghost["position"] == [-4, -4] for ghost in info["ghosts"])
+            )
+            self.assertTrue(
+                all(not ghost["path_found"] for ghost in info["ghosts"])
+            )
+            self.assertFalse(info["fruit"]["active"])
+            self.assertFalse(info["fruit"]["path_found"])
+            self.assertEqual(info["fruit_timer"], 0)
+            self.assertEqual(info["edible_ticks"], 0)
+            initial_ghosts = info["ghosts"]
+
+            _, reward, terminated, truncated, step_info = env.step("S")
+
+            self.assertEqual(reward, 0.0)
+            self.assertFalse(terminated)
+            self.assertFalse(truncated)
+            self.assertEqual(step_info["logic_frames"], 16)
+            self.assertEqual(step_info["ghosts"], initial_ghosts)
+            self.assertEqual(step_info["events"], [])
+            self.assertFalse(step_info["fruit"]["active"])
+            self.assertEqual(step_info["fruit_timer"], 0)
+            self.assertTrue(
+                all(
+                    substep["curriculum"] == 1
+                    for substep in step_info["atomic_substeps"]
+                )
+            )
+        finally:
+            env.close()
+
+    def test_curriculum_one_power_pellet_never_activates_ghosts(self) -> None:
+        level = load_bundled_level(1)
+        route = route_to_nearest(
+            level, level.pacman_start, level.power_pellets
+        )
+        env = self.make_env(curriculum=1, max_steps=len(route))
+        power_event = None
+        try:
+            env.reset(seed=0)
+            for action in route:
+                _, _, terminated, truncated, info = env.step(action.value)
+                events = [
+                    event
+                    for event in info["logic_frame_events"]
+                    if event["event_type"] == "power_pellet_eaten"
+                ]
+                if events:
+                    power_event = events[0]
+                if terminated or truncated:
+                    break
+            self.assertIsNotNone(power_event)
+            self.assertEqual(power_event["score_delta"], 100)
+            self.assertEqual(power_event["edible_ticks"], 0)
+            self.assertEqual(info["edible_ticks"], 0)
+            self.assertEqual(info["ghost_value"], 0)
+            self.assertFalse(info["death"])
+            self.assertTrue(
+                all(ghost["state"] == "gone" for ghost in info["ghosts"])
+            )
         finally:
             env.close()
 
@@ -709,6 +786,11 @@ class PygamePacmanEnvTests(unittest.TestCase):
         self.assertEqual(final_info["normal_pellets_remaining"], 0)
 
     def test_invalid_action_configuration_and_lifecycle_errors(self) -> None:
+        for invalid_curriculum in (0, 3, True, 1.0, "1"):
+            with self.subTest(curriculum=invalid_curriculum), self.assertRaises(
+                InvalidConfigurationError
+            ):
+                self.make_env(curriculum=invalid_curriculum)
         with self.assertRaises(InvalidConfigurationError):
             self.make_env(max_steps=0)
         with self.assertRaises(InvalidConfigurationError):

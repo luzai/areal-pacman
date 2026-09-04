@@ -1,23 +1,33 @@
 recipe_version: maapacman-level1-ghostdoor-v3
-reward_recipe_version: maapacman-level1-event-reward-v3
-artifact_root: artifacts/runs/generated/level1_edward_options_step512_2update_gate
+curriculum: 2
+artifact_root: artifacts/runs/generated/curriculum2_step256_100update
 trajectory_dir: ${artifact_root}/trajectories
 experiment_name: pacman-agentic-rl
-trial_name: level1-edward-options-step512-qwen3p5-9b-2update-group12-gate
+trial_name: curriculum2-full-ghostdoor-step256-100update-group12
 
 seed: 1
-# Formal Edward-v3 Step512 launch gate:
-# - 4 train rows / batch size 4 / 2 epochs = 2 optimizer updates
-# - batch size 4 and n_samples=12 give 48 rollout samples per update
-#   (96 rollout samples across the complete two-update recovery gate)
-# - both train and validation dataset rows must use max_steps=512
-# - one-step recovery checkpoints are required for the restart gate
+# Curriculum 2 full run, initialized from the Curriculum 1 checkpoint:
+# - 8 train rows / batch size 4 = 2 updates per epoch
+# - 50 epochs = 100 total updates
+# - both train and validation dataset rows must use max_steps=256
+# - full ghosts, power-pellet vulnerability, fruit, and ghost-door rules
+# - no scheduled validation rollouts
+# - training samples at temperature=0.7, top_p=1.0
+# - explicit +1 normal-pellet, +1 power-pellet, and +50 completion rewards
+# - fixed 0.05 penalty per executed environment step
+# - BFS nearest-pellet guidance scaled smoothly by normal-pellet clear ratio
+# - screenshot plus live engine state and bounded navigation history
+# - the model chooses one canonical C*/A*/E* objective JSON from Edward's
+#   planner-approved set; execution is bounded and replans on invalidation
+# - save every 10 updates to bound checkpoint storage
+# - TMS alternates the colocated actor and reference model: actor is offloaded
+#   during rollout/ref log-prob, then reference is offloaded before actor update
 enable_offload: true
 enable_thinking: false
 validation_contract: sampled12_uniform_shaped
-reward_objective_contract: option_return_raw_v1
+reward_objective_contract: episode_return_group_v1
 image_prompt_style: live_state_v3
-total_train_epochs: 2
+total_train_epochs: 50
 tokenizer_path: ${actor.path}
 workflow: areal_pacman.workflow.PacmanNativeVisionWorkflow
 eval_workflow: ${workflow}
@@ -27,6 +37,7 @@ normal_pellet_reward: 1.0
 power_pellet_reward: 1.0
 ghost_reward: 5.0
 fruit_reward: 0.0
+reward_recipe_version: maapacman-level1-event-reward-v3
 death_penalty: 25.0
 completion_reward: 50.0
 safety_refusal_penalty: 25.0
@@ -97,7 +108,7 @@ actor:
   backend: "fsdp:d4p1t1"
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  path: Qwen/Qwen3.5-9B
+  path: ${oc.env:CURRICULUM1_CHECKPOINT}
   attn_impl: sdpa
   init_from_scratch: false
   disable_dropout: true
@@ -106,6 +117,8 @@ actor:
   dtype: bfloat16
   optimizer_dtype: bfloat16
   mb_spec:
+    # The Edward JSON-option trajectory can exceed 512 tokens. Keep enough
+    # headroom for those sequences and NCCL's grad-norm all-reduce.
     max_tokens_per_mb: 1024
   optimizer:
     type: adam_bf16
@@ -134,7 +147,13 @@ actor:
     agg: sum
     lower: 0.8
     upper: 1.25
-  reward_norm: null
+  # Normalize exactly 12 complete-episode returns from the same initial maze
+  # state, then broadcast that episode advantage to all of its option decisions.
+  reward_norm:
+    mean_level: group
+    mean_leave1out: false
+    std_level: group
+    group_size: ${gconfig.n_samples}
   adv_norm: null
   weight_update_mode: xccl
   max_new_tokens: ${gconfig.max_new_tokens}
@@ -184,7 +203,7 @@ train_dataset:
   shuffle: true
   pin_memory: true
   num_workers: 0
-  path: artifacts/datasets/level1_dataset_step512/train_hf
+  path: artifacts/datasets/level1_dataset_step256/train_hf
   type: rl
   max_length: 1024
 
@@ -193,7 +212,7 @@ valid_dataset:
   shuffle: false
   pin_memory: true
   num_workers: 0
-  path: artifacts/datasets/level1_dataset_step512/validation_hf
+  path: artifacts/datasets/level1_dataset_step256/validation_hf
   type: rl
   max_length: 1024
 
@@ -201,14 +220,19 @@ saver:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
+  # Bound disk usage while preserving the two newest regular checkpoints.
+  # Also save and preserve every newly observed global-best training reward;
+  # the separate recover_checkpoint is never pruned by this policy.
   keep_last: 2
   keep_best_metric: ppo_actor/task_reward/avg
   keep_best_mode: max
   freq_epochs: null
-  freq_steps: 1
+  freq_steps: 10
   freq_secs: null
 
 recover:
+  # Keep one-step recovery checkpoints so an inference-worker failure during
+  # a long 256-step PPO iteration costs at most the current update.
   mode: auto
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}

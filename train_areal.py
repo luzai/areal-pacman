@@ -120,6 +120,7 @@ def _build_workflow_kwargs(
     config, generation_config, *, training: bool = True
 ) -> dict[str, object]:
     kwargs = dict(
+        curriculum=int(getattr(config, "curriculum", 2)),
         temperature=generation_config.temperature,
         top_p=generation_config.top_p,
         max_tokens=generation_config.max_tokens,
@@ -230,9 +231,15 @@ def _production_dry_run(
     }:
         return False
     from areal_pacman.level1.level1_dataset import validate_episode_row
-    from maapacman.env import PygamePacmanEnv
+    from maapacman.env import PygamePacmanEnv, PygamePacmanEnvConfig
 
-    epochs = int(_yaml_scalar(text, "total_train_epochs"))
+    effective_args = config_args or ["--config", str(config_path)]
+    epochs_override = _config_override(effective_args, "total_train_epochs")
+    epochs = int(
+        epochs_override
+        if epochs_override is not None
+        else _yaml_scalar(text, "total_train_epochs")
+    )
     workflow_path = _yaml_scalar(text, "workflow")
     if epochs < 2:
         raise ValueError("production level-1 training must run at least two epochs")
@@ -243,7 +250,6 @@ def _production_dry_run(
     }:
         raise ValueError("production config must use areal_pacman.workflow")
 
-    effective_args = config_args or ["--config", str(config_path)]
     dataset_overrides = [
         _config_override(effective_args, "train_dataset.path"),
         _config_override(effective_args, "valid_dataset.path"),
@@ -262,6 +268,7 @@ def _production_dry_run(
         if len(dataset_matches) < 2:
             raise ValueError("config must declare train and validation dataset paths")
     rows = 0
+    dataset_curricula: set[int] = set()
     for raw_path in dataset_matches[-2:]:
         dataset_path = Path(raw_path.strip().strip('"\''))
         if not dataset_path.is_absolute():
@@ -277,9 +284,23 @@ def _production_dry_run(
         import json
 
         for line in jsonl.read_text(encoding="utf-8").splitlines():
-            validate_episode_row(json.loads(line))
+            row = json.loads(line)
+            validate_episode_row(row)
+            dataset_curricula.add(int(row["env"]["curriculum"]))
             rows += 1
-    env = PygamePacmanEnv()
+    curriculum_raw = _config_override(effective_args, "curriculum")
+    curriculum = int(
+        curriculum_raw
+        if curriculum_raw is not None
+        else _yaml_scalar(text, "curriculum")
+    )
+    if curriculum not in (1, 2):
+        raise ValueError("curriculum must be 1 or 2")
+    if dataset_curricula != {curriculum}:
+        raise ValueError(
+            "training config curriculum does not match both datasets"
+        )
+    env = PygamePacmanEnv(PygamePacmanEnvConfig(curriculum=curriculum))
     try:
         spec = env.spec
     finally:
@@ -290,6 +311,7 @@ def _production_dry_run(
     print(f"dataset_rows={rows}")
     print(f"total_train_epochs={epochs}")
     print(f"env_api_version={spec.api_version}")
+    print(f"curriculum={curriculum}")
     print(f"level_revision={spec.level_revision}")
     print(f"action_tokens={','.join(spec.action_tokens)}")
     if validate_areal:

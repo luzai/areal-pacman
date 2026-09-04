@@ -91,6 +91,7 @@ def main() -> None:
         requested = row["env"]
         config = PygamePacmanEnvConfig(
             level=int(requested["level"]),
+            curriculum=int(requested["curriculum"]),
             max_steps=int(requested["max_steps"]),
             video_driver="dummy",
             audio_driver="dummy",

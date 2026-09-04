@@ -66,6 +66,7 @@ def _atomic_frame(event=None):
         "pacman_position": [1, 2],
         "pacman_facing": "R",
         "level": 1,
+        "curriculum": 2,
         "mode": 1,
         "mode_name": "play",
         "score": score,
@@ -134,8 +135,13 @@ def _step_evidence():
 
 def _planner_record():
     evidence = _step_evidence()
-    state = {"row": 1, "col": 1, "open": ["R"]}
-    next_state = {"row": 1, "col": 2, "open": ["L", "R"]}
+    state = {"row": 1, "col": 1, "open": ["R"], "curriculum": 2}
+    next_state = {
+        "row": 1,
+        "col": 2,
+        "open": ["L", "R"],
+        "curriculum": 2,
+    }
     candidate = {
         "option_id": "C0",
         "strategy": "COLLECT",
@@ -165,6 +171,7 @@ def _planner_record():
             "api_version": "3.0",
             "backend": "original-pygame",
             "level": 1,
+            "curriculum": 2,
             "dataset_contract_version": (
                 level1_dataset.DATASET_CONTRACT_VERSION
             ),
@@ -354,6 +361,7 @@ def test_trajectory_rejects_legacy_or_mismatched_maapacman_repository():
         env_api_version=level1_dataset.ENV_API_VERSION,
         env_id=level1_dataset.ENV_NAME,
         backend="original-pygame",
+        curriculum=2,
         dataset_contract_version=level1_dataset.DATASET_CONTRACT_VERSION,
         maapacman_revision="2" * 40,
         source_revisions={
@@ -515,7 +523,11 @@ def test_split_main_uses_explicit_non_sibling_pacman_root_without_leaking_env(
         check=True,
     ).stdout.strip()
 
-    original_root = Path(__file__).parents[2] / "pacman-python"
+    original_root = Path(
+        os.environ.get("MAAPACMAN_PACMAN_ROOT")
+        or os.environ.get("MAAPACMAN_PACMAN_PYTHON_ROOT")
+        or Path(__file__).parents[2] / "pacman-python"
+    ).resolve()
     monkeypatch.setenv("MAAPACMAN_PACMAN_ROOT", str(original_root))
     observed: dict[str, object] = {}
 
@@ -590,7 +602,7 @@ def test_split_generator_writes_relative_immutable_manifest(tmp_path):
             / "configs"
             / "level1"
             / "train"
-            / "level1_edward_step512_2update_group12_8gpu.yaml"
+            / "level1_curriculum1_step256_100update_group12_8gpu.yaml"
         ),
         train_episodes=2,
         validation_episodes=1,
@@ -683,6 +695,7 @@ def test_audit_metadata_carries_complete_environment_and_planner_provenance():
             "maapacman_env_source_sha256": "4" * 64,
             "maapacman_dirty": False,
             "level": 1,
+            "curriculum": 2,
         },
         spec=SimpleNamespace(
             env_id="pacman-python-level1-ghostdoor-v3",
@@ -721,6 +734,7 @@ def test_audit_metadata_carries_complete_environment_and_planner_provenance():
         "maapacman_planner_source_sha256": "8" * 64,
         "maapacman_dirty": False,
         "level": 1,
+        "curriculum": 2,
         "level_revision": "5" * 64,
         "renderer_revision": "6" * 64,
         "ruleset_revision": "7" * 64,
@@ -733,7 +747,12 @@ def test_run_manifest_records_three_repositories_and_bundled_revision(
 ):
     dataset_manifest = tmp_path / "dataset-manifest.json"
     dataset_manifest.write_text(
-        json.dumps({"splits": {"train": {"seeds": [11, 12]}}}),
+        json.dumps(
+            {
+                "curriculum": 2,
+                "splits": {"train": {"seeds": [11, 12]}},
+            }
+        ),
         encoding="utf-8",
     )
     config = tmp_path / "config.yaml"
@@ -742,6 +761,7 @@ def test_run_manifest_records_three_repositories_and_bundled_revision(
             {
                 "recipe_version": "maapacman-level1-ghostdoor-v3",
                 "reward_recipe_version": REWARD_RECIPE_VERSION,
+                "curriculum": 2,
             }
         ),
         encoding="utf-8",
@@ -756,6 +776,7 @@ def test_run_manifest_records_three_repositories_and_bundled_revision(
         provenance={
             "maapacman_commit": "2" * 40,
             "maapacman_dirty": True,
+            "curriculum": 2,
         },
         spec=SimpleNamespace(
             api_version="3.0",
