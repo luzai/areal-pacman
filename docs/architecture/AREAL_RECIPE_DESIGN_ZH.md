@@ -1,40 +1,46 @@
 # AReaL Pacman RL Recipe 设计
 
-状态：本地可执行 recipe 迁移已完成；远端源码部署和继承依赖协调仍未完成  
-环境提供方：MaaPacman `PygamePacmanEnv` API `1.0`  
-环境 ID：`pacman-python-level1-pygame-v1`  
-生产 episode 上限：`287` 个 action  
-远端 Linux backend：SDL dummy  
-最后验证日期：`2026-07-23`
+状态：内置源码的 API-v3 合约已与当前代码同步；下文保留注明日期的历史训练与
+评测证据
+环境提供方：本仓库内置的 `maapacman.PygamePacmanEnv` API `3.0`
+环境 ID：`pacman-python-level1-ghostdoor-v3`
+Dataset 合约：`maapacman-level1-dataset-v3`
+生产 dataset 默认上限：`256` 个 action
+支持的 episode 上限：`32`、`256`、`512`、`2000` 个 action
+通用 `PygamePacmanEnvConfig` 默认值：`512` 个 action，不是生产 dataset 默认值
+远端 Linux backend：SDL dummy
+代码合约同步日期：`2026-09-04`
+历史远端证据最后验证日期：`2026-07-23`
 
-配套设计文档：
-[MaaPacman Environment Interface Design](../../../MaaPacman/PACMAN_ENV_DESIGN.md)
+headless 环境实现位于本仓库的 `maapacman/`，不再需要独立的 MaaPacman
+checkout。
 
-工作区路径：
+示例 checkout 布局：
 
 ```text
-C:\Users\x84241863\Desktop\life\MaaPacman
-C:\Users\x84241863\Desktop\life\pacman-python
-C:\Users\x84241863\Desktop\life\areal-pacman
+${WORKSPACE_ROOT}/AReaL
+${WORKSPACE_ROOT}/areal-pacman
+${WORKSPACE_ROOT}/pacman-python
 ```
 
 ## 1. 职责归属
 
 ```text
+AReaL fork
+  负责分布式训练、rollout worker 和 checkpoint 编排
+
+areal-pacman 仓库
+  maapacman 包负责外部进程 wrapper、帧边界 action 协议、
+  RGB Surface 提取和稳定的环境 API
+  areal_pacman 包负责 episode dataset、prompt、模型调用、解析、
+  reward shaping、trajectory 记录、AReaL 配置和评估
+
 pacman-python
   负责原版游戏规则、资源和 pygame renderer
-
-MaaPacman
-  负责外部进程 wrapper、帧边界 action 协议、
-  RGB Surface 提取和稳定的环境 API
-
-areal-pacman
-  负责 episode dataset、prompt、模型调用、解析、reward shaping、
-  trajectory 记录、AReaL 配置、checkpoint 和评估
 ```
 
 `pacman-python` 是 sibling dependency，源代码必须保持干净。它不得 import
-MaaPacman 或 AReaL。
+`maapacman` 或 AReaL。
 
 ### 1.1 生产环境 API
 
@@ -78,123 +84,129 @@ timer 和 animation 都不会推进。因此，模型延迟只改变 rollout 的
 
 ## 3. 必需安装和 mirror
 
-生产训练节点需要在已确认、归属于 owner 的 `z0xxx` 根目录下保存三个仓库的
-持久 mirror：
+生产训练节点需要固定下面三层源码。`areal-pacman` checkout 同时包含两个
+Python 包，因此不需要独立 MaaPacman 仓库或安装：
 
 ```text
-/home/ubuntu/z00819216/maapacman-stack/MaaPacman
-/home/ubuntu/z00819216/maapacman-stack/pacman-python
-/home/ubuntu/z00819216/maapacman-stack/areal-pacman
+${AREAL_ROOT}
+${AREAL_PACMAN_ROOT}
+${PACMAN_PYTHON_ROOT}
 ```
 
-node5 owner root 已确认为 `/home/ubuntu/z00819216`，它是指向
-`/mnt/data/z00819216` 的符号链接。没有实时检查 ownership 和符号链接之前，
-不要在其他节点复用该路径。
+每个节点都应选择由当前使用者控制的持久化 `OWNER_ROOT`。它可以是指向数据盘的
+符号链接，但必须在本机检查 ownership 和目标，不能照搬另一台机器的物理路径。
 
-AReaL 框架 checkout 放在 deployable recipe mirror 外，并与 robotics 开发明确
+AReaL fork checkout 放在 deployable recipe mirror 外，并与 robotics 开发明确
 隔离：
 
 ```text
-/home/ubuntu/z00819216/xinglu/AReaL
+${AREAL_ROOT}
   本地分支：areal-main
   upstream：https://github.com/inclusionAI/AReaL.git main
 
-/home/ubuntu/z00819216/xinglu/AReaL-VLA
-  本地分支：robotics/morgan-vla
-  用途：保留 Morgan/robotics 工作及原有 dirty state
+${UNRELATED_AREAL_ROOT}
+  本地分支：<unrelated-development-branch>
+  用途：保留不相关的开发工作及原有 dirty state
 ```
 
-官方工作树的物理路径分别是 node1 的
-`/mnt/data-node1/z00819216/xinglu/AReaL` 和 node5 的
-`/mnt/data/z00819216/xinglu/AReaL`。`maapacman-rl` 的 editable 绑定和生产
-launcher 必须从该官方工作树解析 `areal`。launcher 会把 `AREAL_ROOT` 放在
-`PYTHONPATH` 最前面，并拒绝解析到其他目录的 import。`AReaL-VLA` 不再是
-Pacman 训练依赖。
+AReaL fork 的物理路径应是每个节点本地的 `${AREAL_ROOT}`。`maapacman-rl` 的
+editable 绑定和生产 launcher 必须从该工作树解析 `areal`。launcher 会把
+`AREAL_ROOT` 放在 `PYTHONPATH` 最前面，并拒绝解析到其他目录的 import。不相关的
+AReaL 开发 worktree 不是 Pacman 训练依赖。
 
 应使用项目专用 Conda prefix，而不是系统 Python 或不相关的既有环境：
 
 ```bash
-OWNER_ROOT=/home/ubuntu/z00819216
-CODE_ROOT="$OWNER_ROOT/maapacman-stack"
-ENV_ROOT="$OWNER_ROOT/miniconda/envs/maapacman-rl"
+OWNER_ROOT="${OWNER_ROOT:-$HOME}"
+CODE_ROOT="${CODE_ROOT:-$OWNER_ROOT/maapacman-stack}"
+AREAL_ROOT="${AREAL_ROOT:-$OWNER_ROOT/AReaL}"
+AREAL_PACMAN_ROOT="${AREAL_PACMAN_ROOT:-$CODE_ROOT/areal-pacman}"
+PACMAN_PYTHON_ROOT="${PACMAN_PYTHON_ROOT:-$CODE_ROOT/pacman-python}"
+ENV_ROOT="${ENV_ROOT:-$OWNER_ROOT/.conda/envs/maapacman-rl}"
+PYTHON="${PYTHON:-$ENV_ROOT/bin/python}"
+export MAAPACMAN_PACMAN_PYTHON_ROOT="$PACMAN_PYTHON_ROOT"
+: "${BASE_ENV:?set BASE_ENV to a compatible source Conda prefix}"
 
-"$OWNER_ROOT/miniconda/bin/conda" create -y \
-  -p "$ENV_ROOT" --clone "$OWNER_ROOT/miniconda/envs/areal-vla"
+conda create -y -p "$ENV_ROOT" --clone "$BASE_ENV"
 
-"$ENV_ROOT/bin/python" -m pip install "pygame==2.6.1"
-"$ENV_ROOT/bin/python" -m pip install \
-  -e "$CODE_ROOT/MaaPacman[pygame]" \
-  -e "$CODE_ROOT/areal-pacman"
+"$PYTHON" -m pip install "pygame==2.6.1"
+"$PYTHON" -m pip install \
+  -e "$AREAL_ROOT" \
+  -e "$AREAL_PACMAN_ROOT"
 ```
 
-训练前固定并记录三个 Git revision。rollout 期间将 `pacman-python` mirror 视为
-只读。每个 worker 的副本、`agent_state.json`、pygame 进程和 IPC 都是 `/tmp`
-下的可丢弃内容。
+训练前固定并记录 AReaL、areal-pacman 和 pacman-python 三个 Git revision。
+内置 `maapacman` 与 areal-pacman 共用同一个 revision。rollout 期间将
+`pacman-python` mirror 视为只读。每个 worker 的副本、`agent_state.json`、
+pygame 进程和 IPC 都是 `/tmp` 下的可丢弃内容。
 
 H100 验证特意采用 `/tmp + pip --target`，以便在不触碰持久环境的情况下删除。
 该方法证明了运行时兼容性，但不是生产安装 recipe。
 
-既有 `/home/ubuntu/miniconda3/envs/pacman_gym` 环境已经过审计但未被修改。它当前
-使用 Python `3.11.15`，且没有 pygame 和 MaaPacman，因此不是被接受的 recipe
-环境。
+一个不相关的旧 `pacman_gym` Conda 环境曾经过审计但未被修改。它当时使用
+Python `3.11.15`，且没有 pygame 和内置的 `maapacman` 模块，因此不是被接受的
+recipe 环境。
 
 launcher 设置 `SDL_VIDEODRIVER=dummy` 和 `SDL_AUDIODRIVER=dummy`。Xvfb 不属于
-recipe runtime 或部署依赖。node1 和 node5 均已使用 SDL dummy 通过原版 pygame
-worker 和 oracle gate，因此 recipe 只有一套 Linux 显示合约，不需要两个分支。
+recipe runtime 或部署依赖。注明日期的 API-v1 证据记录了 node1 和 node5 使用
+SDL dummy 通过原版 pygame worker 和 oracle gate；这些结果确定了显示方案，但不
+属于当前 API-v3 验收结果。
 
 ## 4. 环境构造
 
 ```python
+import os
+
 from maapacman.env import PygamePacmanEnv, PygamePacmanEnvConfig
 
 env = PygamePacmanEnv(
     PygamePacmanEnvConfig(
-        pacman_python_root=(
-            "/home/ubuntu/z00819216/maapacman-stack/pacman-python"
-        ),
+        pacman_python_root=os.environ["MAAPACMAN_PACMAN_PYTHON_ROOT"],
         level=1,
-        max_steps=287,
+        max_steps=256,
         video_driver="dummy",
         audio_driver="dummy",
     )
 )
 ```
 
-`287` 是生产 recipe 合约，并非一个宽松的 wrapper 默认值。workflow 必须显式
-传入它，而不能依赖当前的 `PygamePacmanEnvConfig` 默认值。
+`256` 是生产 dataset 默认值。通用 `PygamePacmanEnvConfig` 类采用更宽松的
+`512` 默认值，但它不是生产 recipe 默认值。API-v3 数据行只能选择 `32`、`256`、
+`512` 或 `2000`，workflow 必须使用每条不可变数据行中记录的值。
 
 workflow 在 rollout 前进行验证：
 
 ```python
-if env.spec.api_version != "1.0":
+if env.spec.api_version != "3.0":
     raise RuntimeError("unsupported original-pygame environment API")
-if env.spec.env_id != "pacman-python-level1-pygame-v1":
+if env.spec.env_id != "pacman-python-level1-ghostdoor-v3":
     raise RuntimeError("wrong Pacman environment")
 if env.spec.action_tokens != ("U", "D", "L", "R", "S"):
     raise RuntimeError("incompatible action contract")
-if env.config.max_steps != 287:
-    raise RuntimeError("production level-1 recipe requires max_steps=287")
+if env.config.max_steps not in {32, 256, 512, 2000}:
+    raise RuntimeError("unsupported level-1 episode cap")
 ```
 
 它只能 import 公开的 `maapacman.env` API，不能 import worker module。
 
 ## 5. Dataset 合约
 
-一行数据构造一个完整的原版游戏 episode：
+下面是一条构造完整原版游戏 episode 的精简数据行：
 
 ```json
 {
   "id": "level1-seed0-train-0001",
   "split": "train",
+  "dataset_contract_version": "maapacman-level1-dataset-v3",
   "env": {
-    "name": "pacman-python-level1-pygame-v1",
-    "api_version": "1.0",
+    "name": "pacman-python-level1-ghostdoor-v3",
+    "api_version": "3.0",
     "backend": "original-pygame",
     "pacman_python_revision": "d258122eecf6e0dc0a04d6fb8ff57a9b43f0c1d8",
     "level_revision": "36116c17c6c0805fdb1a07216357ac64c88d2c3108a0e37dce2a01b4ea2a8b97",
     "level": 1,
     "seed": 0,
-    "max_steps": 287,
+    "max_steps": 256,
     "observation_mode": "rgb"
   }
 }
@@ -202,13 +214,14 @@ if env.config.max_steps != 287:
 
 不要直接复用标记为 `maapacman-level1-v1` 或 API `1.0` 的历史数据行，必须先
 检查其 `env_id`：这些行描述的是旧版 AReaL 私有环境，不是当前原版 pygame
-wrapper。
+API-v3 wrapper。当前数据行必须使用 dataset 合约
+`maapacman-level1-dataset-v3`、环境 API `3.0` 和环境 ID
+`pacman-python-level1-ghostdoor-v3`。
 
-生产 Level 1 dataset 验证必须要求 `env.max_steps == 287`。该上限精确对应已经
-验证的 nearest-normal-pellet oracle。第 287 个 action 使原版游戏进入 mode `6`；
-`terminated=True` 优先于步数上限，因此该成功的最终 action 不得报告为
-`truncated=True`。使用更短或更长上限的数据行属于不同实验，不得混入生产训练/
-评估 split。
+生产 Level 1 dataset 验证只接受 `env.max_steps` 为 `32`、`256`、`512` 或
+`2000`；数据行生成默认采用 `256`。所选上限属于不可变数据行合约，因此不兼容
+horizon 不得混入同一训练/评估 split。若 terminal transition 恰好落在上限，
+`terminated=True` 优先，该成功 action 不得同时报告为 `truncated=True`。
 
 ## 6. Observation 与 action 协议
 
@@ -234,7 +247,7 @@ reset 后以及 transaction 完成后，worker 都会阻塞在包装后的 `disp
 pygame 进程、IPC channel、状态文件和 Surface。worker 不拥有 X server 或
 `DISPLAY`；pygame 通过 SDL dummy 渲染，MaaPacman 直接读取完成后的 Surface。
 
-### Timing 与 IPC 决策
+### 当前 IPC 合约与历史 timing 证据
 
 当前实现通过 subprocess pipe 使用 newline-delimited JSON。action 和 state 使用
 小消息。每张 RGB 帧从 pygame Surface 复制，使用 zlib level 1 压缩，编码成
@@ -245,7 +258,8 @@ base64 JSON，再由父进程解码。目前没有使用跨进程 shared memory�
 的时间。只有该总时间小于约 `16.67 ms` 时，它才会等待；不会在较慢的模型调用
 结束后额外增加一个 `16.67 ms`。
 
-使用真实 `L/R` 移动和已提交 renderer 的本地 profiling 结果：
+下面是历史 API-v1、287-action 环境使用真实 `L/R` 移动和当时 renderer 得到的
+本地 profiling 结果：
 
 ```text
 1 worker env.step:                p50 16.81 ms, p95 18.58 ms
@@ -261,16 +275,16 @@ small pipe notification:          p50  0.053 ms, p95 0.091 ms
   complete model+environment turn:p50 64.88 ms, p95 71.49 ms
 ```
 
-即时 action 的 `16.81 ms` 结果对应受限速器约束的脚本 agent 场景；不能直接与
-`50 ms` 模型调用相加。在模拟 `50 ms` 等待时，测得单 worker 每个完整 turn 的
-p50 为 `62.13 ms`，即 287 个 action 约需 `17.83 s`。对应的本地 16-worker
-p50 为 `64.88 ms`，即每个 worker episode 约需 `18.62 s`。这些是本地测量，
-不是 H100 保证值。
+即时 action 的 `16.81 ms` 结果对应当时受限速器约束的脚本 agent 场景，不能直接
+与 `50 ms` 模型调用相加。在模拟 `50 ms` 等待时，历史单 worker 每个完整 turn
+的 p50 为 `62.13 ms`，该次 287-action 运行约需 `17.83 s`。对应的本地
+16-worker p50 为 `64.88 ms`，每个 worker episode 约需 `18.62 s`。这些是历史
+本地测量，不是当前 H100 保证值。
 
-当前 RGB codec 在 287 帧中约占 `0.40 s` 串行 CPU 工作。预计将 RGB pipe
-payload 替换为 shared memory，每个 worker episode 可节省约 `0.38 s`。当模型
-延迟已经超过 `16.67 ms` 帧预算时，`clock.tick(60)` 几乎没有可消除的 sleep；
-它只会成为更快脚本或低延迟 policy 的瓶颈。
+在该历史 profiling 中，RGB codec 在 287 帧中约占 `0.40 s` 串行 CPU 工作；
+shared-memory payload 当时估计每个 worker episode 可节省约 `0.38 s`。仍然适用
+的一般结论是：当模型延迟已经超过 `16.67 ms` 帧预算时，`clock.tick(60)` 几乎
+没有可消除的 sleep；它只会成为更快脚本或低延迟 policy 的瓶颈。
 
 因此，第一版可执行 recipe 同时保留 pipe IPC 和原版 clock 行为。由选定 rollout
 并发度下使用真实模型的 H100 profiling 决定是否值得采用任一优化。未来可为快于
@@ -332,9 +346,13 @@ terminated, truncated and terminal_reason
 ## 9. 当前可执行与评测合约
 
 生产 workflow 直接构造 `PygamePacmanEnv`，并强制验证
-`pacman-python-level1-pygame-v1`。当前本地和 node5 suite 都通过 `107` 项测试
-和 `13` 项 subtest，覆盖 287-step Oracle、真实模型请求、关闭 thinking、
-取消时清理 worker，以及 trajectory 无覆盖持久化。
+API `3.0`、环境 ID `pacman-python-level1-ghostdoor-v3` 和 dataset 合约
+`maapacman-level1-dataset-v3`。episode 上限取自已经验证的数据行；数据行生成默认
+采用 `256`，严格支持 `32`、`256`、`512`、`2000`。环境类通用的 `512` 默认值
+不会覆盖数据行合约。
+
+旧的 `107` 项测试、`13` 项 subtest 和 287-action oracle 属于 API-v1 历史证据，
+不是当前 API-v3 验收结果；第 10-12 节仅为历史留档而保留这些实验。
 
 H100 recipe 固定使用 8 张卡：
 
@@ -370,16 +388,16 @@ launcher 显式设置固定的 `MAAPACMAN_PACMAN_PYTHON_ROOT`，将
 decoding 合约、请求 body、模型原始回答和 reasoning 内容。sampled 和 greedy
 两套 validation 都强制关闭 thinking；只要发现 reasoning 内容，报告生成就失败。
 
-## 10. 修正后的 group-12 证据
+## 10. 历史修正后的 group-12 证据
 
 历史实验：
 
 ```text
-/home/ubuntu/z00819216/run_artifacts/maapacman-rl/
-  level1-group12-20260723b
+${ARTIFACT_ROOT}/level1-group12-20260723b
 ```
 
-原 post-training test 没有关闭 thinking，in-training validation 也误用了
+该 API-v1、287-action 实验早于当前 API-v3 合约。原 post-training test 没有关闭
+thinking，in-training validation 也误用了
 temperature `1.0`。修正后的 evaluator 为 base、epoch0、epoch1、epoch2、
 epoch3 和 final 重建完整 VLM checkpoint；每个 checkpoint 跑一个真实 greedy
 episode，并为 final 另跑 24 个匹配 sampled episode。全部使用 seed `0`、
@@ -402,7 +420,7 @@ episode，并为 final 另跑 24 个匹配 sampled episode。全部使用 seed `
 全部修正后的 episode 都是零 reasoning turn。结论是：第一次 update 就发生
 single-action collapse，后续 update 没有恢复。
 
-## 11. 静态 image-only prompt A/B
+## 11. 历史静态 image-only prompt A/B
 
 A/B 比较两种 prompt：
 
@@ -431,9 +449,9 @@ live prompt 让 base greedy 从 score `0` 变成 `20`，但训练所关心的 sa
 两种 prompt 下，collapsed final 都是每一步输出 `L`、score `20`。因此下一轮
 训练冻结 `minimal_v1`；`live_static_v2` 保留为已否决的 ablation。
 
-## 12. Anti-collapse gate 与条件分支
+## 12. 历史 Anti-collapse gate 与条件分支
 
-正式配置：
+历史 API-v1、287-action 配置：
 
 ```text
 configs/level1/archive/level1_image_anticollapse_4update_group12_8gpu.yaml
@@ -497,8 +515,7 @@ reference 参数显存。TMS smoke 脚本和兼容层只保留为失败实验的
 最终接受的拓扑已在下面这个 run 完整跑通：
 
 ```text
-/home/ubuntu/z00819216/run_artifacts/maapacman-rl/
-  level1-anticollapse-4update-20260723h
+${ARTIFACT_ROOT}/level1-anticollapse-4update-20260723h
 ```
 
 它完成 4/4 optimizer update，保存四个完整 `17.9 GB` checkpoint，并落盘
@@ -529,8 +546,8 @@ alpha * (
 alpha = 1
 ```
 
-距离用 MaaPacman 自己维护的 level 表示做 BFS；每个距离和 reward term 都必须
-落盘并独立复算，`pacman-python` 仍然不修改。
+距离用内置 `maapacman` 包维护的 level 表示做 BFS；每个距离和 reward term
+都必须落盘并独立复算，`pacman-python` 仍然不修改。
 
 这个 follow-up 已实现为
 `configs/level1/archive/level1_image_progress_4update_group12_8gpu.yaml`。除可审计的
@@ -553,11 +570,11 @@ checkpoint 主选择指标使用与训练分布一致的 sampled validation；gr
 独立的 collapse/确定性诊断。最终报告分别给出 `best_sampled_label` 和
 `best_greedy_label`，不会把两套结果混成一个数字。
 
-如果 distance shaping 仍失败，再使用 `64`、`128`、完整 `287` horizon 的 Oracle
-SFT curriculum，然后回到 RL。只有 overfit gate 通过后，才扩大到 8-12 updates
-并部署到 live demo。
+当时记录的 fallback 计划是使用 `64`、`128` 和当时完整的 `287` horizon 做 Oracle
+SFT curriculum，再回到 RL。这些数值属于历史实验计划，不是当前 API-v3 的
+supported-cap 合约。
 
-## 13. 官方 main 迁移 gate
+## 13. 历史官方 main 迁移 gate
 
 2026-07-23，两台远端节点都建立了干净的官方 AReaL 工作树，commit 为
 `4d7ee11479d61ebe6c6f020e2bdcda5d76c6a76b`；原 checkout 及全部
@@ -596,36 +613,37 @@ mm_token_type_ids
 multi_modal_input[pixel_values, image_grid_thw]
 ```
 
-在该原生 workflow 完成真实 reference-logp、actor update、checkpoint
-save/reload 和固定评估之前，第 9-12 节只能视为 AReaL-VLA stack 的历史结果，
-不能作为官方 main 已兼容训练的证明。
+截至这份 2026-07-23 记录结束时，该原生 workflow 尚未完成真实 reference-logp、
+actor update、checkpoint save/reload 和固定评估。因此，第 10-12 节只能视为
+AReaL-VLA stack 的历史结果，不能作为当前 API-v3 已兼容训练的证明。
 
 ## 附录 A：已过期的 2026-07-22 快照
 
 下面保留的是历史证据。它的 test count、六卡 topology、trajectory 文件覆盖行为
-和早期结论已经被第 9-12 节取代，不再作为当前实现或验收依据。
+和早期结论已经被第 4、5、9 节的当前合约取代。第 10-13 节同样保留注明日期的
+后续证据，而不是当前 API-v3 验收结果。
 
 ### 历史实现状态
 
-当前可执行 Level 1 recipe 已直接构造 `PygamePacmanEnv`，验证
-`pacman-python-level1-pygame-v1`，记录普通豆和大力丸数量，并使用原版游戏的
-`all_normal_pellets` terminal reason。本地 pytest 已通过 `98` 项测试和 `11`
-项 subtest，其中包括一次脚本化的 287-step 过关。
+在该已过期快照中，可执行 Level 1 recipe 直接构造了 `PygamePacmanEnv`，验证了
+API `1.0` 和 `pacman-python-level1-pygame-v1`，记录了普通豆和大力丸数量，并使用
+原版游戏的 `all_normal_pellets` terminal reason。当时本地 pytest 已通过 `98`
+项测试和 `11` 项 subtest，其中包括一次脚本化的历史 287-step 过关。
 
-远端 dataset row 必须记录当前环境 ID 和源码 revision。GPU 训练前仍需完成
-rollout-launcher 取消测试、可选 no-wait clock policy gate，以及继承 AReaL
-依赖的协调。
+当时的远端 dataset row 被要求记录该历史环境 ID 和源码 revision；当时记录的
+GPU 训练前待办还包括 rollout-launcher 取消测试、可选 no-wait clock policy gate，
+以及继承 AReaL 依赖的协调。这些不是当前 API-v3 待办清单。
 
 ### 历史验收 gate
 
 #### 本地 gate —— 已完成
 
-- `pacman-python` 源 checkout 在 commit `d258122e...` 上保持干净。
-- MaaPacman wrapper 使用原版 pygame Surface。
-- Windows 原生和 SDL dummy 的 reset、`L,L,L,S` hash 完全一致。
-- `PygamePacmanEnv` 测试通过 `6/6`，其中包括四个并发 worker。
-- 完整 MaaPacman unittest suite 通过 `23/23`。
-- 完整 areal-pacman pytest suite 通过 `98` 项测试和 `11` 项 subtest。
+- `pacman-python` 源 checkout 当时在 commit `d258122e...` 上保持干净。
+- MaaPacman wrapper 当时使用原版 pygame Surface。
+- Windows 原生和 SDL dummy 的 reset、`L,L,L,S` hash 当时完全一致。
+- `PygamePacmanEnv` 测试当时通过 `6/6`，其中包括四个并发 worker。
+- 完整 MaaPacman unittest suite 当时通过 `23/23`。
+- 完整 areal-pacman pytest suite 当时通过 `98` 项测试和 `11` 项 subtest。
 
 #### Linux 显示 gate —— 已在 `h100-node1` 完成
 
@@ -636,37 +654,39 @@ rollout-launcher 取消测试、可选 no-wait clock policy gate，以及继承 
 - 287-step 原版游戏 oracle 与 Windows 状态及 RGB hash 一致。
 - 没有遗留 worker 进程或临时 worker 目录。
 
-Xvfb 未安装、未使用，也不属于生产 recipe。
+Xvfb 当时未安装、未使用，也不属于该历史 recipe。
 
-#### Recipe CPU gate —— 本地已完成，远端未完成
+#### 历史 Recipe CPU gate
 
-- node5 mirror 和专用 Conda prefix 已存在。
+- node5 mirror 和专用 Conda prefix 当时已经存在。
 - 在该持久环境中，直接 PygamePacmanEnv 测试、RGB parity、4/16-worker 隔离
   和完整 oracle 均已通过。
-- node1 当前具有相同的三个 editable package 布局。其直接 pygame gate 已通过，
-  已部署的 recipe suite 也通过 `98` 项测试和 `11` 项 subtest。
-- node1 使用 `/mnt/data-node1/z00819216/xinglu/AReaL-VLA`，base 为
-  `da645a37...`，有 26 个 dirty entry；node5 使用自己的物理 checkout。这些路径
-  有意保持节点本地化，而不是共享。
-- 部署迁移后的 AReaL workflow，并为 `pacman-python-level1-pygame-v1` 重新生成
-  远端 dataset row。
-- 在生产数据行和 workflow 构造中强制要求 `max_steps=287`。
-- 重放完整的 287-action oracle，要求 `terminated=True`、`truncated=False`、
+- 该历史 node1 gate 使用旧的三个 editable package 布局。当前 release 已将
+  `maapacman` 合并到 `areal-pacman` checkout；这里保留其直接 pygame gate 以及
+  已部署 recipe suite 通过 `98` 项测试和 `11` 项 subtest 的历史记录。
+- node1 当时使用 node-local AReaL 开发 checkout，base 为 `da645a37...`，有
+  26 个 dirty entry；node5 使用自己的物理 checkout。这些路径当时有意保持
+  节点本地化，而不是共享。
+
+当时尚待完成或协调的事项记录为：
+
+- 部署当时迁移后的 AReaL workflow，并为
+  `pacman-python-level1-pygame-v1` 重新生成远端 dataset row。
+- 在当时的数据行和 workflow 构造中强制要求 `max_steps=287`。
+- 重放当时完整的 287-action oracle，要求 `terminated=True`、`truncated=False`、
   `terminal_reason=all_normal_pellets`。
-- 验证模型请求、action 解析、reward 映射和清理。
-- 使用原版 clock 行为记录真实模型 1/4/8/16-worker H100 timing。只有当该 profile
-  证明 no-wait policy 有必要时，才比较两种 clock policy 的精确 state/RGB parity，
-  然后决定是否启用。
-- 训练前协调或明确隔离继承自 `areal-vla` 的依赖冲突。node1 使用 torch `2.11.0`
+- 验证当时的模型请求、action 解析、reward 映射和清理。
+- 使用原版 clock 行为记录真实模型 1/4/8/16-worker H100 timing；只有当该 profile
+  证明 no-wait policy 有必要时，才比较两种 clock policy 的精确 state/RGB parity。
+- 协调或明确隔离当时继承自 `areal-vla` 的依赖冲突。node1 使用 torch `2.11.0`
   和 transformers `5.7.0`；AReaL 声明 torch `<2.11`、transformers `<=5.3.0`。
-  node5 的另一组继承冲突已记录在其 manifest 中。
-- 替换或明确快照化继承的 editable AReaL 源码
-  `/mnt/data/z00819216/xinglu/AReaL-VLA`。它基于 commit `78d1e50f...`，但当前有
-  `1112` 个 dirty entry，因此不能作为已接受的训练来源。
+- 替换或明确快照化当时继承的 node-local editable AReaL 源码。它基于 commit
+  `78d1e50f...`，当时有 `1112` 个 dirty entry，因此不能作为当时已接受的训练
+  来源。
 
-#### GPU gate —— 未完成
+#### 历史 GPU gate —— 当时未完成
 
-只有 Linux 和 CPU gate 都通过后，才能：
+当时的计划是在 Linux 和 CPU gate 都通过后再：
 
 1. 运行冻结的 no-training baseline。
 2. 运行 two-epoch overfit 实验。

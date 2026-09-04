@@ -1,26 +1,22 @@
 # AReaL PacMan RL 配方
 
-本仓库是 MaaPacman Level 1 的 AReaL 强化学习配方层，负责数据集、训练
-workflow、奖励塑形、训练配置、轨迹审计和评估工具。
-
-真实游戏环境由独立的 `maapacman` Python 包提供；分布式训练、vLLM rollout、
-FSDP actor/reference engine 和 checkpoint 管理由官方 AReaL 提供。
+本仓库同时发布 MaaPacman Level 1 的 headless 游戏环境和 AReaL 强化学习配方：
+`maapacman` 包负责真实游戏环境，`areal_pacman` 包负责数据集、训练 workflow、
+奖励塑形、训练配置、轨迹审计和评估工具。分布式训练、vLLM rollout、FSDP
+actor/reference engine 和 checkpoint 管理由现有 AReaL fork 提供。
 
 ## 架构文档
 
 - [AReaL Pacman RL 配方设计](docs/architecture/AREAL_RECIPE_DESIGN.md)
-- [MaaPacman 环境接口设计](../MaaPacman/PACMAN_ENV_DESIGN.md)
 - [运行产物说明](RUN_ARTIFACTS.md)
 
 ## 系统边界
 
 ```text
-MaaPacman 仓库 / maapacman 包
-  maapacman.env.PygamePacmanEnv
-    拥有真实 pygame Level 1 状态转移、RGB 渲染、合法动作、
-    奖励、终止条件和游戏指标。
-
 areal-pacman 仓库（本仓库）
+  maapacman/
+    提供 maapacman.env.PygamePacmanEnv，拥有真实 pygame Level 1
+    状态转移、RGB 渲染、合法动作、奖励、终止条件和游戏指标。
   areal_pacman/level1/workflow.py
     将截图和真实游戏状态连接到 AReaL rollout。
   areal_pacman/level1/level1_dataset.py
@@ -32,47 +28,53 @@ areal-pacman 仓库（本仓库）
   scripts/level1/
     数据集、训练、评估和报告工具。
 
-官方 AReaL checkout
+AReaL fork checkout
   提供 trainer、rollout workers、vLLM、FSDP actor/reference engines、
   调度和 checkpoint 发布。
+
+pacman-python checkout
+  提供原版游戏规则、资源和 pygame renderer。
 ```
 
 这些边界是有意设计的：
 
-- MaaPacman 拥有游戏环境；
-- 本仓库拥有 RL 配方；
-- 官方 AReaL 拥有分布式训练系统。
+- 本仓库内置的 `maapacman` 包拥有游戏环境；
+- 本仓库的 `areal_pacman` 包拥有 RL 配方；
+- 现有 AReaL fork 拥有分布式训练系统；
+- `pacman-python` 提供固定 revision 的原版游戏源码和资源。
 
 `areal_pacman.synthetic.*` 仅用于历史文本/合成迷宫实验，不能替代真实
 Level 1 生产环境。
 
-## Sibling 仓库与环境安装
+## 三层源码与环境安装
 
-生产 Level 1 不能只安装本仓库，还需要三个独立 checkout：
+生产 Level 1 需要固定下面三层源码；不再需要独立的 MaaPacman checkout：
 
 ```text
 <workspace>/
-  AReaL/          # 官方分布式训练框架，需要作为 Python 包安装
-  MaaPacman/      # 提供 maapacman.env.PygamePacmanEnv，需要安装
+  AReaL/          # 现有 AReaL fork，需要作为 Python 包安装
+  areal-pacman/   # 同时包含 areal_pacman 和 maapacman，需要安装
   pacman-python/  # 原版 pygame 游戏源码，只需 checkout，不作为 pip 包安装
-  areal-pacman/   # 本仓库，需要安装
 ```
 
-推荐将 `MaaPacman`、`pacman-python` 和 `areal-pacman` 放在同一个父目录。
-`pacman-python` 必须保持为独立、固定 revision、未修改的 checkout。
+实际路径可以不同，但必须锁定这三个 Git revision。`pacman-python` 必须保持为
+独立、固定 revision 的 checkout，并在训练期间按只读源码使用。
+
+正式训练与数据 manifest 的发布合约是 **Git clone + editable install**。不要用
+GitHub `Download ZIP` 或仅安装 wheel 代替源码 checkout：这两种形式不含 `.git`
+revision，只适合 import/环境 smoke test，无法生成可审计的三仓库 provenance。
 
 ### 新 Linux/H100 服务器（从零安装）
 
-node1 当前采用的目录布局是：
+推荐使用三个并列、固定 revision 的 checkout；实际绝对路径不构成合约：
 
 ```text
-/mnt/data/z00819216/xinglu/AReaL
-/mnt/data/z00819216/maapacman-stack/MaaPacman
-/mnt/data/z00819216/maapacman-stack/pacman-python
-/mnt/data/z00819216/maapacman-stack/<areal-pacman-checkout>
+  /path/to/AReaL
+  /path/to/areal-pacman
+  /path/to/pacman-python
 ```
 
-node1 已验证的关键环境版本：
+下面是历史 node1 gate 已验证的关键环境版本，可作为锁定环境的参考：
 
 ```text
 NVIDIA driver==590.48.01
@@ -95,47 +97,67 @@ flashinfer-python==0.6.11.post2
 torch-memory-saver==0.0.9
 ```
 
-从零创建环境并安装四层依赖：
+从零创建环境并安装三层源码依赖：
 
 ```bash
 # 1. 创建并激活 Conda 环境
 conda create -n maapacman-rl python=3.12.13 pip -y
 conda activate maapacman-rl
 
-# 2. 安装固定版本的 GPU/Python 依赖
+# 2. 将启动器绑定到当前激活的环境和当前用户可写目录
+export OWNER_ROOT="$HOME"
+export ENV_ROOT="${CONDA_PREFIX:?activate maapacman-rl first}"
+export PYTHON="${ENV_ROOT}/bin/python"
+
+# 3. 安装固定版本的 GPU/Python 依赖
 # 使用上方记录的 node1 已验证版本。
 # PyTorch wheel 必须兼容服务器 CUDA；node1 使用 torch 2.11.0+cu130。
 
-# 3. 安装三个 Python 项目
-python -m pip install -e "/path/to/AReaL"
-python -m pip install -e "/path/to/MaaPacman[pygame]"
-python -m pip install -e "/path/to/areal-pacman[dev,dataset,agent]"
+# 4. 如果复用曾安装独立 maapacman 的旧环境，先移除旧 distribution
+"${PYTHON}" -m pip uninstall -y maapacman
 
-# 4. pacman-python 不需要 pip 安装，只需指向固定 revision 的 checkout
+# 5. 安装两个 Python 项目；areal-pacman 会同时安装两个本地包
+"${PYTHON}" -m pip install -e "/path/to/AReaL"
+"${PYTHON}" -m pip install -e "/path/to/areal-pacman[dev,dataset,agent]"
+
+# 6. pacman-python 不需要 pip 安装，只需指向固定 revision 的 checkout
 export MAAPACMAN_PACMAN_PYTHON_ROOT=/path/to/pacman-python
 ```
 
-在 node1 上，`/path/to/...` 分别对应：
+为当前 checkout 显式设置路径：
 
 ```bash
-export AREAL_ROOT=/mnt/data/z00819216/xinglu/AReaL
-export MAAPACMAN_ROOT=/mnt/data/z00819216/maapacman-stack/MaaPacman
-export AREAL_PACMAN_ROOT=/mnt/data/z00819216/maapacman-stack/<areal-pacman-checkout>
-export MAAPACMAN_PACMAN_PYTHON_ROOT=/mnt/data/z00819216/maapacman-stack/pacman-python
+export OWNER_ROOT="$HOME"
+export ENV_ROOT="${CONDA_PREFIX:?activate maapacman-rl first}"
+export PYTHON="${ENV_ROOT}/bin/python"
+export AREAL_ROOT=/path/to/AReaL
+export AREAL_PACMAN_ROOT=/path/to/areal-pacman
+export MAAPACMAN_PACMAN_PYTHON_ROOT=/path/to/pacman-python
 ```
 
-确认四层依赖均解析正确：
+确认三个源码层均解析正确，并确认两个本地 Python 包来自同一
+`areal-pacman` checkout：
 
 ```bash
-python - <<'PY'
+"${PYTHON}" - <<'PY'
 from pathlib import Path
 
 import areal
 import areal_pacman
+import maapacman
 from maapacman.env import PygamePacmanEnv
 
 print("areal:", Path(areal.__file__).resolve())
 print("areal_pacman:", Path(areal_pacman.__file__).resolve())
+print("maapacman:", Path(maapacman.__file__).resolve())
+
+recipe_package = Path(areal_pacman.__file__).resolve().parent
+environment_package = Path(maapacman.__file__).resolve().parent
+assert recipe_package.parent == environment_package.parent, (
+    "stale standalone maapacman installation",
+    recipe_package,
+    environment_package,
+)
 
 with PygamePacmanEnv() as env:
     image, info = env.reset(seed=0)
@@ -149,17 +171,22 @@ PY
 预期环境 ID 和 backend：
 
 ```text
-env_id: pacman-python-level1-pygame-v1
+env_id: pacman-python-level1-ghostdoor-v3
+api_version: 3.0
 backend: original-pygame
 ```
 
 ## 准备 Level 1 数据集
 
+下面两条命令用于独立生成和审计数据集。标准训练启动器也会生成自己的不可变
+数据集，因此不要再把这里已经存在的输出目录传给启动器。
+
 短 episode（32 步）：
 
 ```bash
-python scripts/level1/dataset/prepare_level1_dataset.py \
+"${PYTHON}" scripts/level1/dataset/prepare_level1_dataset.py \
   --output-root artifacts/datasets/level1_dataset_step32 \
+  --config configs/level1/train/level1_edward_step512_2update_group12_8gpu.yaml \
   --train-episodes 8 \
   --validation-episodes 2 \
   --max-steps 32 \
@@ -169,8 +196,9 @@ python scripts/level1/dataset/prepare_level1_dataset.py \
 长 episode（256 步）：
 
 ```bash
-python scripts/level1/dataset/prepare_level1_dataset.py \
+"${PYTHON}" scripts/level1/dataset/prepare_level1_dataset.py \
   --output-root artifacts/datasets/level1_dataset_step256 \
+  --config configs/level1/train/level1_edward_step512_2update_group12_8gpu.yaml \
   --train-episodes 8 \
   --validation-episodes 2 \
   --max-steps 256 \
@@ -184,8 +212,8 @@ step256。
 
 生产训练要求：
 
-- 官方 AReaL checkout；
-- MaaPacman 和 pacman-python；
+- 现有 AReaL fork checkout；
+- 本仓库（包括内置的 `maapacman` 包）和 `pacman-python` checkout；
 - 本地 Qwen 模型 checkpoint；
 - 与配置一致的数据集；
 - 配置要求数量的空闲 GPU。
@@ -193,32 +221,36 @@ step256。
 标准启动方式：
 
 ```bash
-export AREAL_ROOT=/home/ubuntu/z00819216/xinglu/AReaL
-export MODEL_PATH=/mnt/data/z00819216/models/Qwen3.5-9B
-export CONFIG="$PWD/configs/level1/train/level1_live_state_step256_100update_group12_8gpu.yaml"
-export DATASET_OUTPUT_ROOT="$PWD/artifacts/datasets/level1_dataset_step256"
-export DATASET_MAX_STEPS=256
+export OWNER_ROOT="$HOME"
+export ENV_ROOT="${CONDA_PREFIX:?activate maapacman-rl first}"
+export PYTHON="${ENV_ROOT}/bin/python"
+export AREAL_ROOT=/path/to/AReaL
+export MAAPACMAN_PACMAN_PYTHON_ROOT=/path/to/pacman-python
+export MODEL_PATH=/path/to/Qwen3.5-9B
+export CONFIG="$PWD/configs/level1/train/level1_edward_step512_2update_group12_8gpu.yaml"
+export DATASET_MAX_STEPS=512
+RUN_TS="$(date -u +%Y%m%dT%H%M%SZ)"
+export RUN_ID="edward-v3-step512-${RUN_TS}"
+export DATASET_OUTPUT_ROOT="$PWD/artifacts/datasets/${RUN_ID}"
+export ARTIFACT_ROOT="$PWD/run_artifacts/${RUN_ID}"
 
 bash scripts/level1/train/run_level1_training.sh
 ```
 
 启动器会依次：
 
-1. 验证 Python、模型和官方 AReaL checkout；
+1. 验证 Python、模型和固定 revision 的 AReaL fork checkout；
 2. 验证所选 GPU 没有 compute process；
-3. 生成训练/验证数据集；
-4. 执行 config dry-run；
-5. 保存 config 和数据 manifest；
-6. 启动正式训练；
-7. 将 checkpoint、trajectory 和日志写入 `ARTIFACT_ROOT`。
+3. 对 Edward 配置使用真实 Qwen processor 验证完整 10-candidate 图文输入小于 `vllm.max_model_len`；
+4. 生成训练/验证数据集；
+5. 执行 config dry-run；
+6. 保存 config 和数据 manifest；
+7. 启动正式训练；
+8. 将 checkpoint、trajectory 和日志写入 `ARTIFACT_ROOT`。
 
-建议为每次正式运行显式设置独立目录：
-
-```bash
-RUN_TS="$(date -u +%Y%m%dT%H%M%SZ)"
-export RUN_ID="reward-v2-step256-${RUN_TS}"
-export ARTIFACT_ROOT="/mnt/data/z00819216/run_artifacts/maapacman-rl/${RUN_ID}"
-```
+上面的标准命令会用同一个唯一 `RUN_ID` 创建独立的数据集和训练产物目录。
+`DATASET_OUTPUT_ROOT` 在启动前必须不存在；若要改到其他磁盘，请把它和
+`ARTIFACT_ROOT` 都改为当前用户可写的新目录。
 
 ## 256-step / 100-update 配置
 
@@ -387,22 +419,22 @@ checkpoint save 和每张 GPU 峰值显存。OOM 时依次尝试：
 通过 A6000 gate 可以证明功能和训练链路可复现，不能证明吞吐或最终指标与
 H100 完全一致。
 
-### Appendix B：官方 AReaL checkout 策略
+### Appendix B：AReaL fork checkout 策略
 
-node1 和 node5 上的框架开发与机器人开发必须保持分离：
+每个训练节点上的框架 checkout 与不相关的开发 worktree 必须保持分离：
 
 ```text
-/home/ubuntu/z00819216/xinglu/AReaL
+${AREAL_ROOT}
   branch: areal-main
   tracks: https://github.com/inclusionAI/AReaL.git main
 
-/home/ubuntu/z00819216/xinglu/AReaL-VLA
-  branch: robotics/morgan-vla
-  保留 Morgan/robotics 工作和现有 dirty state
+${UNRELATED_AREAL_ROOT}
+  branch: <unrelated-development-branch>
+  保留不相关的开发工作和现有 dirty state
 ```
 
 `maapacman-rl` Conda 环境和
-`scripts/level1/train/run_level1_training.sh` 必须从干净的官方 `AReaL`
+`scripts/level1/train/run_level1_training.sh` 必须从干净、固定 revision 的 `AReaL`
 worktree 解析 `areal`。不要从 `AReaL-VLA` 启动 Pacman 训练。
 
 ### Appendix C：Native multimodal workflow
@@ -534,7 +566,7 @@ step/action/reward/score/pellet overlay 的 PowerPoint 兼容 H.264 MP4。
 
 ```text
 Python >= 3.10
-maapacman >= 0.4, < 0.5
+maapacman（随 areal-pacman 打包，使用同一个 Git revision）
 numpy >= 1.24
 Pillow >= 10
 ```
@@ -564,11 +596,11 @@ flashinfer-python==0.6.11.post2
 torch-memory-saver==0.0.9
 ```
 
-其中 `areal==1.0.4` 是从官方 AReaL checkout editable 安装的，不应替换为
+其中 `areal==1.0.4` 是从固定 revision 的 AReaL fork checkout editable 安装的，不应替换为
 同名但代码 revision 不同的其他包：
 
 ```text
-/mnt/data/z00819216/xinglu/AReaL
+${AREAL_ROOT}
 ```
 
 #### 推荐的 Conda 安装顺序
@@ -576,7 +608,8 @@ torch-memory-saver==0.0.9
 在 Linux/H100 节点上创建独立环境：
 
 ```bash
-export ENV_ROOT=/mnt/data/z00819216/conda_env/maapacman-rl
+export ENV_ROOT="${ENV_ROOT:-${HOME}/.conda/envs/maapacman-rl}"
+export AREAL_ROOT="${AREAL_ROOT:-/path/to/AReaL}"
 
 conda create --prefix "${ENV_ROOT}" \
   python=3.12.13 \
@@ -608,16 +641,19 @@ python -m pip install \
   "torch-memory-saver==0.0.9"
 ```
 
-然后安装固定 revision 的三个本地 checkout：
+然后安装固定 revision 的两个 Python checkout。若该环境曾安装独立
+`maapacman` distribution，必须先卸载它；`maapacman` 随 `areal-pacman`
+一起安装，`pacman-python` 只需提供固定 revision 的源码目录：
 
 ```bash
-python -m pip install -e /mnt/data/z00819216/xinglu/AReaL
-python -m pip install -e /mnt/data/z00819216/maapacman-stack/MaaPacman
+python -m pip uninstall -y maapacman
+python -m pip install -e "${AREAL_ROOT}"
 python -m pip install -e "/path/to/areal-pacman[dev,dataset,agent]"
 ```
 
-实际 checkout 路径可不同，但 AReaL、MaaPacman、pacman-python 和
-areal-pacman 的 Git revision 必须与目标运行 manifest 一致。
+实际 checkout 路径可不同，但 AReaL、pacman-python 和 areal-pacman 的 Git
+revision 必须与目标运行 manifest 一致；内置 `maapacman` 的 revision 就是
+areal-pacman 的 revision。
 
 安装后验证：
 
@@ -650,7 +686,7 @@ PY
 
 仅有相同 package version 仍不足以保证完全复现；正式运行还必须保存：
 
-- 四个代码仓库的 Git commit；
+- 三个代码仓库的 Git commit；
 - AReaL 本地 patch；
 - 模型 revision/hash；
 - dataset manifest；

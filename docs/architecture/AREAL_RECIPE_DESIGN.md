@@ -1,41 +1,47 @@
 # AReaL Pacman RL Recipe Design
 
-Status: executable recipe and two-epoch H100 training gate complete; greedy
-overfit-improvement gate not met  
-Environment provider: MaaPacman `PygamePacmanEnv` API `1.0`  
-Environment ID: `pacman-python-level1-pygame-v1`  
-Production episode cap: `287` actions  
-Remote Linux backend: SDL dummy  
-Last verified: `2026-07-23`
+Status: bundled-source API-v3 contract synchronized with the current code;
+dated training and evaluation evidence is retained below as history
+Environment provider: bundled `maapacman.PygamePacmanEnv` API `3.0`
+Environment ID: `pacman-python-level1-ghostdoor-v3`
+Dataset contract: `maapacman-level1-dataset-v3`
+Production dataset default: `256` actions
+Supported episode caps: `32`, `256`, `512`, and `2000` actions
+Reusable `PygamePacmanEnvConfig` default: `512` actions, not the production
+dataset default
+Remote Linux backend: SDL dummy
+Contract synchronized with code: `2026-09-04`
+Historical remote evidence last verified: `2026-07-23`
 
-Companion design:
-[MaaPacman Environment Interface Design](../../../MaaPacman/PACMAN_ENV_DESIGN.md)
+The headless environment implementation is bundled in this repository under
+`maapacman/`; there is no separate MaaPacman checkout.
 
-Workspace paths:
+Example checkout layout:
 
 ```text
-C:\Users\x84241863\Desktop\life\MaaPacman
-C:\Users\x84241863\Desktop\life\pacman-python
-C:\Users\x84241863\Desktop\life\areal-pacman
+${WORKSPACE_ROOT}/AReaL
+${WORKSPACE_ROOT}/areal-pacman
+${WORKSPACE_ROOT}/pacman-python
 ```
 
 ## 1. Ownership
 
 ```text
+AReaL fork
+  owns distributed training, rollout workers and checkpoint orchestration
+
+areal-pacman repository
+  maapacman package owns the external process wrapper, frame-boundary action
+  protocol, RGB Surface extraction and stable environment API
+  areal_pacman package owns episode datasets, prompts, model calls, parsing,
+  reward shaping, trajectory records, AReaL configuration and evaluation
+
 pacman-python
   owns the original game rules, resources and pygame renderer
-
-MaaPacman
-  owns the external process wrapper, frame-boundary action protocol,
-  RGB Surface extraction and stable environment API
-
-areal-pacman
-  owns episode datasets, prompts, model calls, parsing, reward shaping,
-  trajectory records, AReaL configuration, checkpoints and evaluation
 ```
 
 `pacman-python` is a sibling dependency and must remain source-clean. It must
-not import MaaPacman or AReaL.
+not import `maapacman` or AReaL.
 
 ### 1.1 Production environment API
 
@@ -80,127 +86,137 @@ create hidden game frames.
 
 ## 3. Required installation and mirror
 
-The production training node needs a persistent three-repository mirror under
-the confirmed owner-specific `z0xxx` root:
+The production training node needs three fixed source layers. The
+`areal-pacman` checkout contains both Python packages, so a standalone
+MaaPacman repository or installation is not required:
 
 ```text
-/home/ubuntu/z00819216/maapacman-stack/MaaPacman
-/home/ubuntu/z00819216/maapacman-stack/pacman-python
-/home/ubuntu/z00819216/maapacman-stack/areal-pacman
+${AREAL_ROOT}
+${AREAL_PACMAN_ROOT}
+${PACMAN_PYTHON_ROOT}
 ```
 
-The node5 owner root has been confirmed as `/home/ubuntu/z00819216`, a symlink
-to `/mnt/data/z00819216`. Do not reuse this path on another node without a live
-ownership and symlink check.
+Choose an owner-controlled persistent `OWNER_ROOT` on each node. It may be a
+symlink to a data volume, but validate its ownership and target locally instead
+of copying a machine-specific path.
 
-The AReaL framework checkout is intentionally outside the deployable recipe
-mirror and is separated from robotics development:
+The existing AReaL fork checkout is intentionally outside the deployable
+recipe mirror and is separated from robotics development:
 
 ```text
-/home/ubuntu/z00819216/xinglu/AReaL
+${AREAL_ROOT}
   local branch: areal-main
   upstream: https://github.com/inclusionAI/AReaL.git main
 
-/home/ubuntu/z00819216/xinglu/AReaL-VLA
-  local branch: robotics/morgan-vla
-  purpose: preserve Morgan/robotics development and its existing dirty state
+${UNRELATED_AREAL_ROOT}
+  local branch: <unrelated-development-branch>
+  purpose: preserve unrelated development and its existing dirty state
 ```
 
-The physical official paths are
-`/mnt/data-node1/z00819216/xinglu/AReaL` on node1 and
-`/mnt/data/z00819216/xinglu/AReaL` on node5. The `maapacman-rl` editable
-binding and production launcher must resolve `areal` from this official
-worktree. The launcher prepends `AREAL_ROOT` to `PYTHONPATH` and rejects an
-import resolved outside it. `AReaL-VLA` is not a Pacman training dependency.
+The physical AReaL fork path is node-local `${AREAL_ROOT}`. The
+`maapacman-rl` editable binding and production launcher must resolve `areal`
+from this worktree. The launcher prepends `AREAL_ROOT` to `PYTHONPATH` and
+rejects an import resolved outside it. An unrelated AReaL development worktree
+is not a Pacman training dependency.
 
 Use a project-specific Conda prefix rather than system Python or an unrelated
 existing environment:
 
 ```bash
-OWNER_ROOT=/home/ubuntu/z00819216
-CODE_ROOT="$OWNER_ROOT/maapacman-stack"
-ENV_ROOT="$OWNER_ROOT/miniconda/envs/maapacman-rl"
+OWNER_ROOT="${OWNER_ROOT:-$HOME}"
+CODE_ROOT="${CODE_ROOT:-$OWNER_ROOT/maapacman-stack}"
+AREAL_ROOT="${AREAL_ROOT:-$OWNER_ROOT/AReaL}"
+AREAL_PACMAN_ROOT="${AREAL_PACMAN_ROOT:-$CODE_ROOT/areal-pacman}"
+PACMAN_PYTHON_ROOT="${PACMAN_PYTHON_ROOT:-$CODE_ROOT/pacman-python}"
+ENV_ROOT="${ENV_ROOT:-$OWNER_ROOT/.conda/envs/maapacman-rl}"
+PYTHON="${PYTHON:-$ENV_ROOT/bin/python}"
+export MAAPACMAN_PACMAN_PYTHON_ROOT="$PACMAN_PYTHON_ROOT"
+: "${BASE_ENV:?set BASE_ENV to a compatible source Conda prefix}"
 
-"$OWNER_ROOT/miniconda/bin/conda" create -y \
-  -p "$ENV_ROOT" --clone "$OWNER_ROOT/miniconda/envs/areal-vla"
+conda create -y -p "$ENV_ROOT" --clone "$BASE_ENV"
 
-"$ENV_ROOT/bin/python" -m pip install "pygame==2.6.1"
-"$ENV_ROOT/bin/python" -m pip install \
-  -e "$CODE_ROOT/MaaPacman[pygame]" \
-  -e "$CODE_ROOT/areal-pacman"
+"$PYTHON" -m pip install "pygame==2.6.1"
+"$PYTHON" -m pip install \
+  -e "$AREAL_ROOT" \
+  -e "$AREAL_PACMAN_ROOT"
 ```
 
-Pin and record the three Git revisions before training. Treat the
-`pacman-python` mirror as read-only during rollout. Per-worker copies,
+Pin and record the AReaL, areal-pacman, and pacman-python Git revisions before
+training. The bundled `maapacman` package shares the areal-pacman revision.
+Treat the `pacman-python` mirror as read-only during rollout. Per-worker copies,
 `agent_state.json`, pygame processes, and IPC remain disposable under `/tmp`.
 
 The H100 validation deliberately used `/tmp + pip --target` so it could be
 removed without touching persistent environments. That method proves runtime
 compatibility but is not the production installation recipe.
 
-The existing `/home/ubuntu/miniconda3/envs/pacman_gym` environment was audited
-but not modified. It currently uses Python `3.11.15` and lacks pygame and
-MaaPacman, so it is not the accepted recipe environment.
+An unrelated legacy `pacman_gym` Conda environment was audited but not
+modified. It used Python `3.11.15` and lacked pygame and the bundled
+`maapacman` module, so it was not the accepted recipe environment.
 
 The launcher sets `SDL_VIDEODRIVER=dummy` and `SDL_AUDIODRIVER=dummy`.
-Xvfb is not part of the recipe runtime or deployment dependencies. Both node1
-and node5 have passed the original-pygame worker and oracle gates with SDL
-dummy, so the recipe has one Linux display contract rather than two branches.
+Xvfb is not part of the recipe runtime or deployment dependencies. Dated
+API-v1 evidence recorded original-pygame worker and oracle gates on node1 and
+node5 with SDL dummy; those results establish the display choice but are not a
+current API-v3 acceptance result.
 
 ## 4. Environment construction
 
 ```python
+import os
+
 from maapacman.env import PygamePacmanEnv, PygamePacmanEnvConfig
 
 env = PygamePacmanEnv(
     PygamePacmanEnvConfig(
-        pacman_python_root=(
-            "/home/ubuntu/z00819216/maapacman-stack/pacman-python"
-        ),
+        pacman_python_root=os.environ["MAAPACMAN_PACMAN_PYTHON_ROOT"],
         level=1,
-        max_steps=287,
+        max_steps=256,
         video_driver="dummy",
         audio_driver="dummy",
     )
 )
 ```
 
-`287` is the production recipe contract, not merely a permissive wrapper
-default. The workflow must pass it explicitly rather than relying on the
-current `PygamePacmanEnvConfig` default.
+`256` is the production dataset default. The reusable
+`PygamePacmanEnvConfig` class has a broader default of `512`; that generic
+environment default is not the production recipe default. API-v3 rows may
+select exactly `32`, `256`, `512`, or `2000` actions, and the workflow must use
+the immutable value recorded in each row.
 
 The workflow validates before rollout:
 
 ```python
-if env.spec.api_version != "1.0":
+if env.spec.api_version != "3.0":
     raise RuntimeError("unsupported original-pygame environment API")
-if env.spec.env_id != "pacman-python-level1-pygame-v1":
+if env.spec.env_id != "pacman-python-level1-ghostdoor-v3":
     raise RuntimeError("wrong Pacman environment")
 if env.spec.action_tokens != ("U", "D", "L", "R", "S"):
     raise RuntimeError("incompatible action contract")
-if env.config.max_steps != 287:
-    raise RuntimeError("production level-1 recipe requires max_steps=287")
+if env.config.max_steps not in {32, 256, 512, 2000}:
+    raise RuntimeError("unsupported level-1 episode cap")
 ```
 
 It must import only the public `maapacman.env` API, not the worker module.
 
 ## 5. Dataset contract
 
-One row constructs one complete original-game episode:
+One abbreviated row constructs one complete original-game episode:
 
 ```json
 {
   "id": "level1-seed0-train-0001",
   "split": "train",
+  "dataset_contract_version": "maapacman-level1-dataset-v3",
   "env": {
-    "name": "pacman-python-level1-pygame-v1",
-    "api_version": "1.0",
+    "name": "pacman-python-level1-ghostdoor-v3",
+    "api_version": "3.0",
     "backend": "original-pygame",
     "pacman_python_revision": "d258122eecf6e0dc0a04d6fb8ff57a9b43f0c1d8",
     "level_revision": "36116c17c6c0805fdb1a07216357ac64c88d2c3108a0e37dce2a01b4ea2a8b97",
     "level": 1,
     "seed": 0,
-    "max_steps": 287,
+    "max_steps": 256,
     "observation_mode": "rgb"
   }
 }
@@ -208,14 +224,16 @@ One row constructs one complete original-game episode:
 
 Do not reuse historical rows labeled `maapacman-level1-v1` or API `1.0`
 without checking their `env_id`: those rows describe the older private AReaL
-environment, not this original-pygame wrapper.
+environment, not the current API-v3 original-pygame wrapper. Current rows must
+use dataset contract `maapacman-level1-dataset-v3`, environment API `3.0`, and
+environment ID `pacman-python-level1-ghostdoor-v3`.
 
-Production level-1 dataset validation must require `env.max_steps == 287`.
-This cap matches the verified nearest-normal-pellet oracle exactly. On action
-287 the original game reaches mode `6`; `terminated=True` takes precedence
-over the step cap, so that successful final action must not be reported as
-`truncated=True`. A row using a shorter or longer cap is a different experiment
-and must not be mixed into the production training/evaluation split.
+Production level-1 dataset validation accepts only `env.max_steps` values
+`32`, `256`, `512`, and `2000`; row generation defaults to `256`. The selected
+cap is part of the immutable row contract, so incompatible horizons must not be
+mixed into one training/evaluation split. If a terminal transition lands
+exactly on the cap, `terminated=True` takes precedence and that successful
+action must not also be reported as `truncated=True`.
 
 ## 6. Observation and action protocol
 
@@ -246,7 +264,7 @@ copy, resource link/private copy, pygame process, IPC channel, state file, and
 Surface. Workers do not own an X server or `DISPLAY`; pygame renders through
 SDL dummy and MaaPacman reads the completed pygame Surface directly.
 
-### Timing and IPC decision
+### Current IPC contract and historical timing evidence
 
 The current implementation uses newline-delimited JSON over subprocess pipes.
 Actions and state use small messages. Each RGB frame is copied from the pygame
@@ -259,7 +277,8 @@ call, including time spent paused inside `flip()` waiting for the model. It
 waits only when that total elapsed time is less than approximately `16.67 ms`;
 it does not add another `16.67 ms` after a slower model call.
 
-Local profiling with real `L/R` movement and the committed renderer measured:
+The following dated API-v1, 287-action local profiling used real `L/R` movement
+and the then-committed renderer:
 
 ```text
 1 worker env.step:                p50 16.81 ms, p95 18.58 ms
@@ -275,18 +294,19 @@ small pipe notification:          p50  0.053 ms, p95 0.091 ms
   complete model+environment turn:p50 64.88 ms, p95 71.49 ms
 ```
 
-The immediate-action `16.81 ms` result is the rate-limited scripted-agent case;
-it must not be added directly to a `50 ms` model call. With the simulated
-`50 ms` wait, the measured single-worker p50 is `62.13 ms` per complete turn,
-or approximately `17.83 s` for 287 actions. The corresponding 16-worker local
-p50 is `64.88 ms`, or approximately `18.62 s` per worker episode. These are
-local measurements, not H100 guarantees.
+The immediate-action `16.81 ms` result was the rate-limited scripted-agent
+case and could not be added directly to a `50 ms` model call. With the simulated
+`50 ms` wait, the historical single-worker p50 was `62.13 ms` per complete
+turn, or approximately `17.83 s` for that run's 287 actions. The corresponding
+16-worker local p50 was `64.88 ms`, or approximately `18.62 s` per worker
+episode. These are historical local measurements, not current H100 guarantees.
 
-The current RGB codec represents about `0.40 s` of serial CPU work across 287
-frames. Replacing RGB pipe payloads with shared memory is estimated to save
-about `0.38 s` per worker episode. The `clock.tick(60)` wait has little or no
-sleep to remove when model latency already exceeds the `16.67 ms` frame
-budget; it is a bottleneck only for faster scripted or low-latency policies.
+In that profiling, the RGB codec represented about `0.40 s` of serial CPU work
+across 287 frames, and shared-memory payloads were estimated to save about
+`0.38 s` per worker episode. The general conclusion remains that
+`clock.tick(60)` has little or no sleep to remove when model latency already
+exceeds the `16.67 ms` frame budget; it is a bottleneck only for faster scripted
+or low-latency policies.
 
 The recipe keeps both pipe IPC and the original `clock.tick(60)` behavior.
 H100 profiling with the real model and selected rollout concurrency decides
@@ -350,10 +370,15 @@ merged as if they used the same environment.
 ## 9. Current executable and evaluation contract
 
 The production workflow constructs `PygamePacmanEnv` directly and validates
-`pacman-python-level1-pygame-v1`. The current local and node5 suites pass `107`
-tests plus `13` subtests, including the 287-step oracle, real request contract,
-thinking-disabled decoding, cancellation cleanup, and collision-free
-trajectory persistence.
+API `3.0`, environment ID `pacman-python-level1-ghostdoor-v3`, and dataset
+contract `maapacman-level1-dataset-v3`. It takes the episode cap from the
+validated row; row generation defaults to `256`, while the exact supported set
+is `32`, `256`, `512`, and `2000`. The environment class's reusable `512`
+default does not override that row contract.
+
+The former `107`-test/`13`-subtest claim and the 287-action oracle were part of
+the dated API-v1 evidence. They are not a current API-v3 acceptance result;
+Sections 10-12 retain those experiments only as historical evidence.
 
 The H100 recipe uses eight GPUs:
 
@@ -391,16 +416,16 @@ style, decoding contract, request body, verbatim response, and reasoning
 content. Both sampled and greedy validation require thinking to be disabled and
 the report rejects any observed reasoning content.
 
-## 10. Corrected group-12 evidence
+## 10. Historical corrected group-12 evidence
 
 Historical run:
 
 ```text
-/home/ubuntu/z00819216/run_artifacts/maapacman-rl/
-  level1-group12-20260723b
+${ARTIFACT_ROOT}/level1-group12-20260723b
 ```
 
-The original post-training test omitted `enable_thinking=false`; in-training
+This API-v1, 287-action run predated the current API-v3 contract. Its original
+post-training test omitted `enable_thinking=false`; in-training
 validation also sampled at temperature `1.0`. The corrected evaluator rebuilt
 complete VLM checkpoints for base/epoch0/epoch1/epoch2/epoch3/final, ran one
 true greedy episode on each, then ran 24 matched sampled episodes on final.
@@ -423,7 +448,7 @@ Evidence:
 Every corrected episode has zero reasoning turns. The first update caused
 single-action collapse and later updates did not recover.
 
-## 11. Static image-only prompt A/B
+## 11. Historical static image-only prompt A/B
 
 The A/B compared:
 
@@ -454,9 +479,9 @@ Both prompts left the collapsed final checkpoint at score `20` with `L` on
 every turn. The next training gate therefore freezes `minimal_v1`; the
 live-inspired prompt remains a rejected ablation.
 
-## 12. Anti-collapse gate and conditional next gates
+## 12. Historical anti-collapse gate and conditional next gates
 
-Formal config:
+Historical API-v1, 287-action config:
 
 ```text
 configs/level1/archive/level1_image_anticollapse_4update_group12_8gpu.yaml
@@ -526,8 +551,7 @@ the formal config.
 The accepted topology completed as run:
 
 ```text
-/home/ubuntu/z00819216/run_artifacts/maapacman-rl/
-  level1-anticollapse-4update-20260723h
+${ARTIFACT_ROOT}/level1-anticollapse-4update-20260723h
 ```
 
 It finished all four optimizer updates, saved four complete `17.9 GB`
@@ -553,9 +577,10 @@ worse than base. Sparse training must therefore not be scaled.
 
 The next isolated change is
 `alpha * (nearest_normal_pellet_distance_before -
-nearest_normal_pellet_distance_after)` with `alpha=1`, using BFS over the
-MaaPacman-owned level representation. Distance and reward terms must be logged
-and independently audited; `pacman-python` remains unchanged.
+nearest_normal_pellet_distance_after)` with `alpha=1`, using BFS over the level
+representation owned by the bundled `maapacman` package. Distance and reward
+terms must be logged and independently audited; `pacman-python` remains
+unchanged.
 
 That follow-up is implemented by
 `configs/level1/archive/level1_image_progress_4update_group12_8gpu.yaml`. It changes only the
@@ -579,11 +604,11 @@ matches training. Greedy remains a separate collapse/determinism diagnostic;
 the report exposes both `best_sampled_label` and `best_greedy_label` rather
 than merging the two results.
 
-If that also fails, use Oracle SFT curricula at horizons `64`, `128`, and full
-`287`, followed by RL. Scale to 8-12 updates and deploy into the live demo only
-after an overfit gate passes.
+The recorded fallback plan was to use Oracle SFT curricula at horizons `64`,
+`128`, and the then-full `287`, followed by RL. Those values belong to this
+historical run plan and are not the current API-v3 supported-cap contract.
 
-## 13. Official-main migration gate
+## 13. Historical official-main migration gate
 
 On 2026-07-23 both remote nodes were moved to clean official AReaL worktrees at
 commit `4d7ee11479d61ebe6c6f020e2bdcda5d76c6a76b`; the former checkouts and all
@@ -625,14 +650,14 @@ mm_token_type_ids
 multi_modal_input[pixel_values, image_grid_thw]
 ```
 
-The recipe now provides
-`areal_pacman.level1.workflow.PacmanNativeVisionWorkflow` and the official 3B smoke
-config selects it. The workflow calls `InferenceEngine.agenerate()` directly,
-requires exact equality between the processor `input_ids` and the rollout
-response `input_tokens`, and returns one complete multimodal training row per
-Pacman action. It does not modify the official AReaL worktree.
+By the end of this recorded migration, the recipe provided
+`areal_pacman.level1.workflow.PacmanNativeVisionWorkflow`, and the official 3B
+smoke config selected it. The workflow called `InferenceEngine.agenerate()`
+directly, required exact equality between processor `input_ids` and rollout
+response `input_tokens`, and returned one complete multimodal training row per
+Pacman action. It did not modify the official AReaL worktree.
 
-The isolated node5 verification passed the complete recipe suite
+The dated isolated node5 verification passed the complete recipe suite
 (`138 passed, 13 subtests`) and the real cached
 `Qwen2.5-VL-3B-Instruct` processor produced:
 
@@ -643,44 +668,47 @@ pixel_values       (1344, 1176)
 image_grid_thw     (1, 3) = [[1, 32, 42]]
 ```
 
-Until the revised smoke passes a real reference-logp, actor update,
-checkpoint save/reload, and fixed evaluation, Sections 9-12 remain historical
-results from the AReaL-VLA-based stack rather than proof of official-main
-training compatibility.
+At the end of this 2026-07-23 record, the revised smoke had not yet passed a
+real reference-logp, actor update, checkpoint save/reload, and fixed evaluation.
+Sections 10-12 therefore remain historical results from the AReaL-VLA-based
+stack rather than proof of current API-v3 training compatibility.
 
 ## Appendix A. Superseded 2026-07-22 snapshot
 
 The remainder is retained only as historical evidence. Its test counts,
 six-GPU topology, filename-overwrite behavior, and early-run conclusions are
-superseded by Sections 9-12 above.
+superseded by the current contract in Sections 4, 5, and 9. Sections 10-13 also
+retain later dated evidence rather than current API-v3 acceptance results.
 
-The executable level-1 recipe constructs `PygamePacmanEnv` directly, validates
-`pacman-python-level1-pygame-v1`, records full environment provenance and
-collectible state, and uses the original game's `all_normal_pellets` terminal
-reason. Local, node1, and node5 recipe suites pass `99` tests plus `13`
-subtests. This includes the 287-step oracle and cancellation while awaiting a
-model response.
+At that superseded snapshot, the executable level-1 recipe constructed
+`PygamePacmanEnv` directly, validated API `1.0` and
+`pacman-python-level1-pygame-v1`, recorded environment provenance and
+collectible state, and used the original game's `all_normal_pellets` terminal
+reason. Local, node1, and node5 recipe suites had passed `99` tests plus `13`
+subtests, including the historical 287-step oracle and cancellation while
+awaiting a model response.
 
-The production launcher uses a six-GPU `d3` actor plus `d3` rollout topology.
-It places the selected Conda environment first on `PATH`; this is required
-because AReaL launches nested workers with `python3`. It refuses busy selected
-GPUs and never preempts unrelated processes.
+The launcher in that snapshot used a six-GPU `d3` actor plus `d3` rollout
+topology. It placed the selected Conda environment first on `PATH` because
+AReaL launched nested workers with `python3`; it refused busy selected GPUs and
+did not preempt unrelated processes.
 
-Trajectory JSON filenames use the dataset episode ID. Repeated samples of the
-same ID replace the earlier file. Therefore the directory is an auditable
-final sample set, but its file count is not the total rollout count. Epoch and
-global-step counts must be read from AReaL metrics and checkpoint names.
+Trajectory JSON filenames in that snapshot used the dataset episode ID, so
+repeated samples of the same ID replaced the earlier file. The directory was
+therefore an auditable final sample set, but its file count was not the total
+rollout count. Epoch and global-step counts had to be read from AReaL metrics
+and checkpoint names.
 
 ### Historical acceptance gates
 
 ### Local gate — completed
 
-- `pacman-python` source checkout is clean at commit `d258122e...`.
-- MaaPacman wrapper uses the original pygame Surface.
-- Windows native and SDL dummy produce identical reset and `L,L,L,S` hashes.
-- `PygamePacmanEnv` tests pass `6/6`, including four concurrent workers.
-- Complete MaaPacman unittest suite passes `23/23`.
-- Complete areal-pacman pytest suite passes `98` tests and `11` subtests.
+- `pacman-python` source checkout was clean at commit `d258122e...`.
+- MaaPacman wrapper used the original pygame Surface.
+- Windows native and SDL dummy produced identical reset and `L,L,L,S` hashes.
+- `PygamePacmanEnv` tests passed `6/6`, including four concurrent workers.
+- The complete MaaPacman unittest suite passed `23/23`.
+- The complete areal-pacman pytest suite passed `98` tests and `11` subtests.
 
 ### Linux display gate — completed on `h100-node1`
 
@@ -691,24 +719,26 @@ global-step counts must be read from AReaL metrics and checkpoint names.
 - The 287-step original-game oracle matched Windows state and RGB hash.
 - No worker process or temporary worker directory remained.
 
-Xvfb was not installed or used and is not part of the production recipe.
+Xvfb was not installed or used and was not part of that historical recipe.
 
 ### Recipe CPU gate — completed locally and on both remote nodes
 
-- The node5 mirror and dedicated Conda prefix are now present.
+- The node5 mirror and dedicated Conda prefix were present.
 - Direct PygamePacmanEnv tests, RGB parity, 4/16-worker isolation, and the
-  complete oracle have passed in that persistent environment.
-- Node1 now has the same three-editable-package layout. Its direct pygame gates
-  pass, and the deployed recipe suite passes `98` tests and `11` subtests.
-- Node1 uses `/mnt/data-node1/z00819216/xinglu/AReaL-VLA` at base
-  `da645a37...` with 26 dirty entries; node5 uses its own physical checkout.
-  The paths are intentionally node-local rather than shared.
-- Both nodes regenerate identical 8-row train and 2-row validation datasets
+  complete oracle had passed in that persistent environment.
+- This historical Node1 gate used the earlier three-editable-package layout.
+  The current release folds `maapacman` into the `areal-pacman` checkout; the
+  recorded direct pygame gates and deployed recipe suite result (`98` tests and
+  `11` subtests) are retained here as run history.
+- Node1 used a node-local AReaL development checkout at base `da645a37...`
+  with 26 dirty entries; node5 used its own physical checkout. The paths were
+  intentionally node-local rather than shared.
+- Both nodes regenerated identical 8-row train and 2-row validation datasets
   with `max_steps=287` and canonical level revision `36116c17...`.
-- Both nodes pass AReaL config loading for six GPUs, `vllm:d3p1t1`, and
+- Both nodes passed AReaL config loading for six GPUs, `vllm:d3p1t1`, and
   `fsdp:d3p1t1`.
 - The real model request, canonical parser, reward mapping, trajectory audit,
-  and process cleanup have been exercised on node5.
+  and process cleanup were exercised on node5.
 
 ### GPU gate — training passed; greedy improvement failed
 
@@ -716,11 +746,11 @@ Node5 run `impl-20260722b` used GPUs 1–6 and completed in 856.94 seconds.
 GPU0 and GPU7 workloads were left untouched. Evidence:
 
 - three vLLM rollout servers loaded Qwen3.5-9B and served real RGB requests;
-- each saved trajectory contains 287 original-pygame environment steps;
+- each saved trajectory contained 287 original-pygame environment steps;
 - three PPO optimizer updates completed, ending at `v_theta=3`;
-- checkpoints exist for epoch 0/global step 1 and epoch 1/global step 3;
-- all nine final trajectory files pass independent reward recomputation;
-- the deployable final checkpoint contains 427 trained keys and 333 restored
+- checkpoints existed for epoch 0/global step 1 and epoch 1/global step 3;
+- all nine final trajectory files passed independent reward recomputation;
+- the deployable final checkpoint contained 427 trained keys and 333 restored
   frozen visual keys.
 
 The frozen greedy seed-0 evaluation did **not** improve after this short run:
@@ -733,8 +763,8 @@ shaped reward     -287.0       -287.0
 parse failures       0            0
 ```
 
-Thus the recipe is accepted as an executable RL training path, but the
-two-epoch overfit-quality criterion remains failed. The next experiment should
-first reduce the 287-turn credit horizon or use demonstration-biased initial
+At that point, the recipe was accepted as an executable RL training path, but
+the two-epoch overfit-quality criterion had failed. The proposed next experiment
+was to reduce the 287-turn credit horizon or use demonstration-biased initial
 actions, then compare several fixed seeds and sampled as well as greedy policy
-metrics. Do not claim policy improvement from the current run.
+metrics. That historical run did not demonstrate policy improvement.
