@@ -46,6 +46,20 @@ pacman-python checkout
 `areal_pacman.synthetic.*` 仅用于历史文本/合成迷宫实验，不能替代真实
 Level 1 生产环境。
 
+## 两阶段 Curriculum 合约
+
+两个阶段使用同一套 `ghostdoor-v3` 环境接口和每个 RL action 最多 16 个游戏
+logic frame；游戏终止时可提前停止。区别只由数据行、训练配置和环境共同记录的
+`curriculum` 字段选择：
+
+| 阶段 | 游戏规则 | 初始化 checkpoint | 完整训练配置 |
+| --- | --- | --- | --- |
+| Curriculum 1 | 4 个幽灵保留在状态 schema 中，但始终 `gone`、不移动、不碰撞；无 fruit；能量豆只计分，不触发 vulnerability | `Qwen/Qwen3.5-9B` | `level1_curriculum1_step256_100update_group12_8gpu.yaml` |
+| Curriculum 2 | 完整幽灵、能量豆 vulnerability、fruit 和 ghost-door 规则（默认模式） | Curriculum 1 的最终 checkpoint | `level1_curriculum2_step256_100update_group12_8gpu.yaml` |
+
+两份完整配置均为 256-step、100 optimizer updates。两步 smoke test 不是第三份
+配置；它通过 Curriculum 1 启动器的 `SMOKE_TEST=1` 模式运行。
+
 ## 三层源码与环境安装
 
 生产 Level 1 需要固定下面三层源码；不再需要独立的 MaaPacman checkout：
@@ -186,7 +200,7 @@ backend: original-pygame
 ```bash
 "${PYTHON}" scripts/level1/dataset/prepare_level1_dataset.py \
   --output-root artifacts/datasets/level1_dataset_step32 \
-  --config configs/level1/train/level1_edward_step512_2update_group12_8gpu.yaml \
+  --config configs/level1/train/level1_curriculum1_step256_100update_group12_8gpu.yaml \
   --train-episodes 8 \
   --validation-episodes 2 \
   --max-steps 32 \
@@ -198,7 +212,7 @@ backend: original-pygame
 ```bash
 "${PYTHON}" scripts/level1/dataset/prepare_level1_dataset.py \
   --output-root artifacts/datasets/level1_dataset_step256 \
-  --config configs/level1/train/level1_edward_step512_2update_group12_8gpu.yaml \
+  --config configs/level1/train/level1_curriculum1_step256_100update_group12_8gpu.yaml \
   --train-episodes 8 \
   --validation-episodes 2 \
   --max-steps 256 \
@@ -227,14 +241,47 @@ export PYTHON="${ENV_ROOT}/bin/python"
 export AREAL_ROOT=/path/to/AReaL
 export MAAPACMAN_PACMAN_PYTHON_ROOT=/path/to/pacman-python
 export MODEL_PATH=/path/to/Qwen3.5-9B
-export CONFIG="$PWD/configs/level1/train/level1_edward_step512_2update_group12_8gpu.yaml"
-export DATASET_MAX_STEPS=512
+export CONFIG="$PWD/configs/level1/train/level1_curriculum1_step256_100update_group12_8gpu.yaml"
+export DATASET_MAX_STEPS=256
 RUN_TS="$(date -u +%Y%m%dT%H%M%SZ)"
-export RUN_ID="edward-v3-step512-${RUN_TS}"
+export RUN_ID="curriculum1-step256-${RUN_TS}"
 export DATASET_OUTPUT_ROOT="$PWD/artifacts/datasets/${RUN_ID}"
 export ARTIFACT_ROOT="$PWD/run_artifacts/${RUN_ID}"
 
 bash scripts/level1/train/run_level1_training.sh
+```
+
+Curriculum 2 需要的是可由 Transformers/vLLM 直接加载的完整 Curriculum 1
+checkpoint，而不是只有 `model.safetensors` 的原始 AReaL saver 目录。选定
+Curriculum 1 的最终更新并补齐冻结的视觉权重：
+
+```bash
+export BASE_MODEL_DIR=/path/to/Qwen3.5-9B
+export C1_TRAINED_DIR=/path/to/curriculum1/areal-saver/epoch-final
+export CURRICULUM1_CHECKPOINT=/path/to/curriculum1-complete-checkpoint
+
+"${PYTHON}" scripts/level1/report/build_complete_vlm_checkpoint.py \
+  --trained-dir "${C1_TRAINED_DIR}" \
+  --base-dir "${BASE_MODEL_DIR}" \
+  --output-dir "${CURRICULUM1_CHECKPOINT}"
+```
+
+然后启动 Curriculum 2；启动器会强制把 actor 指向
+`CURRICULUM1_CHECKPOINT`：
+
+```bash
+export CURRICULUM1_CHECKPOINT=/path/to/curriculum1-complete-checkpoint
+export CONFIG="$PWD/configs/level1/train/level1_curriculum2_step256_100update_group12_8gpu.yaml"
+export RUN_ID="curriculum2-step256-$(date -u +%Y%m%dT%H%M%SZ)"
+export DATASET_OUTPUT_ROOT="$PWD/artifacts/datasets/${RUN_ID}"
+export ARTIFACT_ROOT="$PWD/run_artifacts/${RUN_ID}"
+bash scripts/level1/train/run_level1_training.sh
+```
+
+Curriculum 1 的 2-update smoke test：
+
+```bash
+SMOKE_TEST=1 bash scripts/level1/train/run_level1_training.sh
 ```
 
 启动器会依次：
@@ -252,11 +299,12 @@ bash scripts/level1/train/run_level1_training.sh
 `DATASET_OUTPUT_ROOT` 在启动前必须不存在；若要改到其他磁盘，请把它和
 `ARTIFACT_ROOT` 都改为当前用户可写的新目录。
 
-## 256-step / 100-update 配置
+## 两份 256-step / 100-update 配置
 
 配置文件：
 
-[configs/level1/train/level1_live_state_step256_100update_group12_8gpu.yaml](configs/level1/train/level1_live_state_step256_100update_group12_8gpu.yaml)
+- [Curriculum 1 配置](configs/level1/train/level1_curriculum1_step256_100update_group12_8gpu.yaml)
+- [Curriculum 2 配置](configs/level1/train/level1_curriculum2_step256_100update_group12_8gpu.yaml)
 
 主要参数：
 
@@ -327,13 +375,12 @@ distance_reward = 0
 
 ## 训练配置
 
-生产配置位于 `configs/level1/train/`：
+`configs/level1/train/` 只发布两份正式配置：
 
-- `level1_live_state_step32_16update_group12_8gpu.yaml`：已完成的短训练。
-- `level1_live_state_step32_200update_group12_8gpu.yaml`：32-step 长训练。
-- `level1_live_state_step256_100update_group12_8gpu.yaml`：256-step、
-  50-epoch、Reward v2 配置。
-- `level1_logprob_alignment_probe_8gpu.yaml`：log-prob 对齐探针。
+- `level1_curriculum1_step256_100update_group12_8gpu.yaml`：无活动幽灵的
+  Curriculum 1 完整训练，从 Qwen3.5-9B 开始。
+- `level1_curriculum2_step256_100update_group12_8gpu.yaml`：完整游戏规则的
+  Curriculum 2 完整训练，从 Curriculum 1 checkpoint 开始。
 
 历史实验保存在 `configs/level1/archive/`、`configs/archive/text/` 和
 `configs/archive/vision/`。这些配置仅用于复现旧实验，不应作为新的生产默认值。
@@ -344,7 +391,7 @@ distance_reward = 0
 python -m pytest -q tests/test_level1_recipe.py
 
 python train_areal.py \
-  --config configs/level1/train/level1_live_state_step256_100update_group12_8gpu.yaml \
+  --config configs/level1/train/level1_curriculum1_step256_100update_group12_8gpu.yaml \
   --dry-run \
   --validate-areal
 ```
@@ -489,7 +536,7 @@ python -m pytest -q tests/test_level1_recipe.py
 
 ```bash
 python train_areal.py \
-  --config configs/level1/train/level1_live_state_step256_100update_group12_8gpu.yaml \
+  --config configs/level1/train/level1_curriculum1_step256_100update_group12_8gpu.yaml \
   --dry-run \
   --validate-areal
 ```

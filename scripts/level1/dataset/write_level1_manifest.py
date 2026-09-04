@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 import yaml
-from maapacman.env import PygamePacmanEnv
+from maapacman.env import PygamePacmanEnv, PygamePacmanEnvConfig
 
 from areal_pacman.level1.level1_dataset import repository_revisions
 from areal_pacman.level1.rewards import REWARD_RECIPE_VERSION
@@ -20,20 +20,32 @@ def main() -> None:
     parser.add_argument("--model-revision", required=True)
     parser.add_argument("--dataset-manifest", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--config-override", action="append", default=[])
     args = parser.parse_args()
-    env = PygamePacmanEnv()
+    config_bytes = args.config.read_bytes()
+    config = yaml.safe_load(config_bytes)
+    curriculum = config.get("curriculum") if isinstance(config, dict) else None
+    if (
+        not isinstance(curriculum, int)
+        or isinstance(curriculum, bool)
+        or curriculum not in (1, 2)
+    ):
+        raise ValueError("run manifest requires curriculum 1 or 2")
+    env = PygamePacmanEnv(
+        PygamePacmanEnvConfig(curriculum=int(curriculum))
+    )
     try:
         spec = env.spec
         environment_provenance = env.provenance
     finally:
         env.close()
     dataset = json.loads(args.dataset_manifest.read_text(encoding="utf-8"))
-    config_bytes = args.config.read_bytes()
-    config = yaml.safe_load(config_bytes)
     if config.get("recipe_version") != "maapacman-level1-ghostdoor-v3":
         raise ValueError("run manifest requires the ghostdoor-v3 recipe")
     if config.get("reward_recipe_version") != REWARD_RECIPE_VERSION:
         raise ValueError("run manifest requires the API-v3 reward recipe")
+    if dataset.get("curriculum") != curriculum:
+        raise ValueError("dataset and training config curricula differ")
     split_seeds = {
         int(seed)
         for split in dataset.get("splits", {}).values()
@@ -64,12 +76,14 @@ def main() -> None:
         "level_revision": spec.level_revision,
         "renderer_revision": spec.renderer_revision,
         "ruleset_revision": spec.ruleset_revision,
+        "curriculum": int(curriculum),
         "environment_provenance": environment_provenance,
         "action_tokens": list(spec.action_tokens),
         "model_revision": args.model_revision,
         "dataset": dataset,
         "seed_set": sorted(split_seeds),
         "config_sha256": hashlib.sha256(config_bytes).hexdigest(),
+        "config_overrides": list(args.config_override),
         "launch_command": shlex.join(sys.argv),
     }
     args.artifact_root.mkdir(parents=True, exist_ok=True)

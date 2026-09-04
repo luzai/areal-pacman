@@ -35,6 +35,11 @@ from .config import PacmanEnvSpec
 RULESET_CONTRACT = {
     "action_logic_frames": 16,
     "actor_roles": ["pacman", "ghost", "vulnerable", "eyes"],
+    "curricula": {
+        "1": "four-gone-ghosts-no-fruit-safe-pellets",
+        "2": "full-ghosts-power-pellets-fruit",
+    },
+    "curriculum_timebase": "shared-16-logic-frames-per-action",
     "event_score_contract": "per-logic-frame-v1",
     "source_event_ledger": "DrainGameEvents-v1",
     "ghost_door": "blocked-for-pacman-open-for-ghosts",
@@ -56,6 +61,7 @@ TRANSITION_STATE_FIELDS = {
     "pacman_speed",
     "facing",
     "level",
+    "curriculum",
     "mode",
     "mode_name",
     "mode_timer",
@@ -139,6 +145,7 @@ class PygameWorkerError(PacmanEnvError):
 class PygamePacmanEnvConfig:
     pacman_python_root: str | os.PathLike[str] | None = None
     level: int = 1
+    curriculum: int = 2
     max_steps: int = 512
     timeout_seconds: float = 15.0
     video_driver: str | None = "dummy"
@@ -151,6 +158,12 @@ class PygamePacmanEnvConfig:
             raise InvalidConfigurationError(
                 "PygamePacmanEnv currently supports only pacman-python level 1"
             )
+        if not isinstance(self.curriculum, int) or isinstance(
+            self.curriculum, bool
+        ):
+            raise InvalidConfigurationError("curriculum must be an integer")
+        if self.curriculum not in (1, 2):
+            raise InvalidConfigurationError("curriculum must be 1 or 2")
         if not isinstance(self.max_steps, int) or isinstance(self.max_steps, bool):
             raise InvalidConfigurationError("max_steps must be an integer")
         if self.max_steps <= 0:
@@ -251,6 +264,7 @@ class PygamePacmanEnv:
             "maapacman_env_source_sha256": self._maapacman_source_revision,
             "maapacman_dirty": self._maapacman_revision_dirty,
             "level": self.config.level,
+            "curriculum": self.config.curriculum,
             "level_revision": self._level_revision,
             "env_id": self._spec.env_id,
             "api_version": self._spec.api_version,
@@ -379,6 +393,7 @@ class PygamePacmanEnv:
             "pacman_speed",
             "pacman_facing",
             "level",
+            "curriculum",
             "mode",
             "mode_name",
             "mode_timer",
@@ -433,6 +448,10 @@ class PygamePacmanEnv:
                 )
             if int(substep["logic_frame_index"]) != index:
                 raise self._worker_failure("worker logic-frame indexes are not contiguous")
+            if int(substep["curriculum"]) != self.config.curriculum:
+                raise self._worker_failure(
+                    "worker atomic substep curriculum does not match config"
+                )
             if len(substep["ghosts"]) != 4:
                 raise self._worker_failure("worker atomic substep must contain four ghosts")
             if any(
@@ -623,6 +642,8 @@ class PygamePacmanEnv:
                     str(self._runtime_script),
                     "--seed",
                     str(self._seed),
+                    "--curriculum",
+                    str(self.config.curriculum),
                 ],
                 cwd=self._runtime_dir,
                 env=environment,
@@ -753,6 +774,10 @@ class PygamePacmanEnv:
             raise self._worker_failure(
                 f"worker API v3 transition state is incomplete: {missing}"
             )
+        if int(self._state["curriculum"]) != self.config.curriculum:
+            raise self._worker_failure(
+                "worker curriculum does not match requested curriculum"
+            )
         ghosts = self._state.get("ghosts")
         if (
             not isinstance(ghosts, list)
@@ -795,6 +820,7 @@ class PygamePacmanEnv:
             "level_revision": self._level_revision,
             "renderer_revision": self._spec.renderer_revision,
             "level": int(self._state["level"]),
+            "curriculum": int(self._state["curriculum"]),
             "seed": seed,
             "version_metadata": {**self.provenance, "seed": seed},
             "step": self._steps,

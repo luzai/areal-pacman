@@ -12,6 +12,7 @@ from typing import Any, Iterable, Iterator, Mapping
 
 from maapacman.env import (
     PygamePacmanEnv,
+    PygamePacmanEnvConfig,
 )
 from maapacman.planner import EdwardPlanner
 
@@ -106,9 +107,13 @@ def _validate_source_revisions(value: Any) -> None:
             raise ValueError(f"source_revisions.{name} is invalid")
 
 
-@lru_cache(maxsize=1)
-def environment_metadata() -> dict[str, Any]:
-    env = PygamePacmanEnv()
+@lru_cache(maxsize=2)
+def environment_metadata(curriculum: int = 2) -> dict[str, Any]:
+    if not isinstance(curriculum, int) or isinstance(curriculum, bool):
+        raise ValueError("curriculum must be an integer")
+    if curriculum not in (1, 2):
+        raise ValueError("curriculum must be 1 or 2")
+    env = PygamePacmanEnv(PygamePacmanEnvConfig(curriculum=curriculum))
     try:
         info = env.provenance
         revisions = repository_revisions()
@@ -135,6 +140,7 @@ def environment_metadata() -> dict[str, Any]:
             ],
             "maapacman_dirty": recipe_revision["dirty"],
             "level": int(info["level"]),
+            "curriculum": int(info["curriculum"]),
             "level_revision": env.spec.level_revision,
             "renderer_revision": env.spec.renderer_revision,
             "ruleset_revision": env.spec.ruleset_revision,
@@ -145,8 +151,8 @@ def environment_metadata() -> dict[str, Any]:
         env.close()
 
 
-def environment_revision() -> str:
-    return environment_metadata()["level_revision"]
+def environment_revision(curriculum: int = 2) -> str:
+    return environment_metadata(curriculum)["level_revision"]
 
 
 def validate_episode_row(row: Mapping[str, Any]) -> None:
@@ -157,7 +163,14 @@ def validate_episode_row(row: Mapping[str, Any]) -> None:
     env = row.get("env")
     if not isinstance(env, Mapping):
         raise ValueError("env must be an object")
-    installed = environment_metadata()
+    curriculum = env.get("curriculum")
+    if (
+        not isinstance(curriculum, int)
+        or isinstance(curriculum, bool)
+        or curriculum not in (1, 2)
+    ):
+        raise ValueError("env.curriculum must be integer 1 or 2")
+    installed = environment_metadata(int(curriculum))
     if env.get("name") != ENV_NAME or env.get("name") != installed["name"]:
         raise ValueError(f"env.name must be {ENV_NAME!r}")
     if (
@@ -167,6 +180,8 @@ def validate_episode_row(row: Mapping[str, Any]) -> None:
         raise ValueError(f"env.api_version must be {ENV_API_VERSION!r}")
     if env.get("backend") != ENV_BACKEND:
         raise ValueError(f"env.backend must be {ENV_BACKEND!r}")
+    if env.get("curriculum") != installed["curriculum"]:
+        raise ValueError("env.curriculum does not match installed environment")
     if env.get("pacman_python_revision") != installed["pacman_python_revision"]:
         raise ValueError(
             "env.pacman_python_revision does not match installed pacman-python"
@@ -307,6 +322,7 @@ def validate_episode_row(row: Mapping[str, Any]) -> None:
             "maapacman_revision",
             "maapacman_env_source_sha256",
             "maapacman_dirty",
+            "curriculum",
             "level_revision",
             "renderer_revision",
             "ruleset_revision",
@@ -321,12 +337,13 @@ def make_episode_row(
     split: str,
     seed: int = 0,
     max_steps: int = PRODUCTION_MAX_STEPS,
+    curriculum: int = 2,
 ) -> dict[str, Any]:
     if not isinstance(index, int) or isinstance(index, bool) or index < 1:
         raise ValueError("index must be a positive integer")
-    installed = environment_metadata()
+    installed = environment_metadata(curriculum)
     row = {
-        "id": f"level1-seed{seed}-{split}-{index:04d}",
+        "id": f"level1-c{curriculum}-seed{seed}-{split}-{index:04d}",
         "split": split,
         "dataset_contract_version": DATASET_CONTRACT_VERSION,
         "source_revisions": repository_revisions(),
@@ -348,6 +365,7 @@ def make_episode_row(
             "renderer_revision": installed["renderer_revision"],
             "ruleset_revision": installed["ruleset_revision"],
             "level": 1,
+            "curriculum": curriculum,
             "seed": seed,
             "max_steps": max_steps,
             "observation_mode": "rgb",
@@ -363,11 +381,18 @@ def generate_episode_rows(
     split: str,
     seed: int = 0,
     max_steps: int = PRODUCTION_MAX_STEPS,
+    curriculum: int = 2,
 ) -> Iterator[dict[str, Any]]:
     if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
         raise ValueError("count must be a positive integer")
     for index in range(1, count + 1):
-        yield make_episode_row(index, split=split, seed=seed, max_steps=max_steps)
+        yield make_episode_row(
+            index,
+            split=split,
+            seed=seed,
+            max_steps=max_steps,
+            curriculum=curriculum,
+        )
 
 
 def planner_baseline_state_prefixes(*, seed: int = 0) -> list[list[str]]:

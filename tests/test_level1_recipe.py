@@ -236,11 +236,12 @@ class DatasetContractTests(unittest.TestCase):
         first = list(generate_episode_rows(3, split="train", seed=0))
         second = list(generate_episode_rows(3, split="train", seed=0))
         self.assertEqual(first, second)
-        self.assertEqual(first[0]["id"], "level1-seed0-train-0001")
+        self.assertEqual(first[0]["id"], "level1-c2-seed0-train-0001")
         self.assertEqual(
             first[0]["env"]["name"], "pacman-python-level1-ghostdoor-v3"
         )
         self.assertEqual(first[0]["env"]["backend"], ENV_BACKEND)
+        self.assertEqual(first[0]["env"]["curriculum"], 2)
         self.assertEqual(first[0]["env"]["max_steps"], PRODUCTION_MAX_STEPS)
         self.assertEqual(
             first[0]["env"]["pacman_python_revision"],
@@ -283,6 +284,8 @@ class DatasetContractTests(unittest.TestCase):
         for key, value in (
             ("api_version", "1.0"),
             ("backend", "synthetic"),
+            ("curriculum", 3),
+            ("curriculum", 1.0),
             ("pacman_python_revision", "wrong"),
             ("level", 2),
             ("seed", True),
@@ -845,14 +848,23 @@ class RewardAndTrajectoryTests(unittest.TestCase):
                 RewardConfig(step_penalty=0.0),
             )
 
-    def test_step256_reward_config_contract(self) -> None:
-        config = (
-            Path(__file__).parents[1]
-            / "configs"
-            / "level1"
-            / "train"
-            / "level1_live_state_step256_100update_group12_8gpu.yaml"
+    def test_two_stage_curriculum_config_contract(self) -> None:
+        config_root = (
+            Path(__file__).parents[1] / "configs" / "level1" / "train"
+        )
+        curriculum1 = (
+            config_root
+            / "level1_curriculum1_step256_100update_group12_8gpu.yaml"
         ).read_text(encoding="utf-8")
+        curriculum2 = (
+            config_root
+            / "level1_curriculum2_step256_100update_group12_8gpu.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("curriculum: 1", curriculum1)
+        self.assertIn("path: Qwen/Qwen3.5-9B", curriculum1)
+        self.assertIn("curriculum: 2", curriculum2)
+        self.assertIn("path: ${oc.env:CURRICULUM1_CHECKPOINT}", curriculum2)
+        config = curriculum1
         for expected in (
             "recipe_version: maapacman-level1-ghostdoor-v3",
             "total_train_epochs: 50",
@@ -911,46 +923,33 @@ class RewardAndTrajectoryTests(unittest.TestCase):
         self.assertIn("\n  adv_norm: null", "\n" + actor_section)
         self.assertIn("\n  offload: true", "\n" + ref_section)
         self.assertNotIn("revisit_penalty:", config)
-
-    def test_step512_edward_gate_config_contract(self) -> None:
-        config = (
-            Path(__file__).parents[1]
-            / "configs"
-            / "level1"
-            / "train"
-            / "level1_edward_step512_2update_group12_8gpu.yaml"
-        ).read_text(encoding="utf-8")
-        for expected in (
-            "recipe_version: maapacman-level1-ghostdoor-v3",
-            "total_train_epochs: 2",
-            "reward_objective_contract: option_return_raw_v1",
-            "use_base_reward: false",
-            "fruit_reward: 0.0",
-            "safety_refusal_penalty: 25.0",
-            "step_penalty: 0.05",
-            "step_penalty_cleared_ratio_scale: 0.0",
-            "edward_options: true",
-            "action_token_choice: false",
-            "open_action_mask: false",
+        for common_line in (
+            "total_train_epochs: 50",
+            "reward_objective_contract: episode_return_group_v1",
             "n_samples: 12",
             "batch_size: 4",
-            "gdn_prefill_backend: triton",
-            "kl_logprob_source: proximal",
-            "prox_logp_method: recompute",
-            "level: sequence",
-            "action: mask",
-            "agg: sum",
-            "lower: 0.8",
-            "upper: 1.25",
-            "freq_steps: 1",
-            "artifacts/datasets/level1_dataset_step512/train_hf",
-            "artifacts/datasets/level1_dataset_step512/validation_hf",
         ):
-            self.assertIn(expected, config)
-        actor_section = config.split("\nref:\n", 1)[0].split("\nactor:\n", 1)[1]
-        self.assertIn("\n  reward_norm: null", "\n" + actor_section)
-        self.assertIn("\n  adv_norm: null", "\n" + actor_section)
-        self.assertNotIn("level1_dataset_step256/", config)
+            self.assertIn(common_line, curriculum2)
+
+    def test_two_update_smoke_is_a_curriculum_one_launcher_mode(self) -> None:
+        root = Path(__file__).parents[1]
+        launcher = (
+            root / "scripts" / "level1" / "train" / "run_level1_training.sh"
+        ).read_text(encoding="utf-8")
+        self.assertFalse(
+            (
+                root
+                / "configs"
+                / "level1"
+                / "train"
+                / "level1_edward_step512_2update_group12_8gpu.yaml"
+            ).exists()
+        )
+        self.assertIn('SMOKE_TEST="${SMOKE_TEST:-0}"', launcher)
+        self.assertIn('TRAIN_EPISODES="${SMOKE_TRAIN_EPISODES:-4}"', launcher)
+        self.assertIn('TRAIN_CONFIG_ARGS+=("total_train_epochs=2")', launcher)
+        self.assertIn('TRAIN_CONFIG_ARGS+=("saver.freq_steps=1")', launcher)
+        self.assertIn("SMOKE_TEST=1 requires the Curriculum 1 config", launcher)
 
     def test_summary_counts_acceptance_metrics(self) -> None:
         summary = summarize_episodes(
@@ -2525,7 +2524,7 @@ class TrainerGenerationContractTests(unittest.TestCase):
         )
         self.assertIn("AReaL import escaped selected checkout", launcher)
 
-    def test_training_launcher_defaults_to_current_v3_gate_and_chunks_logps(self) -> None:
+    def test_training_launcher_defaults_to_curriculum_one_full_and_chunks_logps(self) -> None:
         launcher = (
             Path(__file__).parents[1]
             / "scripts"
@@ -2534,15 +2533,21 @@ class TrainerGenerationContractTests(unittest.TestCase):
             / "run_level1_training.sh"
         ).read_text(encoding="utf-8")
         self.assertIn(
-            "configs/level1/train/level1_edward_step512_2update_group12_8gpu.yaml",
+            "configs/level1/train/level1_curriculum1_step256_100update_group12_8gpu.yaml",
             launcher,
         )
         self.assertNotIn(
             "configs/level1/archive/level1_image_overfit_4epoch_group12_8gpu.yaml",
             launcher,
         )
-        self.assertIn('TRAIN_EPISODES="${TRAIN_EPISODES:-4}"', launcher)
-        self.assertIn('DATASET_MAX_STEPS="${DATASET_MAX_STEPS:-512}"', launcher)
+        self.assertIn('TRAIN_EPISODES="${TRAIN_EPISODES:-8}"', launcher)
+        self.assertIn('DATASET_MAX_STEPS="${DATASET_MAX_STEPS:-256}"', launcher)
+        self.assertIn('SMOKE_TEST="${SMOKE_TEST:-0}"', launcher)
+        self.assertIn('CONFIG_CURRICULUM="$(', launcher)
+        self.assertIn("Curriculum 2 requires CURRICULUM1_CHECKPOINT", launcher)
+        self.assertIn('MODEL_PATH="${CURRICULUM1_CHECKPOINT}"', launcher)
+        self.assertIn('MODEL_PATH}/model.safetensors.index.json', launcher)
+        self.assertIn('"actor.path=${MODEL_PATH}"', launcher)
         self.assertIn(
             'DATASET_OUTPUT_ROOT="${DATASET_OUTPUT_ROOT:-${ARTIFACT_ROOT}/dataset}"',
             launcher,
@@ -2556,6 +2561,30 @@ class TrainerGenerationContractTests(unittest.TestCase):
             'echo "logp_rpc_chunk_size=${MAAPACMAN_LOGP_RPC_CHUNK_SIZE}"',
             launcher,
         )
+
+    def test_evaluation_and_replay_helpers_preserve_curriculum(self) -> None:
+        root = Path(__file__).parents[1]
+        evaluator = (
+            root / "scripts" / "level1" / "evaluate" / "evaluate_level1.py"
+        ).read_text(encoding="utf-8")
+        single_step = (
+            root
+            / "scripts"
+            / "level1"
+            / "evaluate"
+            / "evaluate_single_step_wall.py"
+        ).read_text(encoding="utf-8")
+        for relative in (
+            "export_level1_ab_demo_video.py",
+            "export_level1_rollout_video.py",
+        ):
+            replay = (
+                root / "scripts" / "level1" / "report" / relative
+            ).read_text(encoding="utf-8")
+            self.assertIn('curriculum=int(episode["curriculum"])', replay)
+        self.assertIn('parser.add_argument("--curriculum"', evaluator)
+        self.assertIn("curriculum=args.curriculum", evaluator)
+        self.assertIn('curriculum=int(requested["curriculum"])', single_step)
 
     def test_official_areal_single_step_smoke_contract(self) -> None:
         config = (

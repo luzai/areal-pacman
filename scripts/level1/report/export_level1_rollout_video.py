@@ -62,6 +62,7 @@ def main() -> None:
     trajectory = episode["trajectory"]
     config = PygamePacmanEnvConfig(
         level=int(episode["level"]),
+        curriculum=int(episode["curriculum"]),
         max_steps=int(episode["max_steps"]),
         video_driver="dummy",
         audio_driver="dummy",

@@ -23,6 +23,7 @@ try:
         AUDIT_CONTRACT_VERSION,
         REPO_ROOT,
         _canonical_sha256,
+        _curriculum_config,
         _generator_provenance,
         _reward_config,
         audit_planner_record,
@@ -35,6 +36,7 @@ except ModuleNotFoundError as exc:
         AUDIT_CONTRACT_VERSION,
         REPO_ROOT,
         _canonical_sha256,
+        _curriculum_config,
         _generator_provenance,
         _reward_config,
         audit_planner_record,
@@ -118,6 +120,7 @@ def audit_episode_spec_row(row: dict[str, Any]) -> None:
         "maapacman_revision",
         "maapacman_env_source_sha256",
         "maapacman_dirty",
+        "curriculum",
         "level_revision",
         "renderer_revision",
         "ruleset_revision",
@@ -173,7 +176,8 @@ def _prepare_dataset(args: argparse.Namespace) -> None:
     if args.train_episodes < 1 or args.validation_episodes < 1:
         raise ValueError("train and validation datasets must both be non-empty")
     args.output_root.mkdir(parents=True, exist_ok=False)
-    metadata = environment_metadata()
+    curriculum = _curriculum_config(args.config)
+    metadata = environment_metadata(curriculum)
     reward_config, config_sha256 = _reward_config(args.config)
     manifest: dict[str, Any] = {
         "preparation_contract_version": DATASET_PREPARATION_CONTRACT_VERSION,
@@ -184,6 +188,7 @@ def _prepare_dataset(args: argparse.Namespace) -> None:
         "generator_provenance": _split_generator_provenance(),
         "seed": args.seed,
         "max_steps": args.max_steps,
+        "curriculum": curriculum,
         "split_seed_contract": "disjoint_contiguous_seeds",
         "training_config_sha256": config_sha256,
         "reward_config": asdict(reward_config),
@@ -209,6 +214,7 @@ def _prepare_dataset(args: argparse.Namespace) -> None:
                     split=split,
                     seed=next_seed + index,
                     max_steps=args.max_steps,
+                    curriculum=curriculum,
                 )
             )
             for index in range(count)
@@ -219,6 +225,7 @@ def _prepare_dataset(args: argparse.Namespace) -> None:
                 seed=int(row["env"]["seed"]),
                 max_steps=int(row["env"]["max_steps"]),
                 reward_config=reward_config,
+                curriculum=curriculum,
                 pacman_python_root=args.pacman_python_root,
             )
             row["source_revisions"] = row["audit_anchor"]["source_revisions"]
