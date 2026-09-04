@@ -2,7 +2,7 @@
 
 `1.txt` is an API-stable snapshot of
 [`pacman-python/pacman/res/levels/1.txt` at commit
-`b8fbb83f0a7203008b59072d6424ff5d970281cb`](https://github.com/luzai/pacman-python/blob/b8fbb83f0a7203008b59072d6424ff5d970281cb/pacman/res/levels/1.txt).
+`01eff954d4ee09bcc0937b77fea7d382496e891b`](https://github.com/luzai/pacman-python/blob/01eff954d4ee09bcc0937b77fea7d382496e891b/pacman/res/levels/1.txt).
 
 The upstream README credits David Reilly and Andy Sommerville and explicitly
 permits redistribution with credit. MaaPacman preserves that attribution here.

@@ -645,7 +645,7 @@ GPU 训练前待办还包括 rollout-launcher 取消测试、可选 no-wait cloc
 - 完整 MaaPacman unittest suite 当时通过 `23/23`。
 - 完整 areal-pacman pytest suite 当时通过 `98` 项测试和 `11` 项 subtest。
 
-#### Linux 显示 gate —— 已在 `h100-node1` 完成
+#### Linux 显示 gate —— 已在一台 8×H100 测试节点完成
 
 - 实际 pygame driver：SDL dummy；pygame `2.6.1`；SDL `2.28.4`。
 - 三次重复 `L,L,L,S` 均与 Windows 原始 RGB hash 完全一致。

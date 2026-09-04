@@ -710,7 +710,7 @@ and checkpoint names.
 - The complete MaaPacman unittest suite passed `23/23`.
 - The complete areal-pacman pytest suite passed `98` tests and `11` subtests.
 
-### Linux display gate — completed on `h100-node1`
+### Linux display gate — completed on an 8×H100 test node
 
 - Actual pygame driver: SDL dummy, pygame `2.6.1`, SDL `2.28.4`.
 - Three repeated `L,L,L,S` runs matched Windows raw RGB hashes exactly.
