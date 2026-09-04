@@ -2,47 +2,144 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
-from pathlib import Path
 from functools import lru_cache
+import os
+from pathlib import Path
+import subprocess
 from typing import Any, Iterable, Iterator, Mapping
 
 from maapacman.env import (
-    Position,
     PygamePacmanEnv,
-    load_bundled_level,
-    route_to_nearest,
 )
+from maapacman.planner import EdwardPlanner
 
 
-ENV_NAME = "pacman-python-level1-pygame-v1"
-ENV_API_VERSION = "1.0"
+ENV_NAME = "pacman-python-level1-ghostdoor-v3"
+ENV_API_VERSION = "3.0"
 ENV_BACKEND = "original-pygame"
-PRODUCTION_MAX_STEPS = 287
+DATASET_CONTRACT_VERSION = "maapacman-level1-dataset-v3"
+PREFIX_AUDIT_CONTRACT_VERSION = "planner-preterminal-prefix-audit-v1"
+# Production horizons are selected by each immutable dataset row.  The v3
+# contract deliberately has no implicit 287-step episode assumption.
+PRODUCTION_MAX_STEPS = 256
 SHORT_HORIZON_MAX_STEPS = 32
 LONG_HORIZON_MAX_STEPS = 256
+STRESS_MAX_STEPS = 512
 DEMO_SAFETY_MAX_STEPS = 2000
 SUPPORTED_MAX_STEPS = frozenset(
     {
         SHORT_HORIZON_MAX_STEPS,
         LONG_HORIZON_MAX_STEPS,
-        PRODUCTION_MAX_STEPS,
+        STRESS_MAX_STEPS,
         DEMO_SAFETY_MAX_STEPS,
     }
 )
+REPOSITORY_NAMES = ("pacman-python", "areal-pacman", "AReaL")
+
+
+def _canonical_sha256(value: Any) -> str:
+    payload = json.dumps(
+        value, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 @lru_cache(maxsize=1)
-def environment_metadata() -> dict[str, str]:
+def repository_revisions() -> dict[str, dict[str, Any]]:
+    """Return the three-repository provenance required by each v3 record."""
+
+    recipe_root = Path(__file__).resolve().parents[2]
+    workspace_root = recipe_root.parent
+    pacman_python_root = Path(
+        os.getenv("MAAPACMAN_PACMAN_ROOT")
+        or os.getenv("MAAPACMAN_PACMAN_PYTHON_ROOT")
+        or workspace_root / "pacman-python"
+    ).resolve()
+    areal_root = Path(
+        os.getenv("AREAL_ROOT") or workspace_root / "AReaL"
+    ).resolve()
+    repositories = {
+        "pacman-python": pacman_python_root,
+        "areal-pacman": recipe_root,
+        "AReaL": areal_root,
+    }
+    revisions: dict[str, dict[str, Any]] = {}
+    for name in REPOSITORY_NAMES:
+        repository = repositories[name]
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repository,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        if len(commit) != 40:
+            raise RuntimeError(f"{name} git commit is invalid")
+        dirty = bool(
+            subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=repository,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+        )
+        revisions[name] = {"commit": commit, "dirty": dirty}
+    return revisions
+
+
+def _validate_source_revisions(value: Any) -> None:
+    if not isinstance(value, Mapping) or set(value) != set(REPOSITORY_NAMES):
+        raise ValueError("source_revisions must contain all three repositories")
+    for name, revision in value.items():
+        if not isinstance(revision, Mapping):
+            raise ValueError(f"source_revisions.{name} must be an object")
+        commit = revision.get("commit")
+        if (
+            not isinstance(commit, str)
+            or len(commit) != 40
+            or any(character not in "0123456789abcdef" for character in commit)
+            or not isinstance(revision.get("dirty"), bool)
+        ):
+            raise ValueError(f"source_revisions.{name} is invalid")
+
+
+@lru_cache(maxsize=1)
+def environment_metadata() -> dict[str, Any]:
     env = PygamePacmanEnv()
     try:
+        info = env.provenance
+        revisions = repository_revisions()
+        recipe_revision = revisions["areal-pacman"]
+        if (
+            info["maapacman_commit"] != recipe_revision["commit"]
+            or bool(info["maapacman_dirty"]) is not recipe_revision["dirty"]
+        ):
+            raise RuntimeError(
+                "maapacman must be bundled in the active areal-pacman checkout"
+            )
         return {
             "name": env.spec.env_id,
             "api_version": env.spec.api_version,
             "backend": ENV_BACKEND,
-            "pacman_python_revision": env.pacman_python_revision,
+            "pacman_python_revision": info["pacman_python_commit"],
+            "pacman_python_source_sha256": info[
+                "pacman_python_source_sha256"
+            ],
+            "pacman_python_dirty": bool(info["pacman_python_dirty"]),
+            "maapacman_revision": recipe_revision["commit"],
+            "maapacman_env_source_sha256": info[
+                "maapacman_env_source_sha256"
+            ],
+            "maapacman_dirty": recipe_revision["dirty"],
+            "level": int(info["level"]),
             "level_revision": env.spec.level_revision,
             "renderer_revision": env.spec.renderer_revision,
+            "ruleset_revision": env.spec.ruleset_revision,
+            "dataset_contract_version": DATASET_CONTRACT_VERSION,
+            "source_revisions": revisions,
         }
     finally:
         env.close()
@@ -74,8 +171,41 @@ def validate_episode_row(row: Mapping[str, Any]) -> None:
         raise ValueError(
             "env.pacman_python_revision does not match installed pacman-python"
         )
+    if env.get("pacman_python_source_sha256") != installed[
+        "pacman_python_source_sha256"
+    ]:
+        raise ValueError(
+            "env.pacman_python_source_sha256 does not match installed source"
+        )
+    if env.get("pacman_python_dirty") is not installed["pacman_python_dirty"]:
+        raise ValueError(
+            "env.pacman_python_dirty does not match installed source"
+        )
+    if env.get("maapacman_revision") != installed["maapacman_revision"]:
+        raise ValueError(
+            "env.maapacman_revision does not match bundled maapacman"
+        )
+    if env.get("maapacman_env_source_sha256") != installed[
+        "maapacman_env_source_sha256"
+    ]:
+        raise ValueError(
+            "env.maapacman_env_source_sha256 does not match installed source"
+        )
+    if env.get("maapacman_dirty") is not installed["maapacman_dirty"]:
+        raise ValueError("env.maapacman_dirty does not match installed source")
     if env.get("level_revision") != installed["level_revision"]:
-        raise ValueError("env.level_revision does not match installed MaaPacman")
+        raise ValueError("env.level_revision does not match bundled maapacman")
+    if env.get("ruleset_revision") != installed["ruleset_revision"]:
+        raise ValueError("env.ruleset_revision does not match bundled maapacman")
+    if env.get("renderer_revision") != installed["renderer_revision"]:
+        raise ValueError("env.renderer_revision does not match bundled maapacman")
+    if row.get("dataset_contract_version") != DATASET_CONTRACT_VERSION:
+        raise ValueError(
+            f"dataset_contract_version must be {DATASET_CONTRACT_VERSION!r}"
+        )
+    _validate_source_revisions(row.get("source_revisions"))
+    if row.get("source_revisions") != repository_revisions():
+        raise ValueError("source_revisions do not match installed repositories")
     if env.get("level") != 1 or isinstance(env.get("level"), bool):
         raise ValueError("env.level must be integer 1")
     seed = env.get("seed")
@@ -98,6 +228,91 @@ def validate_episode_row(row: Mapping[str, Any]) -> None:
     decision_steps = row.get("decision_steps")
     if decision_steps is not None and decision_steps != 1:
         raise ValueError("decision_steps, when present, must be exactly 1")
+    prefix_audit = row.get("state_prefix_audit")
+    if prefix_actions or decision_steps is not None:
+        if not isinstance(prefix_audit, Mapping):
+            raise ValueError("state-prefix rows require state_prefix_audit")
+        if prefix_audit.get("contract_version") != PREFIX_AUDIT_CONTRACT_VERSION:
+            raise ValueError(
+                "state_prefix_audit.contract_version must be "
+                f"{PREFIX_AUDIT_CONTRACT_VERSION!r}"
+            )
+        if prefix_audit.get("source") != "edward-planner-preterminal-replay":
+            raise ValueError("state_prefix_audit.source is invalid")
+        if prefix_audit.get("source_seed") != seed:
+            raise ValueError("state prefix source seed must match env.seed")
+        if prefix_audit.get("prefix_state_index") != len(prefix_actions):
+            raise ValueError("state prefix index must match its action count")
+        source_steps = prefix_audit.get("source_episode_steps")
+        if (
+            not isinstance(source_steps, int)
+            or isinstance(source_steps, bool)
+            or source_steps <= len(prefix_actions)
+        ):
+            raise ValueError("state prefix must precede the source terminal step")
+        if prefix_audit.get("prefix_verified_nonterminal") is not True:
+            raise ValueError("state prefix must be verified nonterminal")
+        if prefix_audit.get("prefix_wall_collisions") != 0:
+            raise ValueError("state prefix must have zero wall collisions")
+        terminal_reason = prefix_audit.get("source_terminal_reason")
+        if terminal_reason not in {"death", "all_normal_pellets"}:
+            raise ValueError("state prefix source must have an audited terminal")
+        cleared = prefix_audit.get("source_cleared_level")
+        if cleared is not (terminal_reason == "all_normal_pellets"):
+            raise ValueError("state prefix source clear flag is inconsistent")
+        if prefix_audit.get("successful_baseline") is not cleared:
+            raise ValueError("successful_baseline must exactly match level clear")
+    anchor = row.get("audit_anchor")
+    if anchor is not None:
+        if not isinstance(anchor, Mapping):
+            raise ValueError("audit_anchor must be an object")
+        anchor_digest = row.get("audit_anchor_sha256")
+        if (
+            not isinstance(anchor_digest, str)
+            or len(anchor_digest) != 64
+            or anchor_digest != _canonical_sha256(anchor)
+        ):
+            raise ValueError("audit_anchor canonical hash mismatch")
+        if (
+            anchor.get("audit_role") != "episode_spec_audit_anchor"
+            or anchor.get("audit_contract_version")
+            != "maapacman-level1-planner-audit-v3"
+            or anchor.get("dataset_contract_version") != DATASET_CONTRACT_VERSION
+            or anchor.get("seed") != seed
+            or anchor.get("step") != 1
+        ):
+            raise ValueError("audit_anchor identity does not match episode spec")
+        if anchor.get("audit_anchor_semantics") != {
+            "scope": "initial_state_one_edward_step",
+            "model_rollout": False,
+            "training_sample": False,
+        }:
+            raise ValueError("audit_anchor semantics are invalid")
+        if row.get("source_revisions") != anchor.get("source_revisions"):
+            raise ValueError("episode source revisions differ from audit_anchor")
+        selected = anchor.get("selected_option")
+        action = anchor.get("executed_primitive_action")
+        if not isinstance(selected, Mapping) or selected.get("first_action") != action:
+            raise ValueError("audit_anchor selected option/action mismatch")
+        anchor_env = anchor.get("env")
+        if not isinstance(anchor_env, Mapping):
+            raise ValueError("audit_anchor env must be an object")
+        identity_fields = {
+            "name",
+            "api_version",
+            "backend",
+            "pacman_python_revision",
+            "pacman_python_source_sha256",
+            "pacman_python_dirty",
+            "maapacman_revision",
+            "maapacman_env_source_sha256",
+            "maapacman_dirty",
+            "level_revision",
+            "renderer_revision",
+            "ruleset_revision",
+        }
+        if any(anchor_env.get(field) != env.get(field) for field in identity_fields):
+            raise ValueError("audit_anchor provenance differs from episode spec")
 
 
 def make_episode_row(
@@ -113,12 +328,25 @@ def make_episode_row(
     row = {
         "id": f"level1-seed{seed}-{split}-{index:04d}",
         "split": split,
+        "dataset_contract_version": DATASET_CONTRACT_VERSION,
+        "source_revisions": repository_revisions(),
         "env": {
             "name": ENV_NAME,
             "api_version": ENV_API_VERSION,
             "backend": ENV_BACKEND,
             "pacman_python_revision": installed["pacman_python_revision"],
+            "pacman_python_source_sha256": installed[
+                "pacman_python_source_sha256"
+            ],
+            "pacman_python_dirty": installed["pacman_python_dirty"],
+            "maapacman_revision": installed["maapacman_revision"],
+            "maapacman_env_source_sha256": installed[
+                "maapacman_env_source_sha256"
+            ],
+            "maapacman_dirty": installed["maapacman_dirty"],
             "level_revision": installed["level_revision"],
+            "renderer_revision": installed["renderer_revision"],
+            "ruleset_revision": installed["ruleset_revision"],
             "level": 1,
             "seed": seed,
             "max_steps": max_steps,
@@ -142,18 +370,46 @@ def generate_episode_rows(
         yield make_episode_row(index, split=split, seed=seed, max_steps=max_steps)
 
 
-def oracle_state_prefixes(*, seed: int = 0) -> list[list[str]]:
-    """Return deterministic, collision-free prefixes along the level-1 oracle."""
-    return [record["prefix"] for record in oracle_state_records(seed=seed)]
+def planner_baseline_state_prefixes(*, seed: int = 0) -> list[list[str]]:
+    """Return prefixes from a verified successful Edward baseline replay."""
+
+    return [
+        record["prefix"]
+        for record in planner_baseline_state_records(seed=seed)
+    ]
 
 
-def oracle_state_records(*, seed: int = 0) -> list[dict[str, Any]]:
-    """Return oracle prefixes plus legal movement masks for state selection."""
-    level = load_bundled_level()
+def planner_baseline_state_records(*, seed: int = 0) -> list[dict[str, Any]]:
+    """Return deterministic planner states only after a successful replay."""
+    records = planner_audit_state_records(seed=seed)
+    audit = records[0]["prefix_audit"] if records else None
+    if not records:
+        raise RuntimeError("level-1 planner baseline produced no decision states")
+    if not audit["successful_baseline"]:
+        raise RuntimeError(
+            "Edward planner baseline did not clear level 1: "
+            f"terminal_reason={audit['source_terminal_reason']!r}"
+        )
+    return records
+
+
+def planner_audit_state_prefixes(*, seed: int = 0) -> list[list[str]]:
+    """Return verified nonterminal prefixes without claiming level success."""
+
+    return [record["prefix"] for record in planner_audit_state_records(seed=seed)]
+
+
+def planner_audit_state_records(*, seed: int = 0) -> list[dict[str, Any]]:
+    """Return collision-free states before an audited terminal outcome.
+
+    A death-terminated replay is valid evidence that each earlier prefix was
+    nonterminal and collision-free.  It is explicitly not a successful
+    baseline and cannot pass :func:`planner_baseline_state_records`.
+    """
     env = PygamePacmanEnv()
+    planner = EdwardPlanner()
     try:
         _, info = env.reset(seed=seed)
-        remaining = set(level.pellets)
         actions: list[str] = []
         records: list[dict[str, Any]] = []
         terminated = truncated = False
@@ -170,25 +426,55 @@ def oracle_state_records(*, seed: int = 0) -> list[dict[str, Any]]:
                     ],
                 }
             )
-            row, col = info["pacman_position"]
-            position = Position(int(row), int(col))
-            remaining.discard(position)
-            route = route_to_nearest(level, position, remaining)
-            if not route:
-                break
-            action = route[0]
-            _, _, terminated, truncated, info = env.step(action)
+            decision = planner.decide(snapshot)
+            _, _, terminated, truncated, info = env.step(decision.action)
             if info["wall_collision"]:
-                raise RuntimeError("level-1 oracle prefix collided with a wall")
-            actions.append(action.value)
-            if info["pellet_eaten"]:
-                row, col = info["pacman_position"]
-                remaining.discard(Position(int(row), int(col)))
+                raise RuntimeError("Edward planner prefix collided with a wall")
+            actions.append(decision.action)
         if not records:
-            raise RuntimeError("level-1 oracle produced no decision states")
+            raise RuntimeError("level-1 planner audit produced no decision states")
+        terminal_reason = info.get("terminal_reason")
+        if not terminated or truncated or terminal_reason not in {
+            "death",
+            "all_normal_pellets",
+        }:
+            raise RuntimeError(
+                "Edward planner audit did not reach an accepted terminal: "
+                f"terminated={terminated!r}, truncated={truncated!r}, "
+                f"terminal_reason={terminal_reason!r}"
+            )
+        cleared = terminal_reason == "all_normal_pellets"
+        audit = {
+            "contract_version": PREFIX_AUDIT_CONTRACT_VERSION,
+            "source": "edward-planner-preterminal-replay",
+            "source_seed": seed,
+            "source_terminal_reason": terminal_reason,
+            "source_cleared_level": cleared,
+            "successful_baseline": cleared,
+            "prefix_verified_nonterminal": True,
+            "prefix_wall_collisions": 0,
+        }
+        for record in records:
+            record["prefix_audit"] = {
+                **audit,
+                "prefix_state_index": int(record["state_index"]),
+                "source_episode_steps": len(actions),
+            }
         return records
     finally:
         env.close()
+
+
+def oracle_state_prefixes(*, seed: int = 0) -> list[list[str]]:
+    """Compatibility alias; this is a verified planner baseline, not an oracle."""
+
+    return planner_baseline_state_prefixes(seed=seed)
+
+
+def oracle_state_records(*, seed: int = 0) -> list[dict[str, Any]]:
+    """Compatibility alias; this is a verified planner baseline, not an oracle."""
+
+    return planner_baseline_state_records(seed=seed)
 
 
 def generate_single_step_rows(
@@ -202,13 +488,15 @@ def generate_single_step_rows(
     """Generate varied screenshot -> one action -> immediate reward samples."""
     if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
         raise ValueError("count must be a positive integer")
-    prefixes = oracle_state_prefixes(seed=seed)
+    records = planner_audit_state_records(seed=seed)
+    prefixes = [record["prefix"] for record in records]
     if offset < 0 or offset + count > len(prefixes):
         raise ValueError(
             f"requested prefix range [{offset}, {offset + count}) exceeds "
-            f"{len(prefixes)} available oracle states"
+            f"{len(prefixes)} available planner-audit states"
         )
-    for index, prefix in enumerate(prefixes[offset : offset + count], start=1):
+    for index, record in enumerate(records[offset : offset + count], start=1):
+        prefix = record["prefix"]
         row = make_episode_row(
             index,
             split=split,
@@ -218,6 +506,7 @@ def generate_single_step_rows(
         row["id"] = f"level1-wall-{split}-{offset + index:04d}"
         row["state_prefix_actions"] = prefix
         row["decision_steps"] = 1
+        row["state_prefix_audit"] = dict(record["prefix_audit"])
         validate_episode_row(row)
         yield row
 
@@ -255,7 +544,7 @@ def generate_balanced_corridor_rows(
         ("L", "R"): [],
         ("U", "D"): [],
     }
-    for record in oracle_state_records(seed=seed):
+    for record in planner_audit_state_records(seed=seed):
         mask = tuple(record["open_actions"])
         if mask in by_mask:
             by_mask[mask].append(record)
@@ -297,6 +586,7 @@ def generate_balanced_corridor_rows(
         row["state_prefix_actions"] = list(record["prefix"])
         row["decision_steps"] = 1
         row["state_open_actions_for_audit"] = list(record["open_actions"])
+        row["state_prefix_audit"] = dict(record["prefix_audit"])
         validate_episode_row(row)
         yield row
 
@@ -311,7 +601,8 @@ def write_jsonl(rows: Iterable[Mapping[str, Any]], path: Path) -> str:
         json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
         for row in normalized
     )
-    path.write_text(content, encoding="utf-8", newline="\n")
+    with path.open("x", encoding="utf-8", newline="\n") as stream:
+        stream.write(content)
     import hashlib
 
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
@@ -326,4 +617,6 @@ def write_hf_dataset(rows: Iterable[Mapping[str, Any]], path: Path) -> None:
     for row in materialized:
         validate_episode_row(row)
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        raise FileExistsError(f"refusing to replace HF dataset: {path}")
     Dataset.from_list(materialized).save_to_disk(str(path))

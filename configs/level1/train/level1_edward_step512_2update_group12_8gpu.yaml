@@ -1,32 +1,42 @@
 recipe_version: maapacman-level1-ghostdoor-v3
-artifact_root: artifacts/workbench/probes/level1_edward_logprob_alignment_probe
+reward_recipe_version: maapacman-level1-event-reward-v3
+artifact_root: artifacts/runs/generated/level1_edward_options_step512_2update_gate
 trajectory_dir: ${artifact_root}/trajectories
 experiment_name: pacman-agentic-rl
-trial_name: level1-edward-logprob-alignment-probe-qwen3p5-9b
+trial_name: level1-edward-options-step512-qwen3p5-9b-2update-group12-gate
 
 seed: 1
-# Short-horizon reward-trend run:
-# - both train and validation dataset rows must use max_steps=32
-# - no scheduled validation rollouts
-# - training samples at temperature=0.7, top_p=1.0
-# - no nearest-pellet distance shaping
-# - screenshot plus live engine state and bounded navigation history
-# - every generated action is masked to current open movement actions
+# Formal Edward-v3 Step512 launch gate:
+# - 4 train rows / batch size 4 / 2 epochs = 2 optimizer updates
+# - batch size 4 and n_samples=12 give 48 rollout samples per update
+#   (96 rollout samples across the complete two-update recovery gate)
+# - both train and validation dataset rows must use max_steps=512
+# - one-step recovery checkpoints are required for the restart gate
 enable_offload: true
 enable_thinking: false
-validation_contract: greedy1
-reward_objective_contract: episode_return_group_v1
+validation_contract: sampled12_uniform_shaped
+reward_objective_contract: option_return_raw_v1
 image_prompt_style: live_state_v3
-# The production recipe requires at least two epochs. lr=0 keeps both epochs
-# on the identical checkpoint while giving the audit two independent batches.
 total_train_epochs: 2
 tokenizer_path: ${actor.path}
 workflow: areal_pacman.workflow.PacmanNativeVisionWorkflow
 eval_workflow: ${workflow}
 contract_violation_return: -1.0
-step_penalty: 1.0
-wall_penalty: 1.0
-nearest_pellet_alpha: 0.0
+use_base_reward: false
+normal_pellet_reward: 1.0
+power_pellet_reward: 1.0
+ghost_reward: 5.0
+fruit_reward: 0.0
+death_penalty: 25.0
+completion_reward: 50.0
+safety_refusal_penalty: 25.0
+step_penalty: 0.05
+step_penalty_cleared_ratio_scale: 0.0
+wall_penalty: 0.5
+nearest_pellet_alpha: 0.1
+nearest_pellet_remaining_ratio_threshold: 1.0
+nearest_pellet_scale_by_cleared_ratio: true
+nearest_pellet_skip_on_eat: true
 observation_mode: rgb
 action_token_choice: false
 open_action_mask: false
@@ -75,13 +85,12 @@ gconfig:
   top_p: 1.0
 
 eval_gconfig:
-  # A valid nominal contract is required even though evaluator is disabled.
-  n_samples: 1
+  n_samples: 12
   min_new_tokens: 1
   max_new_tokens: 1
   max_tokens: 1024
-  greedy: true
-  temperature: 0.0
+  greedy: false
+  temperature: 0.7
   top_p: 1.0
 
 actor:
@@ -92,17 +101,15 @@ actor:
   attn_impl: sdpa
   init_from_scratch: false
   disable_dropout: true
-  gradient_checkpointing: true
   offload: true
+  gradient_checkpointing: true
   dtype: bfloat16
   optimizer_dtype: bfloat16
   mb_spec:
     max_tokens_per_mb: 1024
   optimizer:
-    type: adam
-    # Keep weights bit-identical throughout the probe. The audit is captured
-    # before ppo_update, but lr=0 also prevents later calls from drifting.
-    lr: 0.0
+    type: adam_bf16
+    lr: 1.0e-6
     weight_decay: 0.0
     beta1: 0.9
     beta2: 0.999
@@ -127,11 +134,7 @@ actor:
     agg: sum
     lower: 0.8
     upper: 1.25
-  reward_norm:
-    mean_level: group
-    mean_leave1out: false
-    std_level: group
-    group_size: ${gconfig.n_samples}
+  reward_norm: null
   adv_norm: null
   weight_update_mode: xccl
   max_new_tokens: ${gconfig.max_new_tokens}
@@ -177,12 +180,11 @@ vllm:
   logprobs_mode: processed_logprobs
 
 train_dataset:
-  # Four dataset rows in one batch means one update per epoch (two total).
   batch_size: 4
   shuffle: true
   pin_memory: true
   num_workers: 0
-  path: artifacts/datasets/level1_dataset_logprob_alignment/train_hf
+  path: artifacts/datasets/level1_dataset_step512/train_hf
   type: rl
   max_length: 1024
 
@@ -191,7 +193,7 @@ valid_dataset:
   shuffle: false
   pin_memory: true
   num_workers: 0
-  path: artifacts/datasets/level1_dataset_logprob_alignment/validation_hf
+  path: artifacts/datasets/level1_dataset_step512/validation_hf
   type: rl
   max_length: 1024
 
@@ -199,15 +201,21 @@ saver:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
+  keep_last: 2
+  keep_best_metric: ppo_actor/task_reward/avg
+  keep_best_mode: max
   freq_epochs: null
-  freq_steps: null
+  freq_steps: 1
   freq_secs: null
 
 recover:
-  mode: disabled
+  mode: auto
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
+  freq_epochs: null
+  freq_steps: 1
+  freq_secs: null
 
 evaluator:
   experiment_name: ${experiment_name}

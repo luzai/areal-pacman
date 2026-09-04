@@ -48,9 +48,36 @@ class PacmanAgentConfig(PPOConfig):
         default=0.0,
         metadata={"help": "Explicit reward for eating one power pellet."},
     )
+    ghost_reward: float = field(
+        default=0.0,
+        metadata={"help": "Explicit reward for eating one vulnerable ghost."},
+    )
+    fruit_reward: float = field(
+        default=0.0,
+        metadata={"help": "Explicit reward for eating a fruit event."},
+    )
+    reward_recipe_version: str = field(
+        default="maapacman-level1-event-reward-v3",
+        metadata={
+            "help": "Versioned event-to-reward contract recorded in trajectories."
+        },
+    )
+    death_penalty: float = field(
+        default=0.0,
+        metadata={"help": "Terminal penalty for first lethal ghost contact."},
+    )
     completion_reward: float = field(
         default=0.0,
         metadata={"help": "Terminal reward for clearing all normal pellets."},
+    )
+    safety_refusal_penalty: float = field(
+        default=0.0,
+        metadata={
+            "help": (
+                "Workflow terminal penalty when Edward cannot advertise a "
+                "provably safe next option."
+            )
+        },
     )
     nearest_pellet_alpha: float = field(
         default=0.0,
@@ -117,13 +144,16 @@ class PacmanAgentConfig(PPOConfig):
         },
     )
     reward_objective_contract: str = field(
-        default="legacy",
+        default="option_return_raw_v1",
         metadata={
             "help": (
-                "Training reward/advantage contract. step_local_raw_v1 keeps "
-                "Pacman's dense per-decision rewards uncentered so an action's "
-                "positive or negative sign is not replaced by trajectory-level "
-                "or batch-level normalization."
+                "Training reward/advantage contract. The default "
+                "option_return_raw_v1 uses each option's unnormalized "
+                "return-to-go. Set episode_return_group_v1 to compare exactly "
+                "twelve complete episodes from the same initial maze state "
+                "with group-normalized episode returns. Both contracts reduce "
+                "policy loss with equal weight per complete episode. Legacy "
+                "contracts remain readable for archived recipes."
             )
         },
     )
@@ -154,6 +184,24 @@ class PacmanAgentConfig(PPOConfig):
             )
         },
     )
+    edward_options: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Ask the model to choose a planner-approved C*/A*/E* "
+                "objective, then execute its bounded multi-step option."
+            )
+        },
+    )
+    objective_encoding: str = field(
+        default="legacy",
+        metadata={
+            "help": (
+                "Edward objective output contract. Production v3 uses "
+                "edward-option-code-v1 with one tokenizer token per decision."
+            )
+        },
+    )
     guided_action_choice: bool = field(
         default=False,
         metadata={"help": "Use vLLM structured_outputs.choice to constrain rollout completions."},
@@ -180,7 +228,14 @@ class PacmanAgentConfig(PPOConfig):
     )
     parse_failure_penalty: int = field(
         default=-50,
-        metadata={"help": "Terminal reward used when a model output cannot be parsed into a PacMan action."},
+        metadata={"help": "Deprecated compatibility setting for legacy synthetic workflows."},
+    )
+    contract_violation_return: float = field(
+        default=-1.0,
+        metadata={
+            "help": "Fail-closed whole-episode return used by the Level-1 "
+            "workflow for parse/canonical contract violations; must be -1.0."
+        },
     )
     reward_mode: str = field(
         default="sparse",

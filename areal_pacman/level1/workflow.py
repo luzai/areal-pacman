@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
+import math
 import os
 import time
 import uuid
@@ -25,10 +27,16 @@ from maapacman.env import (
     load_bundled_level,
     nearest_reachable_distance,
 )
+from maapacman.planner import (
+    EdwardPlanner,
+    EdwardSafetyRefusal,
+    PlannerCandidate,
+)
 
 from ..actions import ActionParseError, parse_action
 from .level1_dataset import SUPPORTED_MAX_STEPS, validate_episode_row
 from .prompts import (
+    EDWARD_OPTION_CODE_V1_SYSTEM_PROMPT,
     build_image_messages,
     crop_pacman_local_view,
     encode_png,
@@ -36,8 +44,13 @@ from .prompts import (
     png_sha256,
     prompt_text,
 )
-from .rewards import RewardBreakdown, RewardConfig, shape_reward
+from .rewards import RewardConfig, shape_reward
 from .trajectories import audit_trajectory, write_trajectory
+from .token_constraints import (
+    EDWARD_OPTION_CONSTRAINT,
+    ObjectiveParseError,
+    ObjectiveTokenConstraint,
+)
 
 
 EXPECTED_ACTIONS = ("U", "D", "L", "R", "S")
@@ -47,6 +60,66 @@ ACTION_MASK_BIT = {
 }
 OPPOSITE_ACTION = {"U": "D", "D": "U", "L": "R", "R": "L"}
 LOGGER = logging.getLogger(__name__)
+
+
+def _compact_edward_decision_prompt(
+    state_context: Mapping[str, Any],
+    candidates: tuple[PlannerCandidate, ...],
+    constraint: ObjectiveTokenConstraint,
+) -> str:
+    """Render the exemplar's decision facts without its free-form reason."""
+    candidate_rows = [
+        [
+            constraint.code_for_option(candidate.option_id),
+            candidate.option_id,
+            candidate.strategy,
+            list(candidate.target),
+            candidate.first_action,
+            candidate.route_distance,
+            candidate.commit_moves,
+            candidate.safety_margin,
+            candidate.future_safe_exits,
+            candidate.entity_id,
+        ]
+        for candidate in candidates
+    ]
+    ghost_rows = []
+    for ghost in state_context.get("ghosts") or []:
+        if not isinstance(ghost, Mapping):
+            continue
+        ghost_rows.append(
+            [
+                ghost.get("id"),
+                ghost.get("state"),
+                ghost.get("position"),
+            ]
+        )
+    decision_state = {
+        "p": state_context.get("pacman_position"),
+        "f": state_context.get("facing"),
+        "pellets": state_context.get("pellets_remaining"),
+        "maze": state_context.get("maze_size"),
+        "ghosts": ghost_rows,
+        "edible_ticks": state_context.get("edible_ticks"),
+        "last": state_context.get("last_action"),
+        "c": candidate_rows,
+    }
+    option_codes = ",".join(constraint.rendered_choices)
+    return (
+        "Choose one tactical objective. Keys: p=Pac-Man [row,column], f=facing, "
+        "pellets=normal+power pellets remaining, maze=[rows,columns], "
+        "ghosts=[[id,state,position]], edible_ticks=vulnerability time, "
+        "last=previous action, c=candidates. Candidate row: "
+        "[code,id,strategy,target,first_action,distance,commit,safety,exits,entity].\n"
+        "Metrics: distance=route steps, commit=max executed moves, larger "
+        "safety/exits are better, entity=ELIMINATE ghost id.\n"
+        + json.dumps(decision_state, separators=(",", ":"))
+        + "\nEach row maps code to id. Use only the candidates shown for this turn. "
+        "Structured state overrides the image. Return exactly one code "
+        "from ["
+        + option_codes
+        + "]; nothing else."
+    )
 
 
 def _nearest_reachable_distance_with_diagnostics(
@@ -127,6 +200,11 @@ def install_vllm_allowed_token_ids_adapter() -> None:
             http_request.payload["allowed_token_ids"] = [
                 int(token_id) for token_id in allowed
             ]
+        structured_outputs = metadata.get("structured_outputs")
+        if structured_outputs is not None:
+            http_request.payload["structured_outputs"] = dict(
+                structured_outputs
+            )
         chat_template_kwargs = metadata.get("chat_template_kwargs")
         if chat_template_kwargs is not None:
             http_request.payload["chat_template_kwargs"] = dict(
@@ -177,22 +255,38 @@ def validate_env_spec(
     spec: PacmanEnvSpec,
     requested: Mapping[str, Any],
     *,
-    pacman_python_revision: str,
+    provenance: Mapping[str, Any],
 ) -> None:
-    if spec.api_version != "1.0" or requested.get("api_version") != spec.api_version:
+    if spec.api_version != "3.0" or requested.get("api_version") != spec.api_version:
         raise RuntimeError("unsupported MaaPacman environment API")
-    if spec.env_id != "pacman-python-level1-pygame-v1":
+    if spec.env_id != "pacman-python-level1-ghostdoor-v3":
         raise RuntimeError("unsupported MaaPacman environment ID")
     if requested.get("name") != spec.env_id:
         raise RuntimeError("dataset environment ID does not match MaaPacman")
     if requested.get("backend") != "original-pygame":
         raise RuntimeError("production recipe requires original-pygame backend")
-    if requested.get("pacman_python_revision") != pacman_python_revision:
+    if requested.get("pacman_python_revision") != provenance.get(
+        "pacman_python_commit"
+    ):
         raise RuntimeError("pacman-python revision does not match dataset row")
+    if requested.get("pacman_python_source_sha256") != provenance.get(
+        "pacman_python_source_sha256"
+    ):
+        raise RuntimeError("pacman-python source hash does not match dataset row")
+    if requested.get("maapacman_revision") != provenance.get(
+        "maapacman_commit"
+    ):
+        raise RuntimeError("MaaPacman revision does not match dataset row")
+    if requested.get("maapacman_env_source_sha256") != provenance.get(
+        "maapacman_env_source_sha256"
+    ):
+        raise RuntimeError("MaaPacman source hash does not match dataset row")
     if spec.action_tokens != EXPECTED_ACTIONS:
         raise RuntimeError("incompatible MaaPacman action contract")
     if requested.get("level_revision") != spec.level_revision:
         raise RuntimeError("MaaPacman level revision does not match dataset row")
+    if requested.get("ruleset_revision") != spec.ruleset_revision:
+        raise RuntimeError("MaaPacman ruleset revision does not match dataset row")
     if spec.observation_dtype != "uint8" or len(spec.observation_shape) != 3:
         raise RuntimeError("incompatible MaaPacman RGB observation contract")
 
@@ -211,16 +305,24 @@ class PacmanImageOnlyWorkflow:
         self.env_factory = env_factory
         self.workflow_kwargs = workflow_kwargs
         self.last_episode: dict[str, Any] | None = None
+        self._episode_payload: ContextVar[dict[str, Any] | None] = ContextVar(
+            "pacman_episode_payload", default=None
+        )
         self.action_token_id_by_action: dict[str, int] = {}
-        if workflow_kwargs.get("open_action_mask"):
+        self.objective_tokenizer: Any | None = None
+        if workflow_kwargs.get("open_action_mask") or workflow_kwargs.get(
+            "edward_options"
+        ):
             tokenizer_path = workflow_kwargs.get("tokenizer_path")
             if not tokenizer_path:
                 raise ValueError(
-                    "open action mask requires tokenizer_path"
+                    "token constraints require tokenizer_path"
                 )
             from transformers import AutoTokenizer
 
             tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+            self.objective_tokenizer = tokenizer
+        if workflow_kwargs.get("open_action_mask"):
             for token in MOVEMENT_ACTIONS:
                 token_ids = tokenizer.encode(
                     token, add_special_tokens=False
@@ -232,6 +334,9 @@ class PacmanImageOnlyWorkflow:
                 self.action_token_id_by_action[token] = int(token_ids[0])
 
     async def run(self, data: Mapping[str, Any], **extra_kwargs: Any) -> Any:
+        # Prevent a refused episode from exposing the previous call's payload
+        # through the debugging attribute on a reused workflow instance.
+        self.last_episode = None
         options = {**self.workflow_kwargs, **extra_kwargs}
         if options.get("enable_thinking") is None:
             options["enable_thinking"] = False
@@ -257,6 +362,12 @@ class PacmanImageOnlyWorkflow:
             worker_base_dir=options.get("worker_base_dir"),
         )
         reward_config = RewardConfig(
+            recipe_version=str(
+                options.get(
+                    "reward_recipe_version",
+                    "maapacman-level1-event-reward-v3",
+                )
+            ),
             step_penalty=float(options.get("step_penalty", 1.0)),
             step_penalty_cleared_ratio_scale=float(
                 options.get("step_penalty_cleared_ratio_scale", 0.0)
@@ -269,7 +380,13 @@ class PacmanImageOnlyWorkflow:
             power_pellet_reward=float(
                 options.get("power_pellet_reward", 0.0)
             ),
+            ghost_reward=float(options.get("ghost_reward", 0.0)),
+            fruit_reward=float(options.get("fruit_reward", 0.0)),
+            death_penalty=float(options.get("death_penalty", 0.0)),
             completion_reward=float(options.get("completion_reward", 0.0)),
+            safety_refusal_penalty=float(
+                options.get("safety_refusal_penalty", 0.0)
+            ),
             nearest_pellet_alpha=float(
                 options.get("nearest_pellet_alpha", 0.0)
             ),
@@ -288,13 +405,42 @@ class PacmanImageOnlyWorkflow:
                 options.get("nearest_pellet_skip_on_eat", False)
             ),
         )
-        parse_failure_penalty = float(options.get("parse_failure_penalty", -50.0))
+        contract_violation_return = float(
+            options.get("contract_violation_return", -1.0)
+        )
+        if (
+            not math.isfinite(contract_violation_return)
+            or abs(contract_violation_return + 1.0) > 1e-9
+        ):
+            raise ValueError(
+                "contract_violation_return must be exactly -1.0"
+            )
         image_prompt_style = str(
             options.get("image_prompt_style", "minimal_v1")
         )
         system_prompt, user_instruction = prompt_text(image_prompt_style)
         scripted = list(options.get("scripted_actions") or [])
+        scripted_objectives = list(options.get("scripted_objectives") or [])
         scripted_ids = list(options.get("scripted_completion_ids") or [])
+        edward_options = bool(options.get("edward_options", False))
+        if edward_options:
+            if (
+                options.get("objective_encoding", EDWARD_OPTION_CONSTRAINT)
+                != EDWARD_OPTION_CONSTRAINT
+            ):
+                raise ValueError(
+                    "Edward options require objective_encoding="
+                    f"{EDWARD_OPTION_CONSTRAINT}"
+                )
+            system_prompt = EDWARD_OPTION_CODE_V1_SYSTEM_PROMPT
+        if edward_options and scripted:
+            raise ValueError(
+                "edward_options uses scripted_objectives, not scripted_actions"
+            )
+        if edward_options and options.get("open_action_mask"):
+            raise ValueError(
+                "edward objective constraints replace the legacy action mask"
+            )
         trajectory: list[dict[str, Any]] = []
         rewards_by_completion: dict[str, float] = {}
         parse_failures = 0
@@ -322,12 +468,20 @@ class PacmanImageOnlyWorkflow:
         remaining_normal_pellets = (
             set(level.pellets) if level is not None else None
         )
+        planner = EdwardPlanner() if edward_options else None
+        active_option: PlannerCandidate | None = None
+        active_objective_constraint: ObjectiveTokenConstraint | None = None
+        active_turn: ModelTurn | None = None
+        active_action: str | None = None
+        active_remaining = 0
+        active_option_step = 0
+        active_reward = 0.0
 
         with self.env_factory(config) as env:
             validate_env_spec(
                 env.spec,
                 requested,
-                pacman_python_revision=env.pacman_python_revision,
+                provenance=env.provenance,
             )
             if config.max_steps not in SUPPORTED_MAX_STEPS:
                 supported = ", ".join(
@@ -335,11 +489,27 @@ class PacmanImageOnlyWorkflow:
                 )
                 raise RuntimeError(
                     f"level-1 recipe requires max_steps in: {supported}"
-                )
+            )
             image, previous_info = env.reset(seed=seed)
+            if planner is not None:
+                planner.observe(env.snapshot())
+            state_prefix_evidence: list[dict[str, Any]] = []
             for prefix_token in state_prefix_actions:
                 image, _, terminated, truncated, previous_info = env.step(
                     Action(prefix_token)
+                )
+                state_prefix_evidence.append(
+                    {
+                        "action": prefix_token,
+                        "env_step": int(previous_info["step"]),
+                        "score": int(previous_info["score"]),
+                        "score_delta": int(previous_info["score_delta"]),
+                        "logic_frame": int(previous_info["logic_frame"]),
+                        "logic_frames": int(previous_info["logic_frames"]),
+                        "wall_collision": bool(previous_info["wall_collision"]),
+                        "terminated": bool(terminated),
+                        "truncated": bool(truncated),
+                    }
                 )
                 if previous_info["wall_collision"]:
                     raise RuntimeError(
@@ -349,6 +519,10 @@ class PacmanImageOnlyWorkflow:
                     raise RuntimeError(
                         "state_prefix_actions reached a terminal state"
                     )
+                if planner is not None:
+                    planner.observe(env.snapshot())
+            prefix_end_score = int(previous_info["score"])
+            prefix_end_logic_frame = int(previous_info["logic_frame"])
             initial_normal_pellets = int(
                 previous_info["normal_pellets_remaining"]
             )
@@ -380,6 +554,7 @@ class PacmanImageOnlyWorkflow:
                 )
             final_info = previous_info
             while True:
+                turn: ModelTurn | None = None
                 model_image = (
                     crop_pacman_local_view(image)
                     if image_prompt_style
@@ -388,6 +563,69 @@ class PacmanImageOnlyWorkflow:
                 )
                 png = encode_png(model_image)
                 live_snapshot = env.snapshot()
+                option_candidates: tuple[PlannerCandidate, ...] = ()
+                objective_constraint: ObjectiveTokenConstraint | None = None
+                if edward_options and active_option is None:
+                    if planner is None or self.objective_tokenizer is None:
+                        raise RuntimeError(
+                            "Edward options require a planner and tokenizer"
+                        )
+                    try:
+                        option_candidates = planner.advertised_candidates(
+                            live_snapshot
+                        )
+                    except EdwardSafetyRefusal:
+                        if not trajectory:
+                            # There is no model completion or executed option to
+                            # train on. Returning None lets AReaL reject and
+                            # replace this rollout without inventing evidence.
+                            return None
+                        final_record = trajectory[-1]
+                        if (
+                            final_record.get("option_status") == "active"
+                            or not final_record.get("option_end")
+                        ):
+                            raise RuntimeError(
+                                "Edward safety refusal occurred with an "
+                                "unfinished option"
+                            )
+                        completion_id = final_record.get("completion_id")
+                        option_return = final_record.get("option_return")
+                        if (
+                            completion_id is None
+                            or completion_id not in rewards_by_completion
+                            or option_return is None
+                        ):
+                            raise RuntimeError(
+                                "Edward safety refusal has no completed option "
+                                "reward to penalize"
+                            )
+                        safety_penalty = reward_config.safety_refusal_penalty
+                        final_record["safety_refusal"] = True
+                        final_record["safety_refusal_penalty"] = safety_penalty
+                        final_record["shaped_reward"] = (
+                            float(final_record["shaped_reward"])
+                            - safety_penalty
+                        )
+                        final_record["option_return"] = (
+                            float(option_return) - safety_penalty
+                        )
+                        rewards_by_completion[completion_id] = (
+                            float(rewards_by_completion[completion_id])
+                            - safety_penalty
+                        )
+                        final_record["terminated"] = False
+                        final_record["truncated"] = True
+                        final_record["terminal_reason"] = "safety_refusal"
+                        final_info = dict(final_info)
+                        final_info["terminated"] = False
+                        final_info["truncated"] = True
+                        final_info["terminal_reason"] = "safety_refusal"
+                        break
+                    objective_constraint = ObjectiveTokenConstraint.build(
+                        self.objective_tokenizer,
+                        (candidate.option_id for candidate in option_candidates),
+                    )
                 current_open_actions = [
                     action
                     for action in MOVEMENT_ACTIONS
@@ -458,55 +696,206 @@ class PacmanImageOnlyWorkflow:
                             last_action,
                         ),
                     }
+                if edward_options:
+                    if state_context is None:
+                        state_context = {}
+                    state_context.update(
+                        {
+                            "ghosts": list(live_snapshot.get("ghosts") or []),
+                            "maze_size": [
+                                int(live_snapshot["height"]),
+                                int(live_snapshot["width"]),
+                            ],
+                            "edible_ticks": int(
+                                live_snapshot.get("edible_ticks", 0)
+                            ),
+                            "planner_candidates": [
+                                candidate.as_dict()
+                                for candidate in option_candidates
+                            ],
+                            "option_code_map": (
+                                {
+                                    objective_constraint.code_for_option(
+                                        candidate.option_id
+                                    ): candidate.option_id
+                                    for candidate in option_candidates
+                                }
+                                if objective_constraint is not None
+                                else {}
+                            ),
+                            "active_option": (
+                                active_option.as_dict()
+                                if active_option is not None
+                                else None
+                            ),
+                        }
+                    )
                 messages = build_image_messages(
                     png,
                     prompt_style=image_prompt_style,
                     state_context=state_context,
                 )
+                if edward_options:
+                    messages[0]["content"] = system_prompt
+                if objective_constraint is not None:
+                    messages[1]["content"][0]["text"] = (
+                        _compact_edward_decision_prompt(
+                            state_context,
+                            option_candidates,
+                            objective_constraint,
+                        )
+                    )
                 model_user_instruction = str(
                     messages[1]["content"][0]["text"]
                 )
+                model_called = not (
+                    edward_options and active_option is not None
+                )
+                if not model_called:
+                    model_user_instruction = None
                 if image_count(messages) != 1:
                     raise RuntimeError("model request must contain exactly one image")
-                if scripted:
-                    completion = str(scripted.pop(0))
-                    completion_id = (
-                        str(scripted_ids.pop(0)) if scripted_ids else None
-                    )
-                    turn = ModelTurn(completion, completion_id, messages)
-                else:
-                    turn = await self._call_model(
-                        messages,
-                        **options,
-                        current_open_actions=current_open_actions,
-                    )
-
                 try:
-                    action = parse_action(turn.completion)
-                except ActionParseError:
+                    if edward_options and active_option is not None:
+                        if active_turn is None or active_action is None:
+                            raise RuntimeError(
+                                "active Edward option lost its model turn or action"
+                            )
+                        turn = active_turn
+                        action = Action(active_action)
+                        option_step = active_option_step + 1
+                    elif edward_options:
+                        if objective_constraint is None:
+                            raise RuntimeError(
+                                "new Edward decision has no token constraint"
+                            )
+                        if scripted_objectives:
+                            scripted_option = str(scripted_objectives.pop(0))
+                            completion = objective_constraint.code_for_option(
+                                scripted_option
+                            )
+                            completion_id = (
+                                str(scripted_ids.pop(0))
+                                if scripted_ids
+                                else None
+                            )
+                            turn = ModelTurn(
+                                completion, completion_id, messages
+                            )
+                        elif options.get("scripted_objectives") is not None:
+                            raise RuntimeError(
+                                "scripted objective sequence ended before the episode"
+                            )
+                        else:
+                            turn = await self._call_model(
+                                messages,
+                                **options,
+                                current_open_actions=current_open_actions,
+                                objective_constraint=objective_constraint,
+                            )
+                        option_id = objective_constraint.option_for_completion(
+                            turn.completion
+                        )
+                        active_option = next(
+                            candidate
+                            for candidate in option_candidates
+                            if candidate.option_id == option_id
+                        )
+                        active_objective_constraint = objective_constraint
+                        active_turn = turn
+                        active_action = active_option.first_action
+                        active_remaining = active_option.commit_moves
+                        active_option_step = 0
+                        active_reward = 0.0
+                        action = Action(active_action)
+                        option_step = 1
+                    else:
+                        if scripted:
+                            completion = str(scripted.pop(0))
+                            completion_id = (
+                                str(scripted_ids.pop(0))
+                                if scripted_ids
+                                else None
+                            )
+                            turn = ModelTurn(
+                                completion, completion_id, messages
+                            )
+                        else:
+                            turn = await self._call_model(
+                                messages,
+                                **options,
+                                current_open_actions=current_open_actions,
+                            )
+                        action = parse_action(turn.completion)
+                        option_step = None
+                except (ActionParseError, ObjectiveParseError) as exc:
+                    if turn is None:
+                        raise RuntimeError(
+                            "model generation violated the objective token contract"
+                        ) from exc
                     parse_failures += 1
                     canonical_violations += 1
+                    reward_accumulated_before_violation = sum(
+                        float(step["shaped_reward"]) for step in trajectory
+                    )
+                    contract_violation_adjustment = (
+                        contract_violation_return
+                        - reward_accumulated_before_violation
+                    )
                     record = {
                         "step": len(trajectory) + 1,
-                        "env_step": int(previous_info["step"]) + 1,
+                        "env_step": int(previous_info["step"]),
                         "completion_id": turn.completion_id,
                         "completion": turn.completion,
                         "reasoning_content": turn.reasoning_content,
                         "raw_model_response": turn.raw_response,
                         "request_extra_body": turn.request_extra_body,
+                        "model_called": model_called,
                         "model_user_instruction": model_user_instruction,
                         "observation_context": state_context,
                         "open_action_mask": current_open_actions,
+                        "option_id": None,
+                        "option_code": None,
+                        "option_code_map": {},
+                        "option_strategy": None,
+                        "option_target": None,
+                        "option_step": None,
+                        "option_end": True,
+                        "option_status": "parse_failed",
+                        "option_invalidated": False,
+                        "option_return": contract_violation_adjustment,
                         "action": None,
                         "parse_failed": True,
+                        "contract_violation": True,
+                        "contract_violation_type": "parse_failure",
+                        "contract_violation_target_return": (
+                            contract_violation_return
+                        ),
+                        "reward_accumulated_before_violation": (
+                            reward_accumulated_before_violation
+                        ),
+                        "contract_violation_adjustment": (
+                            contract_violation_adjustment
+                        ),
                         "base_reward": 0.0,
                         "base_reward_contribution": 0.0,
+                        "reward_recipe_version": reward_config.recipe_version,
+                        "event_game_score_delta": 0,
+                        "event_count": 0,
                         "normal_pellet_eaten": False,
                         "normal_pellet_reward": 0.0,
                         "power_pellet_eaten": False,
                         "power_pellet_reward": 0.0,
+                        "ghost_eaten": False,
+                        "ghost_reward": 0.0,
+                        "fruit_eaten": False,
+                        "fruit_reward": 0.0,
+                        "death": False,
+                        "death_penalty": 0.0,
                         "level_completed": False,
                         "completion_reward": 0.0,
+                        "safety_refusal": False,
+                        "safety_refusal_penalty": 0.0,
                         "step_penalty": 0.0,
                         "wall_penalty": 0.0,
                         "normal_pellet_remaining_ratio": (
@@ -518,7 +907,7 @@ class PacmanImageOnlyWorkflow:
                         "nearest_pellet_distance_after": None,
                         "nearest_pellet_progress_weight": 0.0,
                         "nearest_pellet_progress_reward": 0.0,
-                        "shaped_reward": parse_failure_penalty,
+                        "shaped_reward": contract_violation_adjustment,
                         "pellet_clear_rate": float(previous_info["pellet_clear_rate"]),
                         "pellets_remaining": int(previous_info["pellets_remaining"]),
                         "normal_pellets_remaining": int(
@@ -536,6 +925,21 @@ class PacmanImageOnlyWorkflow:
                         "power_pellets_remaining": int(
                             previous_info["power_pellets_remaining"]
                         ),
+                        "ghosts": list(previous_info.get("ghosts", [])),
+                        "edible_ticks": int(
+                            previous_info.get("edible_ticks", 0)
+                        ),
+                        "events": [],
+                        "logic_frame_events": [],
+                        "score_components": {
+                            "normal_pellet": 0,
+                            "power_pellet": 0,
+                            "ghost": 0,
+                            "fruit": 0,
+                            "total": 0,
+                        },
+                        "logic_frames": 0,
+                        "atomic_substeps": [],
                         "score": int(previous_info["score"]),
                         "pygame_mode": int(previous_info["pygame_mode"]),
                         "wall_collision": False,
@@ -547,7 +951,9 @@ class PacmanImageOnlyWorkflow:
                     }
                     trajectory.append(record)
                     if turn.completion_id:
-                        rewards_by_completion[turn.completion_id] = parse_failure_penalty
+                        rewards_by_completion[turn.completion_id] = (
+                            contract_violation_adjustment
+                        )
                     break
 
                 distance_before = None
@@ -596,6 +1002,8 @@ class PacmanImageOnlyWorkflow:
                 )
                 next_image, base_reward, terminated, truncated, info = env.step(action)
                 info = dict(info)
+                if planner is not None:
+                    planner.record_action(action.value)
                 score_progress = int(info["score"]) != int(previous_info["score"])
                 pellet_progress = int(info["normal_pellets_remaining"]) != int(
                     previous_info["normal_pellets_remaining"]
@@ -702,33 +1110,38 @@ class PacmanImageOnlyWorkflow:
                     nearest_pellet_distance_before=distance_before,
                     nearest_pellet_distance_after=distance_after,
                 )
-                if single_step:
-                    avoided_wall = (
-                        action.value in MOVEMENT_ACTIONS
-                        and not bool(info["wall_collision"])
-                    )
-                    immediate_reward = 1.0 if avoided_wall else -1.0
-                    reward = RewardBreakdown(
-                        base_reward=immediate_reward,
-                        base_reward_contribution=immediate_reward,
-                        normal_pellet_eaten=False,
-                        normal_pellet_reward=0.0,
-                        power_pellet_eaten=False,
-                        power_pellet_reward=0.0,
-                        level_completed=False,
-                        completion_reward=0.0,
-                        step_penalty=0.0,
-                        wall_penalty=0.0,
-                        normal_pellet_remaining_ratio=(
-                            normal_pellet_remaining_ratio
-                        ),
-                        nearest_pellet_shaping_active=False,
-                        nearest_pellet_distance_before=None,
-                        nearest_pellet_distance_after=None,
-                        nearest_pellet_progress_weight=0.0,
-                        nearest_pellet_progress_reward=0.0,
-                        shaped_reward=immediate_reward,
-                    )
+                record_option = active_option if edward_options else None
+                option_end = False
+                option_status: str | None = None
+                option_invalidated = False
+                completed_option_reward: float | None = None
+                if edward_options:
+                    if record_option is None or planner is None:
+                        raise RuntimeError(
+                            "Edward action has no active planner option"
+                        )
+                    active_reward += reward.shaped_reward
+                    active_remaining -= 1
+                    if terminated or truncated:
+                        option_status = "terminal"
+                    else:
+                        next_action, option_status = planner.continue_option(
+                            record_option,
+                            env.snapshot(),
+                        )
+                        if option_status == "active" and active_remaining <= 0:
+                            option_status = "max_commit"
+                        elif option_status == "active":
+                            if next_action is None:
+                                raise RuntimeError(
+                                    "active Edward option has no next action"
+                                )
+                            active_action = next_action
+                    option_end = option_status != "active"
+                    option_invalidated = option_status == "invalidated"
+                    info["option_invalidated"] = option_invalidated
+                    if option_end:
+                        completed_option_reward = active_reward
                 record = {
                     "step": len(trajectory) + 1,
                     "env_step": int(info["step"]),
@@ -737,9 +1150,50 @@ class PacmanImageOnlyWorkflow:
                     "reasoning_content": turn.reasoning_content,
                     "raw_model_response": turn.raw_response,
                     "request_extra_body": turn.request_extra_body,
+                    "model_called": model_called,
                     "model_user_instruction": model_user_instruction,
                     "observation_context": state_context,
                     "open_action_mask": current_open_actions,
+                    "option_id": (
+                        record_option.option_id
+                        if record_option is not None
+                        else None
+                    ),
+                    "option_code": (
+                        active_objective_constraint.code_for_option(
+                            record_option.option_id
+                        )
+                        if active_objective_constraint is not None
+                        and record_option is not None
+                        else None
+                    ),
+                    "option_code_map": (
+                        {
+                            code: option_id
+                            for option_id, code in zip(
+                                active_objective_constraint.option_ids,
+                                active_objective_constraint.rendered_choices,
+                                strict=True,
+                            )
+                        }
+                        if active_objective_constraint is not None
+                        else {}
+                    ),
+                    "option_strategy": (
+                        record_option.strategy
+                        if record_option is not None
+                        else None
+                    ),
+                    "option_target": (
+                        list(record_option.target)
+                        if record_option is not None
+                        else None
+                    ),
+                    "option_step": option_step,
+                    "option_end": option_end,
+                    "option_status": option_status,
+                    "option_invalidated": option_invalidated,
+                    "option_return": completed_option_reward,
                     "action": action.value,
                     "parse_failed": False,
                     **reward.as_dict(),
@@ -758,6 +1212,15 @@ class PacmanImageOnlyWorkflow:
                     )
                     / initial_normal_pellets,
                     "power_pellets_remaining": int(info["power_pellets_remaining"]),
+                    "ghosts": list(info.get("ghosts", [])),
+                    "edible_ticks": int(info.get("edible_ticks", 0)),
+                    "events": list(info.get("events", [])),
+                    "logic_frame_events": list(
+                        info.get("logic_frame_events", [])
+                    ),
+                    "score_components": dict(info.get("score_components", {})),
+                    "logic_frames": int(info.get("logic_frames", 0)),
+                    "atomic_substeps": list(info.get("atomic_substeps", [])),
                     "score": int(info["score"]),
                     "pygame_mode": int(info["pygame_mode"]),
                     "wall_collision": bool(info["wall_collision"]),
@@ -768,8 +1231,29 @@ class PacmanImageOnlyWorkflow:
                     "observation_png_sha256": png_sha256(png),
                 }
                 trajectory.append(record)
-                if turn.completion_id:
-                    rewards_by_completion[turn.completion_id] = reward.shaped_reward
+                if edward_options:
+                    if option_end:
+                        if turn.completion_id:
+                            if completed_option_reward is None:
+                                raise RuntimeError(
+                                    "completed Edward option lost its reward"
+                                )
+                            rewards_by_completion[
+                                turn.completion_id
+                            ] = completed_option_reward
+                        active_option = None
+                        active_objective_constraint = None
+                        active_turn = None
+                        active_action = None
+                        active_remaining = 0
+                        active_option_step = 0
+                        active_reward = 0.0
+                    else:
+                        active_option_step = int(option_step or 0)
+                elif turn.completion_id:
+                    rewards_by_completion[
+                        turn.completion_id
+                    ] = reward.shaped_reward
                 if action.value in MOVEMENT_ACTIONS:
                     cell_exit_history.setdefault(source_position, []).append(
                         action.value
@@ -779,12 +1263,23 @@ class PacmanImageOnlyWorkflow:
                 image, previous_info, final_info = next_image, info, info
                 if terminated or truncated:
                     break
-                if not scripted and options.get("scripted_actions") is not None:
+                if (
+                    not edward_options
+                    and not scripted
+                    and options.get("scripted_actions") is not None
+                ):
                     raise RuntimeError("scripted action sequence ended before the episode")
 
             total_base = sum(float(step["base_reward"]) for step in trajectory)
             total_shaped = sum(float(step["shaped_reward"]) for step in trajectory)
             terminal_reason = str(trajectory[-1]["terminal_reason"])
+            if terminal_reason == "parse_failed":
+                if abs(total_shaped - contract_violation_return) > 1e-9:
+                    raise RuntimeError(
+                        "parse-failure adjustment did not produce the "
+                        "fail-closed episode return"
+                    )
+                total_shaped = contract_violation_return
             payload = {
                 "id": str(data["id"]),
                 "trajectory_sample_id": trajectory_sample_id,
@@ -792,13 +1287,28 @@ class PacmanImageOnlyWorkflow:
                 "env_api_version": env.spec.api_version,
                 "env_id": env.spec.env_id,
                 "backend": "original-pygame",
+                "ruleset_revision": env.spec.ruleset_revision,
                 "pacman_python_revision": env.pacman_python_revision,
+                "pacman_python_source_sha256": env.provenance[
+                    "pacman_python_source_sha256"
+                ],
+                "maapacman_revision": env.provenance["maapacman_commit"],
+                "maapacman_env_source_sha256": env.provenance[
+                    "maapacman_env_source_sha256"
+                ],
+                "dataset_contract_version": data["dataset_contract_version"],
+                "source_revisions": data["source_revisions"],
+                "reward_recipe_version": reward_config.recipe_version,
                 "level_revision": env.spec.level_revision,
                 "renderer_revision": env.spec.renderer_revision,
                 "level": config.level,
                 "seed": seed,
                 "max_steps": config.max_steps,
                 "state_prefix_actions": state_prefix_actions,
+                "state_prefix_actions_executed": len(state_prefix_evidence),
+                "state_prefix_evidence": state_prefix_evidence,
+                "prefix_end_score": prefix_end_score,
+                "prefix_end_logic_frame": prefix_end_logic_frame,
                 "decision_steps": 1 if single_step else None,
                 "image_prompt_style": image_prompt_style,
                 "system_prompt": system_prompt,
@@ -809,21 +1319,31 @@ class PacmanImageOnlyWorkflow:
                     else "screenshot_only"
                 ),
                 "action_constraint": (
-                    "dynamic_open_movement_actions"
-                    if options.get("open_action_mask")
-                    else list(EXPECTED_ACTIONS)
+                    EDWARD_OPTION_CONSTRAINT
+                    if edward_options
+                    else (
+                        "dynamic_open_movement_actions"
+                        if options.get("open_action_mask")
+                        else list(EXPECTED_ACTIONS)
+                    )
                 ),
                 "decoding": {
                     "temperature": float(options.get("temperature", 0.0)),
                     "top_p": float(options.get("top_p", 1.0)),
-                    "max_completion_tokens": int(
-                        options.get("max_completion_tokens", 3)
+                    "max_completion_tokens": (
+                        1
+                        if edward_options
+                        else int(options.get("max_completion_tokens", 3))
                     ),
                     "enable_thinking": False,
                     "open_action_mask": bool(
                         options.get("open_action_mask", False)
                     ),
+                    "edward_options": edward_options,
                 },
+                "reward_objective_contract": str(
+                    options.get("reward_objective_contract", "legacy")
+                ),
                 "step_penalty_coefficient": reward_config.step_penalty,
                 "step_penalty_cleared_ratio_scale": (
                     reward_config.step_penalty_cleared_ratio_scale
@@ -836,9 +1356,16 @@ class PacmanImageOnlyWorkflow:
                 "power_pellet_reward_coefficient": (
                     reward_config.power_pellet_reward
                 ),
+                "ghost_reward_coefficient": reward_config.ghost_reward,
+                "fruit_reward_coefficient": reward_config.fruit_reward,
+                "death_penalty_coefficient": reward_config.death_penalty,
                 "completion_reward_coefficient": (
                     reward_config.completion_reward
                 ),
+                "safety_refusal_penalty_coefficient": (
+                    reward_config.safety_refusal_penalty
+                ),
+                "contract_violation_return": contract_violation_return,
                 "nearest_pellet_alpha": reward_config.nearest_pellet_alpha,
                 "nearest_pellet_remaining_ratio_threshold": (
                     reward_config.nearest_pellet_remaining_ratio_threshold
@@ -892,6 +1419,7 @@ class PacmanImageOnlyWorkflow:
                 "trajectory": trajectory,
             }
             audit_trajectory(payload)
+            self._episode_payload.set(payload)
             self.last_episode = payload
             trajectory_dir = options.get("trajectory_dir") or os.getenv(
                 "PACMAN_TRAJECTORY_DIR"
@@ -919,17 +1447,26 @@ class PacmanImageOnlyWorkflow:
             http_client=http_client,
             max_retries=0,
         )
+        objective_constraint = options.get("objective_constraint")
+        if objective_constraint is not None and not isinstance(
+            objective_constraint, ObjectiveTokenConstraint
+        ):
+            raise TypeError("objective_constraint has the wrong type")
         extra_body: dict[str, Any] = {
-            "structured_outputs": {
-                "choice": (
-                    list(options["current_open_actions"])
-                    if options.get("open_action_mask")
-                    else list(EXPECTED_ACTIONS)
-                )
-            },
             "chat_template_kwargs": {"enable_thinking": False},
         }
-        if options.get("open_action_mask"):
+        if objective_constraint is not None:
+            extra_body["allowed_token_ids"] = (
+                objective_constraint.allowed_token_ids
+            )
+        else:
+            constrained_choices = (
+                list(options["current_open_actions"])
+                if options.get("open_action_mask")
+                else list(EXPECTED_ACTIONS)
+            )
+            extra_body["structured_outputs"] = {"choice": constrained_choices}
+        if objective_constraint is None and options.get("open_action_mask"):
             current_open_actions = list(options["current_open_actions"])
             extra_body["allowed_token_ids"] = [
                 self.action_token_id_by_action[action]
@@ -941,9 +1478,13 @@ class PacmanImageOnlyWorkflow:
             "temperature": float(options.get("temperature", 0.0)),
             "top_p": float(options.get("top_p", 1.0)),
             "max_tokens": (
-                1
-                if options.get("open_action_mask")
-                else int(options.get("max_completion_tokens", 3))
+                objective_constraint.max_new_tokens
+                if objective_constraint is not None
+                else (
+                    1
+                    if options.get("open_action_mask")
+                    else int(options.get("max_completion_tokens", 3))
+                )
             ),
             "extra_body": extra_body,
         }
@@ -1006,7 +1547,11 @@ class PacmanNativeVisionWorkflow(PacmanImageOnlyWorkflow, RolloutWorkflow):
         super().__init__(env_factory=env_factory, **workflow_kwargs)
         self.gconfig = gconfig
         self.tokenizer = tokenizer
+        self.objective_tokenizer = tokenizer
         self.processor = processor
+        self.edward_options = bool(
+            workflow_kwargs.get("edward_options", False)
+        )
         self.constrain_action_tokens = bool(
             workflow_kwargs.get("action_token_choice", False)
         )
@@ -1028,13 +1573,26 @@ class PacmanNativeVisionWorkflow(PacmanImageOnlyWorkflow, RolloutWorkflow):
         self.open_action_mask = bool(
             workflow_kwargs.get("open_action_mask", False)
         )
-        if self.constrain_action_tokens or self.open_action_mask:
+        if (
+            self.constrain_action_tokens
+            or self.open_action_mask
+            or self.edward_options
+        ):
             install_vllm_allowed_token_ids_adapter()
         self._native_engine: ContextVar[Any | None] = ContextVar(
             "pacman_native_engine", default=None
         )
         self._native_turns: ContextVar[
-            dict[str, tuple[dict[str, Any], Any, list[str]]] | None
+            dict[
+                str,
+                tuple[
+                    dict[str, Any],
+                    Any,
+                    list[str],
+                    list[list[int]],
+                ],
+            ]
+            | None
         ] = ContextVar("pacman_native_turns", default=None)
 
     @staticmethod
@@ -1150,7 +1708,15 @@ class PacmanNativeVisionWorkflow(PacmanImageOnlyWorkflow, RolloutWorkflow):
             messages
         )
         request_id = uuid.uuid4().hex
-        if self.open_action_mask:
+        objective_constraint = options.get("objective_constraint")
+        if objective_constraint is not None and not isinstance(
+            objective_constraint, ObjectiveTokenConstraint
+        ):
+            raise TypeError("objective_constraint has the wrong type")
+        if objective_constraint is not None:
+            allowed_token_ids = objective_constraint.allowed_token_ids
+            current_open_actions = []
+        elif self.open_action_mask:
             current_open_actions = list(
                 options.get("current_open_actions") or []
             )
@@ -1177,13 +1743,21 @@ class PacmanNativeVisionWorkflow(PacmanImageOnlyWorkflow, RolloutWorkflow):
                 n_samples=1,
                 min_new_tokens=(
                     1
-                    if options.get("single_step") or self.open_action_mask
+                    if (
+                        objective_constraint is not None
+                        or options.get("single_step")
+                        or self.open_action_mask
+                    )
                     else getattr(self.gconfig, "min_new_tokens", 0)
                 ),
                 max_new_tokens=(
-                    1
-                    if options.get("single_step") or self.open_action_mask
-                    else getattr(self.gconfig, "max_new_tokens", 3)
+                    objective_constraint.max_new_tokens
+                    if objective_constraint is not None
+                    else (
+                        1
+                        if options.get("single_step") or self.open_action_mask
+                        else getattr(self.gconfig, "max_new_tokens", 3)
+                    )
                 ),
             ),
             tokenizer=self.tokenizer,
@@ -1208,10 +1782,28 @@ class PacmanNativeVisionWorkflow(PacmanImageOnlyWorkflow, RolloutWorkflow):
             or len(response.output_tokens) != len(response.output_versions)
         ):
             raise RuntimeError("incomplete native rollout token metadata")
+        option_token_ledger: list[list[int]] = []
+        if objective_constraint is not None:
+            token_option = objective_constraint.option_for_tokens(
+                response.output_tokens
+            )
+            decoded_option = objective_constraint.option_for_completion(
+                self.tokenizer.decode(
+                    response.output_tokens, skip_special_tokens=True
+                )
+            )
+            if token_option != decoded_option:
+                raise RuntimeError(
+                    "objective token sequence and decoded option code disagree"
+                )
+            option_token_ledger = objective_constraint.support_ledger(
+                response.output_tokens
+            )
         native_turns[request_id] = (
             processed,
             response,
             current_open_actions,
+            option_token_ledger,
         )
         return ModelTurn(
             completion=self.tokenizer.decode(
@@ -1228,6 +1820,13 @@ class PacmanNativeVisionWorkflow(PacmanImageOnlyWorkflow, RolloutWorkflow):
             request_extra_body={
                 "native_areal_inference": True,
                 "enable_thinking": False,
+                **(
+                    {
+                        "allowed_token_ids": allowed_token_ids,
+                    }
+                    if objective_constraint is not None
+                    else {}
+                ),
             },
         )
 
@@ -1237,7 +1836,12 @@ class PacmanNativeVisionWorkflow(PacmanImageOnlyWorkflow, RolloutWorkflow):
         response: Any,
         reward: float,
         allowed_actions: list[str],
-    ) -> dict[str, Any]:
+        option_token_ledger: list[list[int]] | None = None,
+        *,
+        rollout_episode_id: int | None = None,
+        rollout_episode_return: float | None = None,
+        rollout_episode_group_size: int | None = None,
+    ) -> dict[str, Any] | None:
         import torch
 
         input_ids = list(response.input_tokens)
@@ -1259,10 +1863,19 @@ class PacmanNativeVisionWorkflow(PacmanImageOnlyWorkflow, RolloutWorkflow):
                 ) from exc
         if allowed_actions and not action_mask_bits:
             raise RuntimeError("allowed Pacman actions produced an empty mask")
+        option_token_ledger = option_token_ledger or []
+        if allowed_actions and option_token_ledger:
+            raise ValueError(
+                "legacy action mask and objective token ledger are exclusive"
+            )
+        if option_token_ledger and len(option_token_ledger) != len(output_ids):
+            raise RuntimeError(
+                "objective support ledger does not align with output tokens"
+            )
         multimodal = [{"pixel_values": processed["pixel_values"]}]
         if "image_grid_thw" in processed:
             multimodal[0]["image_grid_thw"] = processed["image_grid_thw"]
-        return {
+        sample = {
             "input_ids": torch.tensor(
                 sequence, dtype=torch.long
             ).unsqueeze(0),
@@ -1272,14 +1885,6 @@ class PacmanNativeVisionWorkflow(PacmanImageOnlyWorkflow, RolloutWorkflow):
             "loss_mask": torch.tensor(
                 [0] * len(input_ids) + [1] * len(output_ids),
                 dtype=torch.int32,
-            ).unsqueeze(0),
-            # The bit mask is placed on each generated token. The causal actor
-            # rolls it left once, just like input_ids, so the preceding logit
-            # is normalized over the exact actions allowed during rollout.
-            "pacman_action_mask_bits": torch.tensor(
-                [0] * len(input_ids)
-                + [action_mask_bits] * len(output_ids),
-                dtype=torch.uint8,
             ).unsqueeze(0),
             "logprobs": torch.tensor(
                 [0.0] * len(input_ids) + list(response.output_logprobs),
@@ -1297,6 +1902,65 @@ class PacmanNativeVisionWorkflow(PacmanImageOnlyWorkflow, RolloutWorkflow):
             ),
             "multi_modal_input": multimodal,
         }
+        episode_metadata = (
+            rollout_episode_return,
+            rollout_episode_group_size,
+        )
+        if rollout_episode_id is not None:
+            sample["rollout_episode_ids"] = torch.tensor(
+                [int(rollout_episode_id)], dtype=torch.long
+            )
+        if any(value is not None for value in episode_metadata):
+            if rollout_episode_id is None or any(
+                value is None for value in episode_metadata
+            ):
+                raise ValueError(
+                    "whole-episode GRPO requires episode ID, return, and group size"
+                )
+            if int(rollout_episode_group_size) < 2:
+                raise ValueError("whole-episode GRPO group size must be at least 2")
+            if float(reward) != float(rollout_episode_return):
+                raise ValueError(
+                    "training reward must equal the complete episode return"
+                )
+            sample["rollout_episode_returns"] = torch.tensor(
+                [float(rollout_episode_return)], dtype=torch.float32
+            )
+            sample["rollout_episode_group_sizes"] = torch.tensor(
+                [int(rollout_episode_group_size)], dtype=torch.int32
+            )
+        if option_token_ledger:
+            width = max(len(row) for row in option_token_ledger)
+            if width <= 0:
+                raise RuntimeError("objective support ledger contains no IDs")
+            encoded_rows = [[0] * width for _ in input_ids]
+            for sampled, support in zip(
+                output_ids, option_token_ledger, strict=True
+            ):
+                if len(set(support)) != len(support):
+                    raise ValueError(
+                        "objective support ledger contains duplicate IDs"
+                    )
+                if sampled not in support:
+                    raise ValueError(
+                        "sampled token is absent from objective support ledger"
+                    )
+                encoded = [int(token_id) + 1 for token_id in support]
+                encoded_rows.append(encoded + [0] * (width - len(encoded)))
+            sample["pacman_allowed_token_ids"] = torch.tensor(
+                encoded_rows,
+                dtype=torch.long,
+            ).unsqueeze(0)
+        else:
+            # The bit mask is placed on each generated token. The causal actor
+            # rolls it left once, just like input_ids, so the preceding logit
+            # is normalized over the exact actions allowed during rollout.
+            sample["pacman_action_mask_bits"] = torch.tensor(
+                [0] * len(input_ids)
+                + [action_mask_bits] * len(output_ids),
+                dtype=torch.uint8,
+            ).unsqueeze(0)
+        return sample
 
     async def arun_episode(
         self, engine: Any, data: dict[str, Any]
@@ -1305,30 +1969,82 @@ class PacmanNativeVisionWorkflow(PacmanImageOnlyWorkflow, RolloutWorkflow):
 
         engine_token = self._native_engine.set(engine)
         turns_token = self._native_turns.set({})
+        payload_token = self._episode_payload.set(None)
         try:
             rewards = await super().run(data)
         finally:
             native_turns = self._native_turns.get()
+            episode_payload = self._episode_payload.get()
             self._native_turns.reset(turns_token)
             self._native_engine.reset(engine_token)
+            self._episode_payload.reset(payload_token)
+        if rewards is None:
+            if native_turns == {} and episode_payload is None:
+                return None
+            raise RuntimeError(
+                "empty native rollout retained partial processor or episode state"
+            )
         if not isinstance(rewards, dict) or not rewards:
             raise RuntimeError(
                 "native Pacman rollout did not return per-completion rewards"
             )
         if native_turns is None:
             raise RuntimeError("native processor state was not initialized")
-        missing = set(rewards) - set(native_turns)
-        if missing:
+        if episode_payload is None:
             raise RuntimeError(
-                f"missing native processor data for completions: {sorted(missing)}"
+                "native Pacman rollout did not retain its episode payload"
             )
-        samples = [
-            self._tensor_sample(
-                native_turns[completion_id][0],
-                native_turns[completion_id][1],
-                reward,
-                native_turns[completion_id][2],
+        reward_ids = set(rewards)
+        native_turn_ids = set(native_turns)
+        if reward_ids != native_turn_ids:
+            raise RuntimeError(
+                "native processor data and completion rewards disagree: "
+                f"missing={sorted(reward_ids - native_turn_ids)} "
+                f"extra={sorted(native_turn_ids - reward_ids)}"
             )
-            for completion_id, reward in rewards.items()
-        ]
+        reward_contract = str(
+            self.workflow_kwargs.get("reward_objective_contract", "legacy")
+        )
+        episode_kwargs: dict[str, Any] = {}
+        if reward_contract in {
+            "option_return_raw_v1",
+            "episode_return_group_v1",
+        }:
+            sample_id = str(episode_payload["trajectory_sample_id"])
+            digest = hashlib.blake2b(
+                sample_id.encode("utf-8"), digest_size=8
+            ).digest()
+            episode_id = int.from_bytes(digest, "big") & ((1 << 63) - 1)
+            episode_kwargs = {"rollout_episode_id": episode_id}
+        if reward_contract == "episode_return_group_v1":
+            episode_return = float(episode_payload["total_shaped_reward"])
+            episode_group_size = int(getattr(self.gconfig, "n_samples", 0))
+            if episode_group_size != 12:
+                raise ValueError(
+                    "episode_return_group_v1 requires exactly 12 complete "
+                    "episodes per initial maze state"
+                )
+            episode_kwargs.update(
+                {
+                    "rollout_episode_return": episode_return,
+                    "rollout_episode_group_size": episode_group_size,
+                }
+            )
+        samples = []
+        for completion_id, completion_reward in rewards.items():
+            training_reward = (
+                episode_kwargs["rollout_episode_return"]
+                if "rollout_episode_return" in episode_kwargs
+                else completion_reward
+            )
+            samples.append(
+                self._tensor_sample(
+                    native_turns[completion_id][0],
+                    native_turns[completion_id][1],
+                    training_reward,
+                    native_turns[completion_id][2],
+                    native_turns[completion_id][3],
+                    **episode_kwargs,
+                )
+            )
         return concat_padded_tensors(samples)

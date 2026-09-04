@@ -81,6 +81,35 @@ LIVE_STATE_V3_USER_INSTRUCTION = (
     "Directions are screen-absolute: U=top, D=bottom, L=left, R=right."
 )
 
+EDWARD_OPTION_CODE_V1_SYSTEM_PROMPT = (
+    "You are the tactical objective policy for this exact MaaPacman simulator. "
+    "Use one live screenshot and authoritative structured state; if they conflict, "
+    "trust the structured state for coordinates and ghost status. Do not import rules "
+    "from other Pac-Man games. Colors can vary; use shape and maze context. Pac-Man "
+    "cannot cross walls or the ghost door, but can use a level/tunnel door; ghosts "
+    "cannot use that tunnel. Normal ghosts are lethal. Vulnerable deep-blue or flashing "
+    "ghosts are edible only when edible_ticks allows a safe interception. Eyes and gone "
+    "ghosts are nonlethal and must not be targeted. Normal and power pellets complete "
+    "the level. first_action uses screen-absolute U, D, L, or R. Choose one reachable "
+    "system-generated candidate; never invent coordinates. COLLECT is the default "
+    "without a meaningful lethal threat or safe edible opportunity. Use AVOID for a "
+    "threatened route, reduced escape capacity, or a trap; prefer larger safety and "
+    "exits. Use ELIMINATE only for an edible ghost reachable before vulnerability "
+    "expires via a nonlethal route. After selection, the navigator executes at most "
+    "commit moves and rechecks safety after every move. Prioritize survival. Rows begin "
+    "[code,id]. Codes map to "
+    "fixed objective ids; only "
+    "advertised candidates and their targets are valid this turn. Output exactly one "
+    "advertised uppercase option code, not a movement action; no other text."
+)
+EDWARD_OBJECTIVE_V1_SYSTEM_PROMPT = (
+    "You select one authoritative Edward planning objective for Classic Pacman. "
+    "Use the current screenshot, authoritative game-state context, and provided "
+    "candidate list. Return exactly one canonical JSON object in the form "
+    '{"objective_id":"ID"}, where ID is one of the provided candidate IDs. '
+    "Output no action letter, reasoning, Markdown, or other text."
+)
+
 PROMPT_STYLES = (
     "minimal_v1",
     "wall_avoidance_v1",

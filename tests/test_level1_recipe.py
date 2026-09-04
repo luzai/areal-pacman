@@ -20,22 +20,31 @@ from maapacman.env import (
     load_bundled_level,
     route_to_nearest,
 )
+from maapacman.planner import (
+    EdwardPlanner,
+    EdwardSafetyRefusal,
+    PlannerCandidate,
+)
 
 from areal_pacman.actions import ActionParseError, parse_action
 from areal_pacman.level1_dataset import (
     ENV_BACKEND,
     LONG_HORIZON_MAX_STEPS,
     PRODUCTION_MAX_STEPS,
+    REPOSITORY_NAMES,
     SHORT_HORIZON_MAX_STEPS,
+    STRESS_MAX_STEPS,
     environment_metadata,
     generate_balanced_corridor_rows,
     generate_episode_rows,
     generate_single_step_rows,
     make_episode_row,
+    repository_revisions,
     validate_episode_row,
     write_jsonl,
 )
 from areal_pacman.prompts import (
+    EDWARD_OPTION_CODE_V1_SYSTEM_PROMPT,
     LIVE_STATE_V3_SYSTEM_PROMPT,
     LIVE_STATIC_V2_SYSTEM_PROMPT,
     LIVE_STATIC_V2_USER_INSTRUCTION,
@@ -49,6 +58,7 @@ from areal_pacman.prompts import (
 )
 from areal_pacman.rewards import RewardConfig, audit_reward, shape_reward
 from areal_pacman.trajectories import audit_trajectory, summarize_episodes
+from areal_pacman.level1.token_constraints import ObjectiveTokenConstraint
 from areal_pacman.level1.workflow import (
     _nearest_reachable_distance_with_diagnostics,
 )
@@ -69,34 +79,37 @@ def fake_action_tokenizer() -> SimpleNamespace:
     )
 
 
-def oracle_actions() -> list[str]:
-    level = load_bundled_level()
+class FakeObjectiveTokenizer:
+    def encode(self, text, **_):
+        return [ord(character) for character in text]
+
+    def decode(self, token_ids, **_):
+        return "".join(chr(token_id) for token_id in token_ids)
+
+
+def successful_planner_baseline_actions() -> list[str]:
     env = PygamePacmanEnv()
-    _, info = env.reset(seed=0)
-    remaining = set(level.pellets)
-    actions: list[str] = []
-    terminated = truncated = False
-    while not (terminated or truncated):
-        state = env.snapshot()
-        position = Position(int(state["row"]), int(state["col"]))
-        remaining.discard(position)
-        path = route_to_nearest(
-            level,
-            position,
-            remaining,
-        )
-        action = path[0]
-        _, _, terminated, truncated, info = env.step(action)
-        if info["pellet_eaten"]:
-            remaining.discard(
-                Position(
-                    int(info["pacman_position"][0]),
-                    int(info["pacman_position"][1]),
-                )
+    planner = EdwardPlanner()
+    try:
+        _, info = env.reset(seed=0)
+        actions: list[str] = []
+        terminated = truncated = False
+        while not (terminated or truncated):
+            decision = planner.decide(env.snapshot())
+            _, _, terminated, truncated, info = env.step(decision.action)
+            actions.append(decision.action)
+        if (
+            not terminated
+            or truncated
+            or info["terminal_reason"] != "all_normal_pellets"
+        ):
+            raise AssertionError(
+                "Edward planner baseline did not clear level 1: "
+                f"{info['terminal_reason']!r}"
             )
-        actions.append(action.value)
-    env.close()
-    return actions
+        return actions
+    finally:
+        env.close()
 
 
 class OneStepEnv(PygamePacmanEnv):
@@ -138,6 +151,22 @@ class DatasetContractTests(unittest.TestCase):
         validate_episode_row(row)
         self.assertEqual(row["env"]["max_steps"], 256)
 
+    def test_stress_512_step_rows_are_supported_without_changing_256(self) -> None:
+        stress = make_episode_row(
+            1,
+            split="train",
+            max_steps=STRESS_MAX_STEPS,
+        )
+        long_horizon = make_episode_row(
+            2,
+            split="train",
+            max_steps=LONG_HORIZON_MAX_STEPS,
+        )
+        validate_episode_row(stress)
+        validate_episode_row(long_horizon)
+        self.assertEqual(stress["env"]["max_steps"], 512)
+        self.assertEqual(long_horizon["env"]["max_steps"], 256)
+
     def test_balanced_corridor_splits_are_disjoint_and_defeat_constant_actions(
         self,
     ) -> None:
@@ -151,6 +180,12 @@ class DatasetContractTests(unittest.TestCase):
             {row["id"] for row in train} & {row["id"] for row in validation}
         )
         for rows in (train, validation):
+            self.assertTrue(
+                all(
+                    row["state_prefix_audit"]["prefix_verified_nonterminal"]
+                    for row in rows
+                )
+            )
             for action in ("U", "D", "L", "R"):
                 self.assertEqual(
                     sum(
@@ -171,6 +206,26 @@ class DatasetContractTests(unittest.TestCase):
             generate_single_step_rows(4, split="train", seed=0, offset=0)
         )
         self.assertTrue(all(row["decision_steps"] == 1 for row in rows))
+        self.assertTrue(
+            all(
+                row["state_prefix_audit"]["prefix_verified_nonterminal"]
+                for row in rows
+            )
+        )
+        self.assertTrue(
+            all(
+                row["state_prefix_audit"]["source_terminal_reason"]
+                in {"death", "all_normal_pellets"}
+                for row in rows
+            )
+        )
+        self.assertTrue(
+            all(
+                row["state_prefix_audit"]["successful_baseline"]
+                is row["state_prefix_audit"]["source_cleared_level"]
+                for row in rows
+            )
+        )
         self.assertEqual(
             [len(row["state_prefix_actions"]) for row in rows],
             [0, 1, 2, 3],
@@ -183,7 +238,7 @@ class DatasetContractTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(first[0]["id"], "level1-seed0-train-0001")
         self.assertEqual(
-            first[0]["env"]["name"], "pacman-python-level1-pygame-v1"
+            first[0]["env"]["name"], "pacman-python-level1-ghostdoor-v3"
         )
         self.assertEqual(first[0]["env"]["backend"], ENV_BACKEND)
         self.assertEqual(first[0]["env"]["max_steps"], PRODUCTION_MAX_STEPS)
@@ -191,6 +246,18 @@ class DatasetContractTests(unittest.TestCase):
             first[0]["env"]["pacman_python_revision"],
             environment_metadata()["pacman_python_revision"],
         )
+        self.assertEqual(
+            set(first[0]["source_revisions"]), set(REPOSITORY_NAMES)
+        )
+        self.assertEqual(
+            first[0]["env"]["maapacman_revision"],
+            first[0]["source_revisions"]["areal-pacman"]["commit"],
+        )
+        self.assertEqual(
+            first[0]["env"]["maapacman_dirty"],
+            first[0]["source_revisions"]["areal-pacman"]["dirty"],
+        )
+        self.assertEqual(first[0]["source_revisions"], repository_revisions())
         with tempfile.TemporaryDirectory() as directory:
             one = Path(directory) / "one.jsonl"
             two = Path(directory) / "two.jsonl"
@@ -214,7 +281,7 @@ class DatasetContractTests(unittest.TestCase):
     def test_invalid_rows_are_rejected(self) -> None:
         row = make_episode_row(1, split="train")
         for key, value in (
-            ("api_version", "2.0"),
+            ("api_version", "1.0"),
             ("backend", "synthetic"),
             ("pacman_python_revision", "wrong"),
             ("level", 2),
@@ -226,6 +293,14 @@ class DatasetContractTests(unittest.TestCase):
             broken["env"][key] = value
             with self.subTest(key=key), self.assertRaises(ValueError):
                 validate_episode_row(broken)
+
+        broken = copy.deepcopy(row)
+        broken["source_revisions"]["MaaPacman"] = {
+            "commit": "0" * 40,
+            "dirty": False,
+        }
+        with self.assertRaisesRegex(ValueError, "all three repositories"):
+            validate_episode_row(broken)
 
 
 class PromptAndActionTests(unittest.TestCase):
@@ -362,6 +437,39 @@ class PromptAndActionTests(unittest.TestCase):
 
 
 class RewardAndTrajectoryTests(unittest.TestCase):
+    @staticmethod
+    def event(
+        event_type: str,
+        score_delta: int,
+        *,
+        logic_frame_index: int = 1,
+        ghost_id: int | None = None,
+        post_ghost_state: str | None = None,
+    ) -> dict[str, object]:
+        return {
+            "logic_frame_index": logic_frame_index,
+            "logic_frame": logic_frame_index,
+            "event_type": event_type,
+            "pacman_position": [20, 10],
+            "ghost_id": ghost_id,
+            "score_delta": score_delta,
+            "post_ghost_state": post_ghost_state,
+            "edible_ticks": 0,
+        }
+
+    @classmethod
+    def reward_info(
+        cls,
+        *events: dict[str, object],
+        wall_collision: bool = False,
+        **extra: object,
+    ) -> dict[str, object]:
+        return {
+            "logic_frame_events": list(events),
+            "wall_collision": wall_collision,
+            **extra,
+        }
+
     def test_unreachable_bfs_logs_debug_state_and_fails(self) -> None:
         level = load_bundled_level(1)
         start = Position(12, 10)
@@ -429,26 +537,27 @@ class RewardAndTrajectoryTests(unittest.TestCase):
         self.assertIn('"start_position": [12, 10]', captured.output[0])
 
     def test_reward_formula_and_audit(self) -> None:
+        pellet_event = self.event("normal_pellet_eaten", 10)
         result = shape_reward(
             10.0,
             {"pellet_clear_rate": 0.0},
-            {"pellet_clear_rate": 1 / 196, "wall_collision": False},
+            self.reward_info(pellet_event, pellet_clear_rate=1 / 196),
             RewardConfig(step_penalty=1.0, wall_penalty=1.0),
         )
         self.assertAlmostEqual(result.step_penalty, 1.0)
         self.assertAlmostEqual(result.shaped_reward, 9.0)
-        audit_reward(result.as_dict())
+        audit_reward({**result.as_dict(), "logic_frame_events": [pellet_event]})
         wall = shape_reward(
             0.0,
             {"pellet_clear_rate": 0.0},
-            {"pellet_clear_rate": 0.0, "wall_collision": True},
+            self.reward_info(wall_collision=True, pellet_clear_rate=0.0),
             RewardConfig(step_penalty=1.0, wall_penalty=1.0),
         )
         self.assertAlmostEqual(wall.shaped_reward, -2.0)
         progress = shape_reward(
             0.0,
             {"pellet_clear_rate": 0.0},
-            {"pellet_clear_rate": 0.0, "wall_collision": False},
+            self.reward_info(pellet_clear_rate=0.0),
             RewardConfig(
                 step_penalty=1.0,
                 wall_penalty=1.0,
@@ -460,7 +569,7 @@ class RewardAndTrajectoryTests(unittest.TestCase):
         self.assertEqual(progress.nearest_pellet_progress_reward, 1.0)
         self.assertEqual(progress.nearest_pellet_progress_weight, 1.0)
         self.assertEqual(progress.shaped_reward, 0.0)
-        audit_reward(progress.as_dict())
+        audit_reward({**progress.as_dict(), "logic_frame_events": []})
         broken = result.as_dict()
         broken["shaped_reward"] = 99.0
         with self.assertRaises(ValueError):
@@ -475,7 +584,7 @@ class RewardAndTrajectoryTests(unittest.TestCase):
         early = shape_reward(
             0.0,
             {},
-            {"wall_collision": False, "pellet_eaten": False},
+            self.reward_info(),
             config,
             normal_pellet_remaining_ratio=0.75,
             nearest_pellet_distance_before=3,
@@ -484,7 +593,7 @@ class RewardAndTrajectoryTests(unittest.TestCase):
         late = shape_reward(
             0.0,
             {},
-            {"wall_collision": False, "pellet_eaten": False},
+            self.reward_info(),
             config,
             normal_pellet_remaining_ratio=0.10,
             nearest_pellet_distance_before=2,
@@ -497,9 +606,10 @@ class RewardAndTrajectoryTests(unittest.TestCase):
         self.assertAlmostEqual(late.nearest_pellet_progress_weight, 0.09)
         self.assertAlmostEqual(late.nearest_pellet_progress_reward, -0.09)
         self.assertAlmostEqual(late.shaped_reward, -0.14)
-        audit_reward(early.as_dict())
-        audit_reward(late.as_dict())
+        audit_reward({**early.as_dict(), "logic_frame_events": []})
+        audit_reward({**late.as_dict(), "logic_frame_events": []})
         broken_progress = early.as_dict()
+        broken_progress["logic_frame_events"] = []
         broken_progress["nearest_pellet_progress_reward"] = 0.5
         with self.assertRaisesRegex(ValueError, "nearest-pellet reward audit"):
             audit_reward(broken_progress)
@@ -513,7 +623,7 @@ class RewardAndTrajectoryTests(unittest.TestCase):
         early = shape_reward(
             0.0,
             {},
-            {"wall_collision": False},
+            self.reward_info(),
             config,
             normal_pellet_remaining_ratio=0.99,
             normal_pellet_remaining_ratio_before=1.0,
@@ -521,7 +631,7 @@ class RewardAndTrajectoryTests(unittest.TestCase):
         middle = shape_reward(
             0.0,
             {},
-            {"wall_collision": False},
+            self.reward_info(),
             config,
             normal_pellet_remaining_ratio=0.49,
             normal_pellet_remaining_ratio_before=0.5,
@@ -529,7 +639,7 @@ class RewardAndTrajectoryTests(unittest.TestCase):
         late = shape_reward(
             0.0,
             {},
-            {"wall_collision": False},
+            self.reward_info(),
             config,
             normal_pellet_remaining_ratio=0.0,
             normal_pellet_remaining_ratio_before=0.0,
@@ -541,9 +651,9 @@ class RewardAndTrajectoryTests(unittest.TestCase):
         self.assertAlmostEqual(early.shaped_reward, -0.05)
         self.assertAlmostEqual(middle.shaped_reward, -0.275)
         self.assertAlmostEqual(late.shaped_reward, -0.5)
-        audit_reward(early.as_dict())
-        audit_reward(middle.as_dict())
-        audit_reward(late.as_dict())
+        audit_reward({**early.as_dict(), "logic_frame_events": []})
+        audit_reward({**middle.as_dict(), "logic_frame_events": []})
+        audit_reward({**late.as_dict(), "logic_frame_events": []})
 
         with self.assertRaisesRegex(
             ValueError,
@@ -556,6 +666,9 @@ class RewardAndTrajectoryTests(unittest.TestCase):
             use_base_reward=False,
             normal_pellet_reward=1.0,
             power_pellet_reward=1.0,
+            ghost_reward=5.0,
+            fruit_reward=2.0,
+            death_penalty=25.0,
             completion_reward=50.0,
             step_penalty=0.05,
             wall_penalty=0.5,
@@ -564,9 +677,9 @@ class RewardAndTrajectoryTests(unittest.TestCase):
             nearest_pellet_skip_on_eat=True,
         )
         ordinary = shape_reward(
-            123.0,
+            0.0,
             {},
-            {"wall_collision": False, "pellet_eaten": False},
+            self.reward_info(),
             config,
             normal_pellet_remaining_ratio=0.5,
             nearest_pellet_distance_before=3,
@@ -579,7 +692,7 @@ class RewardAndTrajectoryTests(unittest.TestCase):
         closer = shape_reward(
             0.0,
             {},
-            {"wall_collision": False, "pellet_eaten": False},
+            self.reward_info(),
             config,
             normal_pellet_remaining_ratio=0.25,
             nearest_pellet_distance_before=3,
@@ -591,19 +704,19 @@ class RewardAndTrajectoryTests(unittest.TestCase):
         farther = shape_reward(
             0.0,
             {},
-            {"wall_collision": False, "pellet_eaten": False},
+            self.reward_info(),
             config,
             normal_pellet_remaining_ratio=0.2,
             nearest_pellet_distance_before=2,
             nearest_pellet_distance_after=3,
         )
         self.assertAlmostEqual(farther.shaped_reward, -0.15)
-        audit_reward(farther.as_dict())
+        audit_reward({**farther.as_dict(), "logic_frame_events": []})
 
         wall = shape_reward(
             0.0,
             {},
-            {"wall_collision": True, "pellet_eaten": False},
+            self.reward_info(wall_collision=True),
             config,
             normal_pellet_remaining_ratio=0.5,
             nearest_pellet_distance_before=2,
@@ -614,7 +727,7 @@ class RewardAndTrajectoryTests(unittest.TestCase):
         pellet = shape_reward(
             10.0,
             {},
-            {"wall_collision": False, "pellet_eaten": True},
+            self.reward_info(self.event("normal_pellet_eaten", 10)),
             config,
             normal_pellet_remaining_ratio=0.2,
             nearest_pellet_distance_before=1,
@@ -626,13 +739,9 @@ class RewardAndTrajectoryTests(unittest.TestCase):
         self.assertEqual(pellet.nearest_pellet_progress_reward, 0.0)
 
         power_pellet = shape_reward(
-            50.0,
+            100.0,
             {},
-            {
-                "wall_collision": False,
-                "pellet_eaten": False,
-                "power_pellet_eaten": True,
-            },
+            self.reward_info(self.event("power_pellet_eaten", 100)),
             config,
             normal_pellet_remaining_ratio=0.5,
             nearest_pellet_distance_before=2,
@@ -641,17 +750,45 @@ class RewardAndTrajectoryTests(unittest.TestCase):
         self.assertAlmostEqual(power_pellet.shaped_reward, 0.95)
         self.assertTrue(power_pellet.power_pellet_eaten)
         self.assertEqual(power_pellet.power_pellet_reward, 1.0)
-        audit_reward(power_pellet.as_dict())
+        audit_reward({**power_pellet.as_dict(), "logic_frame_events": [self.event("power_pellet_eaten", 100)]})
+
+        ghost = shape_reward(
+            600.0,
+            {},
+            self.reward_info(
+                self.event("ghost_eaten", 200, ghost_id=0, post_ghost_state="eyes"),
+                self.event("ghost_eaten", 400, ghost_id=1, post_ghost_state="eyes"),
+            ),
+            config,
+        )
+        self.assertAlmostEqual(ghost.shaped_reward, 9.95)
+        self.assertTrue(ghost.ghost_eaten)
+        self.assertEqual(ghost.ghost_reward, 10.0)
+        audit_reward({**ghost.as_dict(), "logic_frame_events": [
+            self.event("ghost_eaten", 200, ghost_id=0, post_ghost_state="eyes"),
+            self.event("ghost_eaten", 400, ghost_id=1, post_ghost_state="eyes"),
+        ]})
+
+        death = shape_reward(
+            0.0,
+            {},
+            self.reward_info(self.event("death", 0)),
+            config,
+        )
+        self.assertAlmostEqual(death.shaped_reward, -25.05)
+        self.assertTrue(death.death)
+        self.assertEqual(death.death_penalty, 25.0)
+        audit_reward({**death.as_dict(), "logic_frame_events": [self.event("death", 0)]})
 
         completion = shape_reward(
             10.0,
             {},
-            {
-                "wall_collision": False,
-                "pellet_eaten": True,
-                "terminal_reason": "all_normal_pellets",
-                "normal_pellets_remaining": 0,
-            },
+            self.reward_info(
+                self.event("normal_pellet_eaten", 10),
+                self.event("level_cleared", 0),
+                terminal_reason="all_normal_pellets",
+                normal_pellets_remaining=0,
+            ),
             config,
             normal_pellet_remaining_ratio=0.0,
             nearest_pellet_distance_before=1,
@@ -659,18 +796,53 @@ class RewardAndTrajectoryTests(unittest.TestCase):
         )
         self.assertAlmostEqual(completion.shaped_reward, 50.95)
         self.assertTrue(completion.level_completed)
-        audit_reward(completion.as_dict())
+        audit_reward({**completion.as_dict(), "logic_frame_events": [
+            self.event("normal_pellet_eaten", 10),
+            self.event("level_cleared", 0),
+        ]})
 
     def test_reward_config_rejects_invalid_shaping_parameters(self) -> None:
         with self.assertRaisesRegex(ValueError, "normal_pellet_reward"):
             RewardConfig(normal_pellet_reward=-1.0)
         with self.assertRaisesRegex(ValueError, "power_pellet_reward"):
             RewardConfig(power_pellet_reward=-1.0)
+        with self.assertRaisesRegex(ValueError, "ghost_reward"):
+            RewardConfig(ghost_reward=-1.0)
+        with self.assertRaisesRegex(ValueError, "fruit_reward"):
+            RewardConfig(fruit_reward=-1.0)
+        with self.assertRaisesRegex(ValueError, "death_penalty"):
+            RewardConfig(death_penalty=-1.0)
         with self.assertRaisesRegex(ValueError, "completion_reward"):
             RewardConfig(completion_reward=-1.0)
+        with self.assertRaisesRegex(ValueError, "safety_refusal_penalty"):
+            RewardConfig(safety_refusal_penalty=-1.0)
         with self.assertRaisesRegex(ValueError, "ratio_threshold"):
             RewardConfig(
                 nearest_pellet_remaining_ratio_threshold=1.1
+            )
+
+    def test_event_reward_supports_fruit_and_rejects_score_inference(self) -> None:
+        fruit_event = self.event("fruit_eaten", 2500)
+        result = shape_reward(
+            2500.0,
+            {},
+            self.reward_info(fruit_event),
+            RewardConfig(
+                use_base_reward=False,
+                fruit_reward=2.0,
+                step_penalty=0.0,
+            ),
+        )
+        self.assertTrue(result.fruit_eaten)
+        self.assertEqual(result.fruit_reward, 2.0)
+        self.assertEqual(result.shaped_reward, 2.0)
+        audit_reward({**result.as_dict(), "logic_frame_events": [fruit_event]})
+        with self.assertRaisesRegex(ValueError, "event score sum"):
+            shape_reward(
+                2500.0,
+                {},
+                self.reward_info(),
+                RewardConfig(step_penalty=0.0),
             )
 
     def test_step256_reward_config_contract(self) -> None:
@@ -682,24 +854,46 @@ class RewardAndTrajectoryTests(unittest.TestCase):
             / "level1_live_state_step256_100update_group12_8gpu.yaml"
         ).read_text(encoding="utf-8")
         for expected in (
+            "recipe_version: maapacman-level1-ghostdoor-v3",
             "total_train_epochs: 50",
             "validation_contract: sampled12_uniform_shaped",
+            "reward_objective_contract: episode_return_group_v1",
             "use_base_reward: false",
             "normal_pellet_reward: 1.0",
             "power_pellet_reward: 1.0",
+            "ghost_reward: 5.0",
+            "fruit_reward: 0.0",
+            "reward_recipe_version: maapacman-level1-event-reward-v3",
+            "death_penalty: 25.0",
             "completion_reward: 50.0",
+            "safety_refusal_penalty: 25.0",
+            "gdn_prefill_backend: triton",
+            "kl_logprob_source: proximal",
+            "prox_logp_method: recompute",
+            "ppo_n_minibatches: 1",
+            "level: sequence",
+            "action: mask",
+            "agg: sum",
+            "lower: 0.8",
+            "upper: 1.25",
             "step_penalty: 0.05",
-            "step_penalty_cleared_ratio_scale: 0.45",
+            "step_penalty_cleared_ratio_scale: 0.0",
             "wall_penalty: 0.5",
             "nearest_pellet_alpha: 0.1",
             "nearest_pellet_remaining_ratio_threshold: 1.0",
             "nearest_pellet_scale_by_cleared_ratio: true",
             "nearest_pellet_skip_on_eat: true",
+            "edward_options: true",
+            "objective_encoding: edward-option-code-v1",
+            "action_token_choice: false",
+            "open_action_mask: false",
+            "max_new_tokens: 1",
+            "temperature: ${actor.temperature}",
             "keep_last: 2",
             "keep_best_metric: ppo_actor/task_reward/avg",
             "keep_best_mode: max",
             "enable_offload: true",
-            "max_tokens_per_mb: 512",
+            "max_tokens_per_mb: 1024",
             "offload: true",
             "artifacts/datasets/level1_dataset_step256/train_hf",
             "artifacts/datasets/level1_dataset_step256/validation_hf",
@@ -708,8 +902,55 @@ class RewardAndTrajectoryTests(unittest.TestCase):
         actor_section = config.split("\nref:\n", 1)[0].split("\nactor:\n", 1)[1]
         ref_section = config.split("\nref:\n", 1)[1].split("\nvllm:\n", 1)[0]
         self.assertIn("\n  offload: true", "\n" + actor_section)
+        self.assertIn("\n  reward_norm:", "\n" + actor_section)
+        self.assertIn("\n    mean_level: group", "\n" + actor_section)
+        self.assertIn("\n    std_level: group", "\n" + actor_section)
+        self.assertIn(
+            "\n    group_size: ${gconfig.n_samples}", "\n" + actor_section
+        )
+        self.assertIn("\n  adv_norm: null", "\n" + actor_section)
         self.assertIn("\n  offload: true", "\n" + ref_section)
         self.assertNotIn("revisit_penalty:", config)
+
+    def test_step512_edward_gate_config_contract(self) -> None:
+        config = (
+            Path(__file__).parents[1]
+            / "configs"
+            / "level1"
+            / "train"
+            / "level1_edward_step512_2update_group12_8gpu.yaml"
+        ).read_text(encoding="utf-8")
+        for expected in (
+            "recipe_version: maapacman-level1-ghostdoor-v3",
+            "total_train_epochs: 2",
+            "reward_objective_contract: option_return_raw_v1",
+            "use_base_reward: false",
+            "fruit_reward: 0.0",
+            "safety_refusal_penalty: 25.0",
+            "step_penalty: 0.05",
+            "step_penalty_cleared_ratio_scale: 0.0",
+            "edward_options: true",
+            "action_token_choice: false",
+            "open_action_mask: false",
+            "n_samples: 12",
+            "batch_size: 4",
+            "gdn_prefill_backend: triton",
+            "kl_logprob_source: proximal",
+            "prox_logp_method: recompute",
+            "level: sequence",
+            "action: mask",
+            "agg: sum",
+            "lower: 0.8",
+            "upper: 1.25",
+            "freq_steps: 1",
+            "artifacts/datasets/level1_dataset_step512/train_hf",
+            "artifacts/datasets/level1_dataset_step512/validation_hf",
+        ):
+            self.assertIn(expected, config)
+        actor_section = config.split("\nref:\n", 1)[0].split("\nactor:\n", 1)[1]
+        self.assertIn("\n  reward_norm: null", "\n" + actor_section)
+        self.assertIn("\n  adv_norm: null", "\n" + actor_section)
+        self.assertNotIn("level1_dataset_step256/", config)
 
     def test_summary_counts_acceptance_metrics(self) -> None:
         summary = summarize_episodes(
@@ -772,6 +1013,34 @@ class WorkflowContractTests(unittest.TestCase):
             workflow.last_episode["state_prefix_actions"],
             row["state_prefix_actions"],
         )
+        payload = workflow.last_episode
+        assert payload is not None
+        self.assertEqual(
+            payload["state_prefix_actions_executed"],
+            len(row["state_prefix_actions"]),
+        )
+        self.assertEqual(
+            len(payload["state_prefix_evidence"]),
+            len(row["state_prefix_actions"]),
+        )
+        self.assertGreater(payload["prefix_end_score"], 0)
+        self.assertGreater(payload["prefix_end_logic_frame"], 0)
+        self.assertEqual(
+            payload["prefix_end_score"],
+            sum(item["score_delta"] for item in payload["state_prefix_evidence"]),
+        )
+        self.assertEqual(
+            payload["prefix_end_logic_frame"],
+            sum(item["logic_frames"] for item in payload["state_prefix_evidence"]),
+        )
+        audit_trajectory(payload)
+        for field in ("prefix_end_score", "prefix_end_logic_frame"):
+            corrupted = copy.deepcopy(payload)
+            corrupted[field] = 0
+            with self.subTest(field=field), self.assertRaisesRegex(
+                ValueError, field
+            ):
+                audit_trajectory(corrupted)
         self.assertEqual(
             workflow.last_episode["terminal_reason"],
             "single_step_complete",
@@ -844,6 +1113,8 @@ class WorkflowContractTests(unittest.TestCase):
                 return "L"
 
         class FakeGConfig:
+            n_samples = 12
+
             def new(self, **kwargs):
                 self.last_kwargs = kwargs
                 return self
@@ -880,6 +1151,7 @@ class WorkflowContractTests(unittest.TestCase):
             enable_thinking=False,
             image_prompt_style="minimal_v1",
             action_token_choice=True,
+            reward_objective_contract="episode_return_group_v1",
         )
         engine = FakeEngine()
         with patch.dict(
@@ -908,6 +1180,9 @@ class WorkflowContractTests(unittest.TestCase):
                 "versions",
                 "attention_mask",
                 "rewards",
+                "rollout_episode_ids",
+                "rollout_episode_returns",
+                "rollout_episode_group_sizes",
                 "multi_modal_input",
             },
         )
@@ -921,6 +1196,12 @@ class WorkflowContractTests(unittest.TestCase):
         )
         self.assertEqual(result["logprobs"].tolist(), [[0.0, 0.0, -0.25]])
         self.assertEqual(result["versions"].tolist(), [[-1, -1, 7]])
+        self.assertEqual(
+            result["rewards"].tolist(),
+            result["rollout_episode_returns"].tolist(),
+        )
+        self.assertEqual(result["rollout_episode_group_sizes"].tolist(), [12])
+        self.assertEqual(len(result["rollout_episode_ids"].tolist()), 1)
         self.assertEqual(engine.request.image_data, ["encoded-image"])
         self.assertEqual(engine.request.input_ids, [10, 11])
         self.assertEqual(
@@ -939,6 +1220,63 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn(
             "pixel_values", result["multi_modal_input"][0]
         )
+
+    def test_native_objective_ledger_uses_generic_token_support(self) -> None:
+        response = SimpleNamespace(
+            input_tokens=[10, 11],
+            output_tokens=[20, 21],
+            output_logprobs=[-0.5, 0.0],
+            output_versions=[3, 3],
+        )
+        processed = {
+            "mm_token_type_ids": torch.tensor([[0, 1]]),
+            "pixel_values": torch.tensor([[1.0]]),
+        }
+        sample = PacmanNativeVisionWorkflow._tensor_sample(
+            processed,
+            response,
+            2.5,
+            [],
+            [[20, 30], [21]],
+            rollout_episode_id=1234,
+            rollout_episode_return=2.5,
+            rollout_episode_group_size=12,
+        )
+        self.assertNotIn("pacman_action_mask_bits", sample)
+        self.assertEqual(
+            sample["pacman_allowed_token_ids"].tolist(),
+            [[[0, 0], [0, 0], [21, 31], [22, 0]]],
+        )
+        self.assertEqual(sample["rollout_episode_ids"].tolist(), [1234])
+        self.assertEqual(sample["rollout_episode_returns"].tolist(), [2.5])
+        self.assertEqual(
+            sample["rollout_episode_group_sizes"].tolist(), [12]
+        )
+
+    def test_native_option_return_sample_carries_episode_id_only(self) -> None:
+        response = SimpleNamespace(
+            input_tokens=[10, 11],
+            output_tokens=[20],
+            output_logprobs=[-0.5],
+            output_versions=[3],
+        )
+        processed = {
+            "mm_token_type_ids": torch.tensor([[0, 1]]),
+            "pixel_values": torch.tensor([[1.0]]),
+        }
+
+        sample = PacmanNativeVisionWorkflow._tensor_sample(
+            processed,
+            response,
+            2.5,
+            [],
+            rollout_episode_id=1234,
+        )
+
+        self.assertEqual(sample["rewards"].tolist(), [2.5])
+        self.assertEqual(sample["rollout_episode_ids"].tolist(), [1234])
+        self.assertNotIn("rollout_episode_returns", sample)
+        self.assertNotIn("rollout_episode_group_sizes", sample)
 
     def test_native_vllm_adapter_forwards_no_thinking_and_action_mask(
         self,
@@ -1069,6 +1407,55 @@ class WorkflowContractTests(unittest.TestCase):
         )
         self.assertTrue(captured["closed"])
 
+    def test_edward_request_uses_only_one_token_allowlist_without_xgrammar(self) -> None:
+        captured = {}
+
+        class FakeResponse:
+            id = "response-option-1"
+            choices = [
+                SimpleNamespace(
+                    message=SimpleNamespace(content="B", reasoning_content=None)
+                )
+            ]
+
+            def model_dump(self, mode):
+                return {"id": self.id, "mode": mode}
+
+        class FakeCompletions:
+            async def create(self, **request):
+                captured.update(request)
+                return FakeResponse()
+
+        class FakeClient:
+            def __init__(self, **_):
+                self.chat = SimpleNamespace(completions=FakeCompletions())
+
+            async def close(self):
+                return None
+
+        constraint = ObjectiveTokenConstraint.build(
+            FakeObjectiveTokenizer(), ["C0", "A0"]
+        )
+        workflow = PacmanImageOnlyWorkflow.__new__(PacmanImageOnlyWorkflow)
+        with patch.dict(
+            sys.modules,
+            {"openai": SimpleNamespace(AsyncOpenAI=FakeClient)},
+        ):
+            turn = asyncio.run(
+                workflow._call_model(
+                    [{"role": "user", "content": "test"}],
+                    objective_constraint=constraint,
+                )
+            )
+
+        self.assertEqual(turn.completion, "B")
+        self.assertEqual(captured["max_tokens"], 1)
+        self.assertEqual(
+            captured["extra_body"]["allowed_token_ids"],
+            [ord("B"), ord("J")],
+        )
+        self.assertNotIn("structured_outputs", captured["extra_body"])
+
     def test_workflow_passes_current_open_actions_to_generation(self) -> None:
         captured = {}
 
@@ -1137,7 +1524,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertEqual(result, {"completion-1": workflow.last_episode["trajectory"][0]["shaped_reward"]})
         payload = workflow.last_episode
         assert payload is not None
-        self.assertEqual(payload["env_api_version"], "1.0")
+        self.assertEqual(payload["env_api_version"], "3.0")
         self.assertEqual(payload["terminal_reason"], "test_complete")
         self.assertEqual(payload["trajectory"][0]["action"], "L")
         self.assertEqual(payload["backend"], "original-pygame")
@@ -1221,9 +1608,50 @@ class WorkflowContractTests(unittest.TestCase):
                 scripted_actions=["Action: R"],
             )
         )
-        self.assertEqual(reward, -50.0)
+        self.assertEqual(reward, -1.0)
         self.assertEqual(CountingEnv.steps_called, 0)
-        self.assertEqual(workflow.last_episode["terminal_reason"], "parse_failed")
+        payload = workflow.last_episode
+        self.assertEqual(payload["terminal_reason"], "parse_failed")
+        self.assertEqual(payload["total_shaped_reward"], -1.0)
+        failure = payload["trajectory"][-1]
+        self.assertIs(failure["contract_violation"], True)
+        self.assertEqual(failure["contract_violation_type"], "parse_failure")
+        self.assertEqual(failure["contract_violation_target_return"], -1.0)
+        self.assertEqual(failure["reward_accumulated_before_violation"], 0.0)
+        self.assertEqual(failure["contract_violation_adjustment"], -1.0)
+        audit_trajectory(payload)
+
+    def test_parse_failure_overrides_accumulated_episode_return_to_minus_one(
+        self,
+    ) -> None:
+        workflow = PacmanImageOnlyWorkflow(env_factory=TwoStepEnv)
+        reward = asyncio.run(
+            workflow.run(
+                make_episode_row(1, split="train"),
+                scripted_actions=["L", "Action: R"],
+                use_base_reward=False,
+                step_penalty=0.5,
+            )
+        )
+
+        payload = workflow.last_episode
+        self.assertEqual(reward, -1.0)
+        self.assertEqual(payload["total_shaped_reward"], -1.0)
+        self.assertEqual(len(payload["trajectory"]), 2)
+        failure = payload["trajectory"][-1]
+        accumulated = payload["trajectory"][0]["shaped_reward"]
+        self.assertNotEqual(accumulated, 0.0)
+        self.assertEqual(
+            failure["reward_accumulated_before_violation"], accumulated
+        )
+        self.assertEqual(
+            failure["contract_violation_adjustment"], -1.0 - accumulated
+        )
+        self.assertEqual(
+            failure["shaped_reward"],
+            failure["contract_violation_adjustment"],
+        )
+        audit_trajectory(payload)
 
     def test_environment_closes_on_success_and_exception(self) -> None:
         created = []
@@ -1281,6 +1709,332 @@ class WorkflowContractTests(unittest.TestCase):
         sent_png = base64.b64decode(url.split(",", 1)[1])
         recorded = workflow.last_episode["trajectory"][0]["observation_png_sha256"]
         self.assertEqual(png_sha256(sent_png), recorded)
+
+    def test_edward_option_accumulates_reward_across_bounded_actions(self) -> None:
+        captured = {}
+        candidate = PlannerCandidate(
+            option_id="C0",
+            strategy="COLLECT",
+            target=(1, 1),
+            first_action="L",
+            route_distance=2,
+            commit_moves=2,
+        )
+
+        class FakePlanner:
+            def observe(self, state):
+                return None
+
+            def advertised_candidates(self, state):
+                return (candidate,)
+
+            def record_action(self, action):
+                self.last_action = action
+
+            def continue_option(self, option, state):
+                return "L", "active"
+
+        class CapturingWorkflow(PacmanImageOnlyWorkflow):
+            async def _call_model(self, messages, **options):
+                captured["system_prompt"] = messages[0]["content"]
+                return ModelTurn(
+                    "B",
+                    "objective-1",
+                    messages,
+                )
+
+        with (
+            patch(
+                "transformers.AutoTokenizer.from_pretrained",
+                return_value=FakeObjectiveTokenizer(),
+            ),
+            patch(
+                "areal_pacman.level1.workflow.EdwardPlanner",
+                FakePlanner,
+            ),
+        ):
+            workflow = CapturingWorkflow(
+                env_factory=TwoStepEnv,
+                tokenizer_path="test-tokenizer",
+                edward_options=True,
+                image_prompt_style="live_state_v3",
+            )
+            result = asyncio.run(
+                workflow.run(make_episode_row(1, split="test"))
+            )
+
+        payload = workflow.last_episode
+        assert payload is not None
+        first, second = payload["trajectory"]
+        self.assertEqual(set(result), {"objective-1"})
+        self.assertAlmostEqual(
+            result["objective-1"],
+            first["shaped_reward"] + second["shaped_reward"],
+        )
+        self.assertEqual(
+            [first["option_step"], second["option_step"]], [1, 2]
+        )
+        self.assertEqual(first["option_status"], "active")
+        self.assertFalse(first["option_end"])
+        self.assertEqual(second["option_status"], "terminal")
+        self.assertTrue(second["option_end"])
+        self.assertEqual(
+            payload["action_constraint"], "edward-option-code-v1"
+        )
+        self.assertEqual(payload["decoding"]["max_completion_tokens"], 1)
+        self.assertEqual(
+            captured["system_prompt"], EDWARD_OPTION_CODE_V1_SYSTEM_PROMPT
+        )
+        self.assertEqual(
+            payload["system_prompt"], EDWARD_OPTION_CODE_V1_SYSTEM_PROMPT
+        )
+        self.assertIn("uppercase option code", payload["system_prompt"])
+        self.assertIn("not a movement action", payload["system_prompt"])
+        for expected in (
+            "exact MaaPacman simulator",
+            "trust the structured state",
+            "level/tunnel door",
+            "Eyes and gone ghosts are nonlethal",
+            "COLLECT is the default",
+            "Use AVOID for a threatened route",
+            "Use ELIMINATE only for",
+            "rechecks safety after every move",
+            "Codes map to fixed objective ids",
+            "only advertised candidates and their targets are valid",
+            "no other text",
+        ):
+            self.assertIn(expected, payload["system_prompt"])
+        self.assertNotIn("fruit", payload["system_prompt"].lower())
+        self.assertIn(
+            '["B","C0","COLLECT",[1,1],"L",2,2,null,null,null]',
+            first["model_user_instruction"],
+        )
+        self.assertIn('"ghosts":', first["model_user_instruction"])
+        self.assertIn('"edible_ticks":', first["model_user_instruction"])
+        self.assertIn('"maze":', first["model_user_instruction"])
+        for expected in (
+            "p=Pac-Man [row,column]",
+            "pellets=normal+power pellets remaining",
+            "maps code to id. Use only the candidates shown for this turn",
+            "distance=route steps, commit=max executed moves",
+            "larger safety/exits are better",
+            "entity=ELIMINATE ghost id",
+            "Structured state overrides the image",
+            "nothing else",
+        ):
+            self.assertIn(expected, first["model_user_instruction"])
+        self.assertIn(
+            "Return exactly one code from [B]",
+            first["model_user_instruction"],
+        )
+        self.assertNotIn(
+            "recent_positions", first["model_user_instruction"]
+        )
+        audit_trajectory(payload)
+
+        corrupted = copy.deepcopy(payload)
+        corrupted["decoding"]["max_completion_tokens"] = 3
+        with self.assertRaisesRegex(
+            ValueError, "decoding.max_completion_tokens=1"
+        ):
+            audit_trajectory(corrupted)
+
+        corrupted = copy.deepcopy(payload)
+        del corrupted["decoding"]
+        with self.assertRaisesRegex(
+            ValueError, "decoding.max_completion_tokens=1"
+        ):
+            audit_trajectory(corrupted)
+
+        corrupted = copy.deepcopy(payload)
+        corrupted["trajectory"][0]["observation_context"][
+            "option_code_map"
+        ] = {}
+        with self.assertRaisesRegex(ValueError, "invalid Edward option code"):
+            audit_trajectory(corrupted)
+
+        corrupted = copy.deepcopy(payload)
+        corrupted["trajectory"][0]["option_code_map"]["F"] = "C1"
+        corrupted["trajectory"][0]["observation_context"][
+            "option_code_map"
+        ]["F"] = "C1"
+        with self.assertRaisesRegex(ValueError, "match planner candidates"):
+            audit_trajectory(corrupted)
+
+        corrupted = copy.deepcopy(payload)
+        corrupted["trajectory"][1]["option_code_map"]["F"] = "C1"
+        with self.assertRaisesRegex(ValueError, "breaks option continuity"):
+            audit_trajectory(corrupted)
+
+    def test_edward_safety_refusal_truncates_after_last_completed_option(self) -> None:
+        candidate = PlannerCandidate(
+            option_id="C0",
+            strategy="COLLECT",
+            target=(1, 1),
+            first_action="L",
+            route_distance=1,
+            commit_moves=1,
+        )
+
+        class RefusingPlanner:
+            decisions = 0
+
+            def observe(self, state):
+                return None
+
+            def advertised_candidates(self, state):
+                self.decisions += 1
+                if self.decisions == 1:
+                    return (candidate,)
+                raise EdwardSafetyRefusal("no provably safe action")
+
+            def record_action(self, action):
+                return None
+
+            def continue_option(self, option, state):
+                return None, "completed"
+
+        class CapturingWorkflow(PacmanImageOnlyWorkflow):
+            calls = 0
+
+            async def _call_model(self, messages, **options):
+                self.calls += 1
+                return ModelTurn(
+                    "B",
+                    "safe-before-refusal",
+                    messages,
+                )
+
+        with (
+            patch(
+                "transformers.AutoTokenizer.from_pretrained",
+                return_value=FakeObjectiveTokenizer(),
+            ),
+            patch(
+                "areal_pacman.level1.workflow.EdwardPlanner",
+                RefusingPlanner,
+            ),
+        ):
+            workflow = CapturingWorkflow(
+                env_factory=TwoStepEnv,
+                tokenizer_path="test-tokenizer",
+                edward_options=True,
+                image_prompt_style="live_state_v3",
+            )
+            rewards = asyncio.run(
+                workflow.run(
+                    make_episode_row(1, split="test"),
+                    safety_refusal_penalty=25.0,
+                )
+            )
+
+        payload = workflow.last_episode
+        assert payload is not None
+        self.assertEqual(workflow.calls, 1)
+        self.assertEqual(set(rewards), {"safe-before-refusal"})
+        self.assertEqual(len(payload["trajectory"]), 1)
+        final = payload["trajectory"][-1]
+        self.assertEqual(final["option_status"], "completed")
+        self.assertTrue(final["option_end"])
+        self.assertFalse(final["terminated"])
+        self.assertTrue(final["truncated"])
+        self.assertEqual(final["terminal_reason"], "safety_refusal")
+        self.assertTrue(final["safety_refusal"])
+        self.assertEqual(final["safety_refusal_penalty"], 25.0)
+        self.assertAlmostEqual(
+            rewards["safe-before-refusal"], final["option_return"]
+        )
+        self.assertAlmostEqual(
+            payload["total_shaped_reward"], final["shaped_reward"]
+        )
+        self.assertEqual(
+            payload["safety_refusal_penalty_coefficient"], 25.0
+        )
+        audit_trajectory(payload)
+
+        corrupted = copy.deepcopy(payload)
+        corrupted["trajectory"][-1]["safety_refusal_penalty"] = 0.0
+        with self.assertRaisesRegex(
+            ValueError, "inconsistent safety-refusal reward evidence"
+        ):
+            audit_trajectory(corrupted)
+
+        corrupted = copy.deepcopy(payload)
+        corrupted["trajectory"][-1]["terminated"] = True
+        corrupted["trajectory"][-1]["truncated"] = False
+        corrupted["terminated"] = True
+        corrupted["truncated"] = False
+        with self.assertRaisesRegex(ValueError, "invalid Edward safety refusal"):
+            audit_trajectory(corrupted)
+
+    def test_initial_edward_safety_refusal_returns_no_native_sample(self) -> None:
+        class RefusingPlanner:
+            def observe(self, state):
+                return None
+
+            def advertised_candidates(self, state):
+                raise EdwardSafetyRefusal("no provably safe initial action")
+
+        class FakeGConfig:
+            n_samples = 12
+
+            def new(self, **kwargs):
+                return self
+
+        with (
+            patch(
+                "transformers.AutoTokenizer.from_pretrained",
+                return_value=FakeObjectiveTokenizer(),
+            ),
+            patch(
+                "areal_pacman.level1.workflow.EdwardPlanner",
+                RefusingPlanner,
+            ),
+        ):
+            workflow = PacmanNativeVisionWorkflow(
+                gconfig=FakeGConfig(),
+                tokenizer=FakeObjectiveTokenizer(),
+                processor=self._fake_native_processor(),
+                env_factory=TwoStepEnv,
+                tokenizer_path="test-tokenizer",
+                edward_options=True,
+                image_prompt_style="live_state_v3",
+            )
+            result = asyncio.run(
+                workflow.arun_episode(
+                    SimpleNamespace(), make_episode_row(1, split="train")
+                )
+            )
+
+        self.assertIsNone(result)
+        self.assertIsNone(workflow.last_episode)
+
+    def test_unrelated_planner_runtime_error_is_not_swallowed(self) -> None:
+        class BrokenPlanner:
+            def observe(self, state):
+                return None
+
+            def advertised_candidates(self, state):
+                raise RuntimeError("planner implementation bug")
+
+        with (
+            patch(
+                "transformers.AutoTokenizer.from_pretrained",
+                return_value=FakeObjectiveTokenizer(),
+            ),
+            patch(
+                "areal_pacman.level1.workflow.EdwardPlanner",
+                BrokenPlanner,
+            ),
+        ):
+            workflow = PacmanImageOnlyWorkflow(
+                env_factory=TwoStepEnv,
+                tokenizer_path="test-tokenizer",
+                edward_options=True,
+                image_prompt_style="live_state_v3",
+            )
+            with self.assertRaisesRegex(RuntimeError, "planner implementation bug"):
+                asyncio.run(workflow.run(make_episode_row(1, split="test")))
 
     def test_live_state_workflow_records_prompt_context_and_history(self) -> None:
         workflow = PacmanImageOnlyWorkflow(env_factory=TwoStepEnv)
@@ -1341,7 +2095,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertEqual(last_context["current_cell_exit_history"], ["U"])
         self.assertEqual(
             last_context["current_cell_exit_counts"],
-            {"U": PRODUCTION_MAX_STEPS - 1},
+            {"U": len(payload["trajectory"]) - 1},
         )
 
     def test_trajectory_preserves_verbatim_model_response(self) -> None:
@@ -1389,30 +2143,40 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertEqual(step["raw_model_response"], raw_response)
         self.assertEqual(step["request_extra_body"], request_extra_body)
 
-    def test_oracle_clears_level_through_production_workflow(self) -> None:
-        actions = oracle_actions()
-        self.assertEqual(len(actions), PRODUCTION_MAX_STEPS)
+    def test_edward_baseline_replays_through_production_workflow(self) -> None:
+        actions = successful_planner_baseline_actions()
+        row = make_episode_row(
+            1,
+            split="test",
+            max_steps=STRESS_MAX_STEPS,
+        )
+        self.assertGreater(len(actions), 32)
+        self.assertLessEqual(len(actions), row["env"]["max_steps"])
         workflow = PacmanImageOnlyWorkflow()
         asyncio.run(
             workflow.run(
-                make_episode_row(1, split="test"),
+                row,
                 scripted_actions=actions,
             )
         )
         payload = workflow.last_episode
         assert payload is not None
-        self.assertTrue(payload["won"])
+        self.assertEqual(payload["steps"], len(actions))
         self.assertEqual(payload["terminal_reason"], "all_normal_pellets")
+        self.assertTrue(payload["won"])
         self.assertEqual(payload["normal_pellets_remaining"], 0)
-        self.assertEqual(payload["power_pellets_remaining"], 2)
-        self.assertAlmostEqual(payload["pellet_clear_rate"], 194 / 196)
+        audit_trajectory(payload)
 
-    def test_nearest_pellet_shaping_telescopes_over_full_oracle(self) -> None:
-        actions = oracle_actions()
+    def test_nearest_pellet_shaping_audits_over_edward_baseline(self) -> None:
+        actions = successful_planner_baseline_actions()
         workflow = PacmanImageOnlyWorkflow()
         asyncio.run(
             workflow.run(
-                make_episode_row(1, split="test"),
+                make_episode_row(
+                    1,
+                    split="test",
+                    max_steps=STRESS_MAX_STEPS,
+                ),
                 scripted_actions=actions,
                 nearest_pellet_alpha=1.0,
             )
@@ -1420,7 +2184,8 @@ class WorkflowContractTests(unittest.TestCase):
         payload = workflow.last_episode
         assert payload is not None
         trajectory = payload["trajectory"]
-        self.assertEqual(len(trajectory), PRODUCTION_MAX_STEPS)
+        self.assertEqual(len(trajectory), len(actions))
+        self.assertEqual(payload["terminal_reason"], "all_normal_pellets")
         self.assertTrue(payload["won"])
         self.assertTrue(
             all(
@@ -1429,17 +2194,12 @@ class WorkflowContractTests(unittest.TestCase):
                 for step in trajectory
             )
         )
-        progress_total = sum(
-            step["nearest_pellet_progress_reward"] for step in trajectory
-        )
-        self.assertEqual(
-            progress_total,
-            trajectory[0]["nearest_pellet_distance_before"]
-            - trajectory[-1]["nearest_pellet_distance_after"],
-        )
-        self.assertEqual(
-            trajectory[-1]["nearest_pellet_distance_after"], 0
-        )
+        for step in trajectory:
+            self.assertEqual(
+                step["nearest_pellet_progress_reward"],
+                step["nearest_pellet_distance_before"]
+                - step["nearest_pellet_distance_after"],
+            )
         audit_trajectory(payload)
 
     def test_cancellation_closes_worker_and_removes_runtime(self) -> None:
@@ -1506,6 +2266,7 @@ class TrainerGenerationContractTests(unittest.TestCase):
     def _config() -> SimpleNamespace:
         return SimpleNamespace(
             enable_thinking=False,
+            reward_objective_contract="episode_return_group_v1",
             image_prompt_style="live_static_v2",
             tokenizer_path="test-tokenizer",
             legal_action_mask=False,
@@ -1517,6 +2278,8 @@ class TrainerGenerationContractTests(unittest.TestCase):
             action_token_choice=True,
             completion_api="chat",
             parse_failure_penalty=-50,
+            contract_violation_return=-1.0,
+            safety_refusal_penalty=25.0,
             reward_mode="sparse",
             route_shaping_scale=1.0,
             safe_progress_alpha=1.0,
@@ -1546,7 +2309,9 @@ class TrainerGenerationContractTests(unittest.TestCase):
         )
 
         training = _build_workflow_kwargs(config, train_generation)
-        evaluation = _build_workflow_kwargs(config, eval_generation)
+        evaluation = _build_workflow_kwargs(
+            config, eval_generation, training=False
+        )
 
         self.assertEqual(training["temperature"], 0.7)
         self.assertEqual(evaluation["temperature"], 0.0)
@@ -1558,6 +2323,17 @@ class TrainerGenerationContractTests(unittest.TestCase):
         self.assertEqual(evaluation["image_prompt_style"], "live_static_v2")
         self.assertIs(training["open_action_mask"], True)
         self.assertIs(evaluation["open_action_mask"], True)
+        self.assertEqual(
+            training["reward_objective_contract"],
+            "episode_return_group_v1",
+        )
+        self.assertEqual(
+            evaluation["reward_objective_contract"], "evaluation_only_v1"
+        )
+        self.assertEqual(training["safety_refusal_penalty"], 25.0)
+        self.assertEqual(evaluation["safety_refusal_penalty"], 25.0)
+        self.assertEqual(training["contract_violation_return"], -1.0)
+        self.assertEqual(evaluation["contract_violation_return"], -1.0)
         self.assertIs(
             training["nearest_pellet_scale_by_cleared_ratio"],
             True,
@@ -1736,12 +2512,50 @@ class TrainerGenerationContractTests(unittest.TestCase):
             / "train"
             / "run_level1_training.sh"
         ).read_text(encoding="utf-8")
-        self.assertIn('AREAL_ROOT="${AREAL_ROOT:-${OWNER_ROOT}/xinglu/AReaL}"', launcher)
+        self.assertIn(
+            'AREAL_ROOT="${AREAL_ROOT:-${WORKSPACE_ROOT}/AReaL}"', launcher
+        )
+        self.assertIn(
+            'MAAPACMAN_PACMAN_PYTHON_ROOT:-${WORKSPACE_ROOT}/pacman-python',
+            launcher,
+        )
         self.assertIn(
             'export PYTHONPATH="${AREAL_ROOT}:${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"',
             launcher,
         )
-        self.assertIn("AReaL import escaped official checkout", launcher)
+        self.assertIn("AReaL import escaped selected checkout", launcher)
+
+    def test_training_launcher_defaults_to_current_v3_gate_and_chunks_logps(self) -> None:
+        launcher = (
+            Path(__file__).parents[1]
+            / "scripts"
+            / "level1"
+            / "train"
+            / "run_level1_training.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "configs/level1/train/level1_edward_step512_2update_group12_8gpu.yaml",
+            launcher,
+        )
+        self.assertNotIn(
+            "configs/level1/archive/level1_image_overfit_4epoch_group12_8gpu.yaml",
+            launcher,
+        )
+        self.assertIn('TRAIN_EPISODES="${TRAIN_EPISODES:-4}"', launcher)
+        self.assertIn('DATASET_MAX_STEPS="${DATASET_MAX_STEPS:-512}"', launcher)
+        self.assertIn(
+            'DATASET_OUTPUT_ROOT="${DATASET_OUTPUT_ROOT:-${ARTIFACT_ROOT}/dataset}"',
+            launcher,
+        )
+        self.assertIn(
+            'MAAPACMAN_LOGP_RPC_CHUNK_SIZE="${MAAPACMAN_LOGP_RPC_CHUNK_SIZE:-${ACTOR_DP_SIZE}}"',
+            launcher,
+        )
+        self.assertIn("export MAAPACMAN_LOGP_RPC_CHUNK_SIZE", launcher)
+        self.assertIn(
+            'echo "logp_rpc_chunk_size=${MAAPACMAN_LOGP_RPC_CHUNK_SIZE}"',
+            launcher,
+        )
 
     def test_official_areal_single_step_smoke_contract(self) -> None:
         config = (

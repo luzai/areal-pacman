@@ -21,7 +21,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--api-key", default=os.getenv("OPENAI_API_KEY", "EMPTY"))
     parser.add_argument("--episodes", type=int, default=4)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--max-steps", type=int, default=287)
+    parser.add_argument("--max-steps", type=int, default=256)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--max-completion-tokens", type=int, default=3)

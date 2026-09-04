@@ -1,6 +1,8 @@
 """Backward-compatible imports for production Level-1 prompts."""
 
 from .level1.prompts import (
+    EDWARD_OPTION_CODE_V1_SYSTEM_PROMPT,
+    EDWARD_OBJECTIVE_V1_SYSTEM_PROMPT,
     LIVE_STATE_V3_SYSTEM_PROMPT,
     LIVE_STATE_V3_USER_INSTRUCTION,
     LIVE_STATIC_V2_SYSTEM_PROMPT,
@@ -27,6 +29,8 @@ from .level1.prompts import (
 )
 
 __all__ = [
+    "EDWARD_OPTION_CODE_V1_SYSTEM_PROMPT",
+    "EDWARD_OBJECTIVE_V1_SYSTEM_PROMPT",
     "LIVE_STATE_V3_SYSTEM_PROMPT",
     "LIVE_STATE_V3_USER_INSTRUCTION",
     "LIVE_STATIC_V2_SYSTEM_PROMPT",

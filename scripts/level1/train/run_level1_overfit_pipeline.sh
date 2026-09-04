@@ -24,7 +24,10 @@ fi
 mkdir -p "${ARTIFACT_ROOT}"
 cd "${REPO_ROOT}"
 
-python scripts/level1/dataset/prepare_level1_dataset.py --write-hf
+echo "This archived v1 overfit pipeline is incompatible with the API-v3 dataset contract." >&2
+echo "Use scripts/level1/train/run_level1_training.sh with an active ghostdoor-v3 config." >&2
+exit 2
+
 python train_areal.py --config configs/level1/archive/level1_image_overfit_2epoch.yaml --dry-run
 cp configs/level1/archive/level1_image_overfit_2epoch.yaml "${ARTIFACT_ROOT}/config.resolved.yaml"
 python scripts/level1/dataset/write_level1_manifest.py \

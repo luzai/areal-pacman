@@ -24,6 +24,14 @@ def _yaml_scalar(text: str, key: str) -> str:
     return match.group(1).strip().strip('"\'')
 
 
+def _config_override(args: list[str], key: str) -> str | None:
+    """Return the final exact-key CLI override, matching AReaL precedence."""
+
+    prefix = f"{key}="
+    matches = [argument[len(prefix) :] for argument in args if argument.startswith(prefix)]
+    return matches[-1] if matches else None
+
+
 def _backend_degree(backend: str) -> int:
     match = re.search(r":d(\d+)p\d+t\d+$", backend)
     if match is None:
@@ -35,26 +43,82 @@ def _validate_reward_objective_contract(config) -> None:
     contract = config.reward_objective_contract
     if contract == "legacy":
         return
-    if contract != "step_local_raw_v1":
+    if contract not in {
+        "step_local_raw_v1",
+        "option_return_raw_v1",
+        "episode_return_group_v1",
+    }:
         raise ValueError(f"unsupported reward_objective_contract: {contract}")
+    if (
+        contract in {"option_return_raw_v1", "episode_return_group_v1"}
+        and not getattr(config, "edward_options", False)
+    ):
+        raise ValueError(f"{contract} requires edward_options=true")
     if not config.workflow.endswith(".PacmanNativeVisionWorkflow"):
         raise ValueError(
-            "step_local_raw_v1 requires PacmanNativeVisionWorkflow"
+            f"{contract} requires PacmanNativeVisionWorkflow"
         )
-    if config.actor.reward_norm is not None:
+    if contract in {"option_return_raw_v1", "episode_return_group_v1"}:
+        if getattr(config.actor, "use_sapo_loss", False) or getattr(
+            config.actor, "use_cispo_loss", False
+        ):
+            raise ValueError(
+                f"{contract} requires the PPO/GRPO surrogate; SAPO and CISPO "
+                "do not support equal-episode reduction"
+            )
+        if int(getattr(config.actor, "ppo_n_minibatches", 1)) != 1:
+            raise ValueError(
+                f"{contract} requires actor.ppo_n_minibatches=1 so one "
+                "optimizer update averages all complete episodes together"
+            )
+    if contract == "episode_return_group_v1":
+        reward_norm = config.actor.reward_norm
+        if reward_norm is None:
+            raise ValueError(
+                "episode_return_group_v1 requires actor.reward_norm"
+            )
+        n_samples = int(config.gconfig.n_samples)
+        if n_samples != 12:
+            raise ValueError(
+                "episode_return_group_v1 requires exactly 12 complete episodes "
+                "per initial maze state"
+            )
+        if (
+            reward_norm.mean_level != "group"
+            or reward_norm.std_level != "group"
+            or int(reward_norm.group_size) != n_samples
+            or bool(reward_norm.mean_leave1out)
+        ):
+            raise ValueError(
+                "episode_return_group_v1 requires group mean/std normalization, "
+                "group_size=gconfig.n_samples, and mean_leave1out=false"
+            )
+        if getattr(config.actor, "overlong_reward_penalty", False):
+            raise ValueError(
+                "episode_return_group_v1 does not support per-completion "
+                "overlong reward penalties"
+            )
+        if getattr(config, "critic", None) is not None or getattr(
+            config, "teacher", None
+        ) is not None:
+            raise ValueError(
+                "episode_return_group_v1 requires critic=null and teacher=null"
+            )
+    elif config.actor.reward_norm is not None:
         raise ValueError(
-            "step_local_raw_v1 requires actor.reward_norm=null; Pacman emits "
-            "one dense reward per environment decision, while trajectory "
-            "group normalization changes the sign of state-local action rewards"
+            f"{contract} requires actor.reward_norm=null; normalization across "
+            "unrelated maze states changes the sign of state-local returns"
         )
     if config.actor.adv_norm is not None:
         raise ValueError(
-            "step_local_raw_v1 requires actor.adv_norm=null; batch centering "
-            "creates a global action-token baseline across unrelated maze states"
+            f"{contract} requires actor.adv_norm=null; batch centering creates "
+            "a global action-token baseline across unrelated maze states"
         )
 
 
-def _build_workflow_kwargs(config, generation_config) -> dict[str, object]:
+def _build_workflow_kwargs(
+    config, generation_config, *, training: bool = True
+) -> dict[str, object]:
     kwargs = dict(
         temperature=generation_config.temperature,
         top_p=generation_config.top_p,
@@ -65,13 +129,23 @@ def _build_workflow_kwargs(config, generation_config) -> dict[str, object]:
         image_prompt_style=config.image_prompt_style,
         legal_action_mask=config.legal_action_mask,
         open_action_mask=config.open_action_mask,
+        edward_options=getattr(config, "edward_options", False),
+        objective_encoding=getattr(config, "objective_encoding", "legacy"),
+        reward_objective_contract=(
+            getattr(config, "reward_objective_contract", "legacy")
+            if training
+            else "evaluation_only_v1"
+        ),
         guided_action_choice=config.guided_action_choice,
         legal_action_choice=config.legal_action_choice,
         non_stay_legal_action_choice=config.non_stay_legal_action_choice,
         non_backtracking_legal_action_choice=config.non_backtracking_legal_action_choice,
         action_token_choice=config.action_token_choice,
         completion_api=config.completion_api,
-        parse_failure_penalty=config.parse_failure_penalty,
+        parse_failure_penalty=getattr(config, "parse_failure_penalty", -50),
+        contract_violation_return=getattr(
+            config, "contract_violation_return", -1.0
+        ),
         reward_mode=config.reward_mode,
         route_shaping_scale=config.route_shaping_scale,
         safe_progress_alpha=config.safe_progress_alpha,
@@ -93,7 +167,18 @@ def _build_workflow_kwargs(config, generation_config) -> dict[str, object]:
             "power_pellet_reward",
             0.0,
         ),
+        ghost_reward=getattr(config, "ghost_reward", 0.0),
+        fruit_reward=getattr(config, "fruit_reward", 0.0),
+        reward_recipe_version=getattr(
+            config,
+            "reward_recipe_version",
+            "maapacman-level1-event-reward-v3",
+        ),
+        death_penalty=getattr(config, "death_penalty", 0.0),
         completion_reward=getattr(config, "completion_reward", 0.0),
+        safety_refusal_penalty=getattr(
+            config, "safety_refusal_penalty", 0.0
+        ),
         nearest_pellet_alpha=config.nearest_pellet_alpha,
         nearest_pellet_remaining_ratio_threshold=(
             getattr(
@@ -131,10 +216,18 @@ def _build_workflow_kwargs(config, generation_config) -> dict[str, object]:
 
 
 def _production_dry_run(
-    config_path: Path, *, validate_areal: bool = False
+    config_path: Path,
+    *,
+    validate_areal: bool = False,
+    config_args: list[str] | None = None,
 ) -> bool:
     text = config_path.read_text(encoding="utf-8")
-    if "recipe_version: maapacman-level1-v1" not in text:
+    recipe_version = _yaml_scalar(text, "recipe_version")
+    if recipe_version not in {
+        "maapacman-level1-v1",
+        "maapacman-level1-ghost-v2",
+        "maapacman-level1-ghostdoor-v3",
+    }:
         return False
     from areal_pacman.level1.level1_dataset import validate_episode_row
     from maapacman.env import PygamePacmanEnv
@@ -150,9 +243,24 @@ def _production_dry_run(
     }:
         raise ValueError("production config must use areal_pacman.workflow")
 
-    dataset_matches = re.findall(r"(?m)^\s+path:\s*([^#\r\n]+)", text)
-    if len(dataset_matches) < 2:
-        raise ValueError("config must declare train and validation dataset paths")
+    effective_args = config_args or ["--config", str(config_path)]
+    dataset_overrides = [
+        _config_override(effective_args, "train_dataset.path"),
+        _config_override(effective_args, "valid_dataset.path"),
+    ]
+    override_present = [value is not None for value in dataset_overrides]
+    if any(override_present) and not all(override_present):
+        raise ValueError(
+            "train_dataset.path and valid_dataset.path must be overridden together"
+        )
+    if all(override_present):
+        if any(not value for value in dataset_overrides):
+            raise ValueError("dataset path overrides must be non-empty")
+        dataset_matches = [str(path) for path in dataset_overrides]
+    else:
+        dataset_matches = re.findall(r"(?m)^\s+path:\s*([^#\r\n]+)", text)
+        if len(dataset_matches) < 2:
+            raise ValueError("config must declare train and validation dataset paths")
     rows = 0
     for raw_path in dataset_matches[-2:]:
         dataset_path = Path(raw_path.strip().strip('"\''))
@@ -188,9 +296,7 @@ def _production_dry_run(
         from areal.api.cli_args import load_expr_config
         from areal_pacman.synthetic.configs import PacmanAgentConfig
 
-        config, _ = load_expr_config(
-            ["--config", str(config_path)], PacmanAgentConfig
-        )
+        config, _ = load_expr_config(effective_args, PacmanAgentConfig)
         _validate_reward_objective_contract(config)
         gpu_count = config.cluster.n_gpus_per_node
         if gpu_count not in (4, 6, 8):
@@ -213,6 +319,33 @@ def _production_dry_run(
             raise ValueError("train batch size must divide evenly across actor workers")
         if config.enable_thinking is not False:
             raise ValueError("production image-only config must disable thinking")
+        if recipe_version == "maapacman-level1-ghostdoor-v3":
+            if not config.edward_options:
+                raise ValueError("Edward v3 recipe must enable edward_options")
+            if config.open_action_mask or config.action_token_choice:
+                raise ValueError(
+                    "Edward v3 replaces atomic action-token constraints"
+                )
+            if config.objective_encoding != "edward-option-code-v1":
+                raise ValueError(
+                    "Edward v3 requires objective_encoding=edward-option-code-v1"
+                )
+            if (
+                config.gconfig.min_new_tokens != 1
+                or config.gconfig.max_new_tokens != 1
+                or config.eval_gconfig.min_new_tokens != 1
+                or config.eval_gconfig.max_new_tokens != 1
+            ):
+                raise ValueError(
+                    "Edward option-code train and evaluation generation must "
+                    "use exactly one new token"
+                )
+            if config.gconfig.top_p != 1.0:
+                raise ValueError("Edward objective training requires top_p=1.0")
+            if config.actor.temperature != config.gconfig.temperature:
+                raise ValueError(
+                    "Edward rollout and actor temperatures must match"
+                )
         if config.validation_contract == "greedy1":
             if not config.eval_gconfig.greedy:
                 raise ValueError("greedy1 validation must use greedy decoding")
@@ -283,6 +416,10 @@ def _production_dry_run(
                     "positive-KL level-1 training requires bfloat16 reference "
                     "parameter storage for the accepted split 4+4/3+3 topology"
                 )
+            if config.ref.temperature != config.actor.temperature:
+                raise ValueError(
+                    "reference and actor temperatures must match"
+                )
             if config.enable_offload != config.ref.offload:
                 raise ValueError(
                     "positive-KL reference offload requires enable_offload and "
@@ -343,7 +480,9 @@ def main(args: list[str]) -> None:
             raise ValueError("--config requires a path")
         config_path = Path(args[index + 1])
     if dry_run and config_path is not None and _production_dry_run(
-        config_path, validate_areal=validate_areal
+        config_path,
+        validate_areal=validate_areal,
+        config_args=args,
     ):
         return
 
@@ -360,7 +499,7 @@ def main(args: list[str]) -> None:
         dataset_path = Path(config.train_dataset.path)
         dataset = load_from_disk(str(dataset_path))
         workflow_cls = _load_workflow(config.workflow)
-        print(f"dry_run=ok")
+        print("dry_run=ok")
         print(f"workflow={workflow_cls.__module__}.{workflow_cls.__name__}")
         print(f"train_dataset={dataset_path}")
         print(f"train_rows={len(dataset)}")
@@ -383,8 +522,12 @@ def main(args: list[str]) -> None:
         tokenizer=tokenizer,
     )
 
-    workflow_kwargs = _build_workflow_kwargs(config, config.gconfig)
-    eval_workflow_kwargs = _build_workflow_kwargs(config, config.eval_gconfig)
+    workflow_kwargs = _build_workflow_kwargs(
+        config, config.gconfig, training=True
+    )
+    eval_workflow_kwargs = _build_workflow_kwargs(
+        config, config.eval_gconfig, training=False
+    )
 
     with PPOTrainer(config, train_dataset=train_dataset, valid_dataset=valid_dataset) as trainer:
         trainer.train(
