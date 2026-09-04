@@ -2586,7 +2586,7 @@ class TrainerGenerationContractTests(unittest.TestCase):
             launcher,
         )
         self.assertIn('MODEL_PATH="${CURRICULUM1_CHECKPOINT}"', launcher)
-        self.assertIn('model.safetensors.index.json', launcher)
+        self.assertIn('validate_model_checkpoint.py', launcher)
         self.assertIn(
             'DATASET_OUTPUT_ROOT="${DATASET_OUTPUT_ROOT:-${ARTIFACT_ROOT}/dataset}"',
             launcher,

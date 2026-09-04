@@ -4,7 +4,7 @@ Status: bundled-source API-v3 contract synchronized with the current code;
 dated training and evaluation evidence is retained below as history
 Environment provider: bundled `maapacman.PygamePacmanEnv` API `3.0`
 Environment ID: `pacman-python-level1-ghostdoor-v3`
-Dataset contract: `maapacman-level1-dataset-v3`
+Dataset contract: `maapacman-level1-dataset-v4`
 Production dataset default: `256` actions
 Supported episode caps: `32`, `256`, `512`, and `2000` actions
 Reusable `PygamePacmanEnvConfig` default: `512` actions, not the production
@@ -207,8 +207,9 @@ One abbreviated row constructs one complete original-game episode:
 {
   "id": "level1-seed0-train-0001",
   "split": "train",
-  "dataset_contract_version": "maapacman-level1-dataset-v3",
+  "dataset_contract_version": "maapacman-level1-dataset-v4",
   "env": {
+    "ghost_mode": "normal",
     "name": "pacman-python-level1-ghostdoor-v3",
     "api_version": "3.0",
     "backend": "original-pygame",
@@ -225,8 +226,13 @@ One abbreviated row constructs one complete original-game episode:
 Do not reuse historical rows labeled `maapacman-level1-v1` or API `1.0`
 without checking their `env_id`: those rows describe the older private AReaL
 environment, not the current API-v3 original-pygame wrapper. Current rows must
-use dataset contract `maapacman-level1-dataset-v3`, environment API `3.0`, and
+use dataset contract `maapacman-level1-dataset-v4`, environment API `3.0`, and
 environment ID `pacman-python-level1-ghostdoor-v3`.
+
+Dataset v4 requires `env.ghost_mode`. `disabled` records expose no ghosts;
+`normal` records expose the four live ghosts. The mode is part of the ruleset
+revision and must match the selected training recipe, runtime state, audit
+anchor, and trajectory evidence.
 
 Production level-1 dataset validation accepts only `env.max_steps` values
 `32`, `256`, `512`, and `2000`; row generation defaults to `256`. The selected
@@ -371,7 +377,7 @@ merged as if they used the same environment.
 
 The production workflow constructs `PygamePacmanEnv` directly and validates
 API `3.0`, environment ID `pacman-python-level1-ghostdoor-v3`, and dataset
-contract `maapacman-level1-dataset-v3`. It takes the episode cap from the
+contract `maapacman-level1-dataset-v4`. It takes the episode cap from the
 validated row; row generation defaults to `256`, while the exact supported set
 is `32`, `256`, `512`, and `2000`. The environment class's reusable `512`
 default does not override that row contract.

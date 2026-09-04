@@ -21,9 +21,9 @@ from maapacman.planner import EdwardPlanner
 ENV_NAME = "pacman-python-level1-ghostdoor-v3"
 ENV_API_VERSION = "3.0"
 ENV_BACKEND = "original-pygame"
-DATASET_CONTRACT_VERSION = "maapacman-level1-dataset-v3"
+DATASET_CONTRACT_VERSION = "maapacman-level1-dataset-v4"
 PREFIX_AUDIT_CONTRACT_VERSION = "planner-preterminal-prefix-audit-v1"
-# Production horizons are selected by each immutable dataset row.  The v3
+# Production horizons are selected by each immutable dataset row.  The v4
 # contract deliberately has no implicit 287-step episode assumption.
 PRODUCTION_MAX_STEPS = 256
 SHORT_HORIZON_MAX_STEPS = 32
@@ -50,7 +50,7 @@ def _canonical_sha256(value: Any) -> str:
 
 @lru_cache(maxsize=1)
 def repository_revisions() -> dict[str, dict[str, Any]]:
-    """Return the three-repository provenance required by each v3 record."""
+    """Return the three-repository provenance required by each v4 record."""
 
     recipe_root = Path(__file__).resolve().parents[2]
     workspace_root = recipe_root.parent
@@ -279,7 +279,7 @@ def validate_episode_row(row: Mapping[str, Any]) -> None:
         if (
             anchor.get("audit_role") != "episode_spec_audit_anchor"
             or anchor.get("audit_contract_version")
-            != "maapacman-level1-planner-audit-v3"
+            != "maapacman-level1-planner-audit-v4"
             or anchor.get("dataset_contract_version") != DATASET_CONTRACT_VERSION
             or anchor.get("seed") != seed
             or anchor.get("step") != 1

@@ -15,7 +15,7 @@
 | 源码层                                                        | 作用                                       | 当前配方使用的版本                                                         |
 | ------------------------------------------------------------- | ------------------------------------------ | -------------------------------------------------------------------------- |
 | 本仓库                                                        | `areal_pacman` 配方与内置 `maapacman` 环境 | `release/maapacman-v0.1.0`；运行时记录实际 SHA                             |
-| [luzai/AReaL](https://github.com/luzai/AReaL)                 | 训练、rollout、FSDP 和 checkpoint          | `pacman/open-action-mask` @ `b40314ff84ae9422c9065f76065f880f599a0bb4`     |
+| [luzai/AReaL](https://github.com/luzai/AReaL)                 | 训练、rollout、FSDP 和 checkpoint          | `release/pacman-v0.1.0` @ `a9e45c18094091b36ed4256d34e3e9c79947feca`       |
 | [luzai/pacman-python](https://github.com/luzai/pacman-python) | 游戏规则、资源和 pygame renderer           | `release/maapacman-v0.1.0` 中的 `cbb97115e407abc86a44adc82a1b8f360b3e8da0` |
 
 复现时以固定 SHA 为准，不能仅依赖会继续更新的分支名。更新依赖 revision 后，需要同步运行 manifest 并重新验证。`areal_pacman.synthetic.*` 保留用于历史合成迷宫实验。
@@ -29,9 +29,9 @@ export WORKSPACE_ROOT=/path/to/pacman-release
 mkdir -p "$WORKSPACE_ROOT"
 cd "$WORKSPACE_ROOT"
 
-git clone --branch pacman/open-action-mask --single-branch \
+git clone --branch release/pacman-v0.1.0 --single-branch \
   https://github.com/luzai/AReaL.git
-git -C AReaL checkout b40314ff84ae9422c9065f76065f880f599a0bb4
+git -C AReaL checkout a9e45c18094091b36ed4256d34e3e9c79947feca
 
 git clone --branch release/maapacman-v0.1.0 --single-branch \
   https://github.com/luzai/areal-pacman.git
@@ -142,7 +142,7 @@ CUDA_VISIBLE_DEVICES='' "$PYTHON" -m pytest -q
 C1 学导航与吃豆，C2 加入避敌、能量豆和通关。地图与初始位置不变，seeds 不是不同地图；这些是发布默认值，不代表已验证最优超参数。
 独立 ghost 开关不关闭水果、不改变奖励事件定义；C1 的能量豆仍得分，但没有幽灵易受攻击计时。
 启动器从 YAML 读取数据规模与步数；环境模式同时写入 dataset、run manifest 和每个原子帧，规则 hash 按模式区分。配置与数据不匹配时拒绝训练。
-旧数据没有 `ghost_mode`，须用当前固定源码重新生成；不要手工补字段或复用旧规则 hash。
+当前 dataset、split bundle 与 planner audit 的产物合约均为 v4。旧数据没有 `ghost_mode`，须用当前固定源码重新生成；不要手工补字段或复用旧规则 hash。
 
 动作协议为 Edward option code，使用 `live_state_v3` 输入、`temperature=0.7`、`top_p=1.0` 和 `episode_return_group_v1` 目标。当前 YAML 未启用定期验证 rollout。奖励细节以 [rewards.py](areal_pacman/level1/rewards.py) 和配置为准。
 
@@ -186,7 +186,7 @@ CONFIG=configs/level1/train/curriculum2.yaml \
 bash scripts/level1/train/run_level1_training.sh
 ```
 
-`CURRICULUM1_CHECKPOINT` 必须包含模型权重、配置和所需 tokenizer/processor 文件；不能直接指向训练产物根目录或不完整的恢复目录。需要补齐冻结视觉权重时，参见[完整 VLM checkpoint 工具](scripts/level1/report/build_complete_vlm_checkpoint.py)。
+`CURRICULUM1_CHECKPOINT` 必须包含模型权重、配置和所需 tokenizer/processor 文件；不能直接指向训练产物根目录或不完整的恢复目录。启动器会离线加载这些元数据，并核验权重 index 引用的每个分片都存在且非空。需要补齐冻结视觉权重时，参见[完整 VLM checkpoint 工具](scripts/level1/report/build_complete_vlm_checkpoint.py)。
 
 Curriculum 2 继承模型权重并重新初始化 optimizer/scheduler。两份配置首次运行均为 `recover.mode: disabled`。
 注意：在当前 AReaL 中，`disabled` 同时禁止保存恢复状态；中断后才改为 `auto`，无法补回之前未保存的 optimizer/dataloader 状态。

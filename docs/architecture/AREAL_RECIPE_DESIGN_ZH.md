@@ -4,7 +4,7 @@
 评测证据
 环境提供方：本仓库内置的 `maapacman.PygamePacmanEnv` API `3.0`
 环境 ID：`pacman-python-level1-ghostdoor-v3`
-Dataset 合约：`maapacman-level1-dataset-v3`
+Dataset 合约：`maapacman-level1-dataset-v4`
 生产 dataset 默认上限：`256` 个 action
 支持的 episode 上限：`32`、`256`、`512`、`2000` 个 action
 通用 `PygamePacmanEnvConfig` 默认值：`512` 个 action，不是生产 dataset 默认值
@@ -197,8 +197,9 @@ if env.config.max_steps not in {32, 256, 512, 2000}:
 {
   "id": "level1-seed0-train-0001",
   "split": "train",
-  "dataset_contract_version": "maapacman-level1-dataset-v3",
+  "dataset_contract_version": "maapacman-level1-dataset-v4",
   "env": {
+    "ghost_mode": "normal",
     "name": "pacman-python-level1-ghostdoor-v3",
     "api_version": "3.0",
     "backend": "original-pygame",
@@ -215,8 +216,12 @@ if env.config.max_steps not in {32, 256, 512, 2000}:
 不要直接复用标记为 `maapacman-level1-v1` 或 API `1.0` 的历史数据行，必须先
 检查其 `env_id`：这些行描述的是旧版 AReaL 私有环境，不是当前原版 pygame
 API-v3 wrapper。当前数据行必须使用 dataset 合约
-`maapacman-level1-dataset-v3`、环境 API `3.0` 和环境 ID
+`maapacman-level1-dataset-v4`、环境 API `3.0` 和环境 ID
 `pacman-python-level1-ghostdoor-v3`。
+
+Dataset v4 要求 `env.ghost_mode`。`disabled` 数据不暴露幽灵，`normal` 数据
+暴露四只正常幽灵。该模式属于 ruleset revision，必须与所选训练 recipe、运行时
+状态、audit anchor 和 trajectory evidence 一致。
 
 生产 Level 1 dataset 验证只接受 `env.max_steps` 为 `32`、`256`、`512` 或
 `2000`；数据行生成默认采用 `256`。所选上限属于不可变数据行合约，因此不兼容
@@ -347,7 +352,7 @@ terminated, truncated and terminal_reason
 
 生产 workflow 直接构造 `PygamePacmanEnv`，并强制验证
 API `3.0`、环境 ID `pacman-python-level1-ghostdoor-v3` 和 dataset 合约
-`maapacman-level1-dataset-v3`。episode 上限取自已经验证的数据行；数据行生成默认
+`maapacman-level1-dataset-v4`。episode 上限取自已经验证的数据行；数据行生成默认
 采用 `256`，严格支持 `32`、`256`、`512`、`2000`。环境类通用的 `512` 默认值
 不会覆盖数据行合约。
 

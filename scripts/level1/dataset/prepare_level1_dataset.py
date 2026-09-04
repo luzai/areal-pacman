@@ -43,7 +43,7 @@ except ModuleNotFoundError as exc:
     )
 
 
-DATASET_PREPARATION_CONTRACT_VERSION = "maapacman-level1-split-bundle-v3"
+DATASET_PREPARATION_CONTRACT_VERSION = "maapacman-level1-split-bundle-v4"
 DATASET_ROLES = ("train", "validation")
 
 

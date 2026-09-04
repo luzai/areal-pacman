@@ -1,4 +1,4 @@
-"""Generate deterministic planner-baseline and option-candidate v3 audits."""
+"""Generate deterministic API-v3 planner and option-candidate audits."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ from maapacman.env.ghost_modes import validate_ghost_mode, validate_ghost_state
 from maapacman.env.pygame_environment import ruleset_revision
 
 
-AUDIT_CONTRACT_VERSION = "maapacman-level1-planner-audit-v3"
+AUDIT_CONTRACT_VERSION = "maapacman-level1-planner-audit-v4"
 AUDIT_DATASET_ROLES = (
     "deterministic_planner_baseline",
     "option_candidate_audit",

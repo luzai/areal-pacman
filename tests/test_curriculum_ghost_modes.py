@@ -25,6 +25,20 @@ from scripts.level1.dataset.prepare_level1_v3_audits import audit_planner_record
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_ghost_mode_schema_uses_new_dataset_contract() -> None:
+    from areal_pacman.level1.level1_dataset import DATASET_CONTRACT_VERSION
+    from scripts.level1.dataset.prepare_level1_dataset import (
+        DATASET_PREPARATION_CONTRACT_VERSION,
+    )
+    from scripts.level1.dataset.prepare_level1_v3_audits import (
+        AUDIT_CONTRACT_VERSION,
+    )
+
+    assert DATASET_CONTRACT_VERSION == "maapacman-level1-dataset-v4"
+    assert DATASET_PREPARATION_CONTRACT_VERSION == "maapacman-level1-split-bundle-v4"
+    assert AUDIT_CONTRACT_VERSION == "maapacman-level1-planner-audit-v4"
+
+
 @pytest.mark.parametrize(
     "relative",
     [

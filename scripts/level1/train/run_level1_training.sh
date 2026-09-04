@@ -87,20 +87,18 @@ if [[ "${ACTOR_PATH_SPEC}" == '${oc.env:CURRICULUM1_CHECKPOINT}' ]]; then
 else
   MODEL_PATH="${MODEL_PATH:-${OWNER_ROOT}/models/Qwen3.5-9B}"
 fi
-if [[ ! -f "${MODEL_PATH}/config.json" ]] \
-  || [[ ! -f "${MODEL_PATH}/model.safetensors" \
-    && ! -f "${MODEL_PATH}/model.safetensors.index.json" \
-    && ! -f "${MODEL_PATH}/pytorch_model.bin" \
-    && ! -f "${MODEL_PATH}/pytorch_model.bin.index.json" ]]; then
+if ! "${PYTHON}" "${REPO_ROOT}/scripts/level1/train/validate_model_checkpoint.py" \
+  "${MODEL_PATH}"; then
   echo "Model checkpoint is incomplete: ${MODEL_PATH}" >&2
   exit 2
 fi
+MODEL_PATH="$(cd "${MODEL_PATH}" && pwd -P)"
 if [[ ! -f "${AREAL_ROOT}/areal/__init__.py" ]]; then
   echo "Selected AReaL checkout is incomplete: ${AREAL_ROOT}" >&2
   exit 2
 fi
 if [[ -e "${DATASET_OUTPUT_ROOT}" ]]; then
-  echo "Refusing to overwrite immutable v3 dataset: ${DATASET_OUTPUT_ROOT}" >&2
+  echo "Refusing to overwrite immutable v4 dataset: ${DATASET_OUTPUT_ROOT}" >&2
   exit 2
 fi
 

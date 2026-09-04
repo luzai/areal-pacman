@@ -37,7 +37,8 @@ bash scripts/level1/train/run_level1_training.sh --smoke-updates 2
 
 For Curriculum 2, select `configs/level1/train/curriculum2.yaml` and export
 `CURRICULUM1_CHECKPOINT` as the complete loadable model checkpoint produced by
-Curriculum 1.
+Curriculum 1. The launcher loads its config, tokenizer, and processor offline
+and verifies every weight shard named by an index before creating run output.
 
 The launcher reads seed counts and horizon from the selected YAML: C1 has
 disabled ghosts, 32 steps and 8/2 seeds; C2 has normal ghosts, 256 steps and
