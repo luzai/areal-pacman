@@ -4,13 +4,21 @@ trajectory_dir: ${artifact_root}/trajectories
 experiment_name: pacman-agentic-rl
 trial_name: curriculum2-from-curriculum1-step256-100update-group12
 
+environment:
+  ghost_mode: normal
+  max_steps: 256
+dataset_generation:
+  train_episodes: 40
+  validation_episodes: 8
+  seed: 100
+
 seed: 1
 # Curriculum 2: the complete follow-up initialized from Curriculum 1.
 # CURRICULUM1_CHECKPOINT must name a complete model checkpoint. This starts a
 # new optimizer/scheduler lineage; recover.mode handles interruption recovery
 # only inside this Curriculum 2 run.
-# - 8 train rows / batch size 4 = 2 updates per epoch
-# - 50 epochs = 100 total updates
+# - moving ghosts; 40 train rows / batch size 4 = 10 updates per epoch
+# - 10 epochs = 100 total updates
 # - both train and validation dataset rows must use max_steps=256
 # - no scheduled validation rollouts
 # - training samples at temperature=0.7, top_p=1.0
@@ -28,7 +36,7 @@ enable_thinking: false
 validation_contract: sampled12_uniform_shaped
 reward_objective_contract: episode_return_group_v1
 image_prompt_style: live_state_v3
-total_train_epochs: 50
+total_train_epochs: 10
 total_train_steps: null
 tokenizer_path: ${actor.path}
 workflow: areal_pacman.workflow.PacmanNativeVisionWorkflow
@@ -46,7 +54,7 @@ safety_refusal_penalty: 25.0
 step_penalty: 0.05
 step_penalty_cleared_ratio_scale: 0.0
 wall_penalty: 0.5
-nearest_pellet_alpha: 0.1
+nearest_pellet_alpha: 0.02
 nearest_pellet_remaining_ratio_threshold: 1.0
 nearest_pellet_scale_by_cleared_ratio: true
 nearest_pellet_skip_on_eat: true
@@ -124,7 +132,7 @@ actor:
     max_tokens_per_mb: 1024
   optimizer:
     type: adam_bf16
-    lr: 1.0e-6
+    lr: 5.0e-7
     weight_decay: 0.0
     beta1: 0.9
     beta2: 0.999
@@ -205,7 +213,7 @@ train_dataset:
   shuffle: true
   pin_memory: true
   num_workers: 0
-  path: artifacts/datasets/level1_dataset_step256/train_hf
+  path: artifacts/datasets/curriculum2/train_hf
   type: rl
   max_length: 1024
 
@@ -214,7 +222,7 @@ valid_dataset:
   shuffle: false
   pin_memory: true
   num_workers: 0
-  path: artifacts/datasets/level1_dataset_step256/validation_hf
+  path: artifacts/datasets/curriculum2/validation_hf
   type: rl
   max_length: 1024
 
@@ -233,9 +241,8 @@ saver:
   freq_secs: null
 
 recover:
-  # Keep one-step recovery checkpoints so an inference-worker failure during
-  # a long 256-step PPO iteration costs at most the current update.
-  mode: auto
+  # Fresh stage: initialize weights only, without recovering C1 optimizer state.
+  mode: disabled
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}

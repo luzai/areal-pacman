@@ -265,6 +265,8 @@ def validate_env_spec(
         raise RuntimeError("dataset environment ID does not match MaaPacman")
     if requested.get("backend") != "original-pygame":
         raise RuntimeError("production recipe requires original-pygame backend")
+    if requested.get("ghost_mode") != provenance.get("ghost_mode"):
+        raise RuntimeError("ghost_mode does not match dataset row")
     if requested.get("pacman_python_revision") != provenance.get(
         "pacman_python_commit"
     ):
@@ -346,6 +348,13 @@ class PacmanImageOnlyWorkflow:
             )
         validate_episode_row(data)
         requested = data["env"]
+        if options.get("ghost_mode", requested["ghost_mode"]) != requested["ghost_mode"]:
+            raise ValueError("training ghost_mode does not match dataset row")
+        if (
+            options.get("environment_max_steps", requested["max_steps"])
+            != requested["max_steps"]
+        ):
+            raise ValueError("training environment.max_steps does not match dataset row")
         seed = int(requested["seed"])
         state_prefix_actions = list(data.get("state_prefix_actions") or [])
         single_step = data.get("decision_steps") == 1
@@ -356,6 +365,7 @@ class PacmanImageOnlyWorkflow:
         config = PygamePacmanEnvConfig(
             pacman_python_root=options.get("pacman_python_root"),
             level=int(requested["level"]),
+            ghost_mode=requested["ghost_mode"],
             max_steps=int(requested["max_steps"]),
             video_driver=options.get("video_driver", "dummy"),
             audio_driver=options.get("audio_driver", "dummy"),
@@ -1304,6 +1314,7 @@ class PacmanImageOnlyWorkflow:
                 "level": config.level,
                 "seed": seed,
                 "max_steps": config.max_steps,
+                "ghost_mode": config.ghost_mode,
                 "state_prefix_actions": state_prefix_actions,
                 "state_prefix_actions_executed": len(state_prefix_evidence),
                 "state_prefix_evidence": state_prefix_evidence,

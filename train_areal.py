@@ -159,6 +159,8 @@ def _build_workflow_kwargs(
     config, generation_config, *, training: bool = True
 ) -> dict[str, object]:
     kwargs = dict(
+        ghost_mode=config.environment.ghost_mode,
+        environment_max_steps=config.environment.max_steps,
         temperature=generation_config.temperature,
         top_p=generation_config.top_p,
         max_tokens=generation_config.max_tokens,
@@ -300,6 +302,20 @@ def _production_dry_run(
         dataset_matches = re.findall(r"(?m)^\s+path:\s*([^#\r\n]+)", text)
         if len(dataset_matches) < 2:
             raise ValueError("config must declare train and validation dataset paths")
+    from areal_pacman.level1.recipe import EnvironmentConfig, load_recipe_settings
+    from maapacman.env import PygamePacmanEnvConfig
+
+    environment, _ = load_recipe_settings(config_path)
+    environment = EnvironmentConfig(
+        ghost_mode=(
+            _config_override(effective_args, "environment.ghost_mode")
+            or environment.ghost_mode
+        ),
+        max_steps=int(
+            _config_override(effective_args, "environment.max_steps")
+            or environment.max_steps
+        ),
+    )
     rows = 0
     for raw_path in dataset_matches[-2:]:
         dataset_path = Path(raw_path.strip().strip('"\''))
@@ -316,9 +332,14 @@ def _production_dry_run(
         import json
 
         for line in jsonl.read_text(encoding="utf-8").splitlines():
-            validate_episode_row(json.loads(line))
+            row = json.loads(line)
+            validate_episode_row(row)
+            if row["env"]["ghost_mode"] != environment.ghost_mode:
+                raise ValueError("dataset ghost_mode does not match training config")
+            if row["env"]["max_steps"] != environment.max_steps:
+                raise ValueError("dataset max_steps does not match training config")
             rows += 1
-    env = PygamePacmanEnv()
+    env = PygamePacmanEnv(PygamePacmanEnvConfig(ghost_mode=environment.ghost_mode))
     try:
         spec = env.spec
     finally:
@@ -327,6 +348,8 @@ def _production_dry_run(
     print(f"workflow={workflow_cls.__module__}.{workflow_cls.__name__}")
     print(f"config={config_path.resolve()}")
     print(f"dataset_rows={rows}")
+    print(f"ghost_mode={environment.ghost_mode}")
+    print(f"max_steps={environment.max_steps}")
     print(f"total_train_epochs={epochs}")
     print(f"env_api_version={spec.api_version}")
     print(f"level_revision={spec.level_revision}")

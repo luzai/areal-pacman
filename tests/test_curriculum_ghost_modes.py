@@ -1,0 +1,350 @@
+"""Real headless engine and immutable-data checks for both published stages."""
+
+import copy
+import ast
+import hashlib
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+import yaml
+
+from maapacman.env import PygamePacmanEnv, PygamePacmanEnvConfig
+from maapacman.env._pygame_worker import _PygameBridge
+from maapacman.env.ghost_modes import validate_ghost_state
+from maapacman.planner import EdwardPlanner
+from areal_pacman.level1.level1_dataset import make_episode_row, validate_episode_row
+from areal_pacman.level1.recipe import load_recipe_settings
+from scripts.level1.dataset.prepare_level1_dataset import (
+    _prepare_dataset,
+    audit_episode_spec_row,
+)
+from scripts.level1.dataset.prepare_level1_v3_audits import audit_planner_record
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "scripts/level1/report/export_level1_rollout_video.py",
+        "scripts/level1/report/export_level1_ab_demo_video.py",
+        "scripts/level1/evaluate/evaluate_single_step_wall.py",
+    ],
+)
+def test_replay_consumers_forward_recorded_mode(relative):
+    tree = ast.parse((ROOT / relative).read_text(encoding="utf-8"))
+    call = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "PygamePacmanEnvConfig"
+    )
+    for mode in ("disabled", "normal"):
+        recorded = {"level": 1, "max_steps": 32, "ghost_mode": mode}
+        config = eval(
+            compile(ast.Expression(call), relative, "eval"),
+            {
+                "PygamePacmanEnvConfig": PygamePacmanEnvConfig,
+                "episode": recorded,
+                "requested": recorded,
+            },
+        )
+        assert config.ghost_mode == mode
+
+
+def test_prompt_schema_and_instructions_are_identical_between_modes():
+    # Pure prompt renderer: exercise without importing distributed AReaL.
+    tree = ast.parse(
+        (ROOT / "areal_pacman/level1/workflow.py").read_text(encoding="utf-8")
+    )
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_compact_edward_decision_prompt"
+    )
+    namespace = {"json": json, "Mapping": dict}
+    code = "from __future__ import annotations\n" + ast.unparse(function)
+    exec(compile(code, "prompt-schema-test", "exec"), namespace)
+    render = namespace[function.name]
+    constraint = SimpleNamespace(rendered_choices=("0",))
+    prompts = [
+        render({"ghosts": ghosts}, (), constraint)
+        for ghosts in ([], [{"id": 0, "state": "normal", "position": [1, 2]}])
+    ]
+    lines = [prompt.splitlines() for prompt in prompts]
+    assert lines[0][:-2] == lines[1][:-2]
+    assert lines[0][-1] == lines[1][-1]
+    states = [
+        json.loads(next(line for line in prompt if line.startswith("{")))
+        for prompt in lines
+    ]
+    assert states[0].keys() == states[1].keys()
+    assert states[0]["ghosts"] == []
+    assert states[1]["ghosts"] == [[0, "normal", [1, 2]]]
+
+
+def test_formal_stages_have_explicit_distinct_settings():
+    first, second = [
+        yaml.safe_load((ROOT / f"configs/level1/train/curriculum{i}.yaml").read_text())
+        for i in (1, 2)
+    ]
+    assert first["environment"] == {"ghost_mode": "disabled", "max_steps": 32}
+    assert second["environment"] == {"ghost_mode": "normal", "max_steps": 256}
+    assert first["actor"]["path"] == "Qwen/Qwen3.5-9B"
+    assert second["actor"]["path"] == "${oc.env:CURRICULUM1_CHECKPOINT}"
+    assert first["actor"]["optimizer"]["lr"] == 1e-6
+    assert second["actor"]["optimizer"]["lr"] == 5e-7
+    assert first["nearest_pellet_alpha"] > second["nearest_pellet_alpha"]
+    assert (
+        first["dataset_generation"]["train_episodes"]
+        < second["dataset_generation"]["train_episodes"]
+    )
+    for config in (first, second):
+        assert config["recover"]["mode"] == "disabled"
+        assert (
+            config["dataset_generation"]["train_episodes"]
+            // config["train_dataset"]["batch_size"]
+            * config["total_train_epochs"]
+            == 100
+        )
+    for field in (
+        "image_prompt_style",
+        "observation_mode",
+        "objective_encoding",
+        "gconfig",
+    ):
+        assert first[field] == second[field]
+
+
+@pytest.mark.parametrize("mode", ["disabled", "normal"])
+def test_real_mode_reset_step_and_seed_determinism(mode, monkeypatch):
+    # Ambient legacy curriculum must never turn fruit off or override C2.
+    monkeypatch.setenv("MAAPACMAN_CURRICULUM", "1")
+    traces = []
+    for _ in range(2):
+        with PygamePacmanEnv(PygamePacmanEnvConfig(ghost_mode=mode)) as env:
+            frame, info = env.reset(seed=7)
+            assert frame.shape == (400, 336, 3)
+            initial = copy.deepcopy(info["ghosts"])
+            trace = []
+            for _ in range(4):
+                frame, _, terminated, truncated, info = env.step("S")
+                validate_ghost_state(env.snapshot(), mode)
+                for atomic in info["atomic_substeps"]:
+                    validate_ghost_state(atomic, mode)
+                trace.append(
+                    (hashlib.sha256(frame.tobytes()).hexdigest(), info["ghosts"])
+                )
+                if terminated or truncated:
+                    break
+            if mode == "normal":
+                assert initial != info["ghosts"]
+            else:
+                assert initial == info["ghosts"] == []
+            traces.append(trace)
+    assert traces[0] == traces[1]
+
+
+def test_disabled_ghosts_stay_absent_after_power_pellets_and_fruit_ticks():
+    planner = EdwardPlanner()
+    power_events = 0
+    with PygamePacmanEnv(
+        PygamePacmanEnvConfig(ghost_mode="disabled", max_steps=64)
+    ) as env:
+        env.reset(seed=0)
+        for _ in range(64):
+            _, _, terminated, truncated, info = env.step(
+                planner.decide(env.snapshot()).action
+            )
+            assert not terminated
+            assert info["ghosts"] == []
+            for atomic in info["atomic_substeps"]:
+                validate_ghost_state(atomic, "disabled")
+                power_events += sum(
+                    event["event_type"] == "power_pellet_eaten"
+                    for event in atomic["events"]
+                )
+            if truncated:
+                break
+        assert power_events > 0
+        assert info["step"] == 64
+        assert env.snapshot()["fruit_timer"] > 0
+
+
+def test_missing_native_switch_fails_closed():
+    bridge = object.__new__(_PygameBridge)
+    bridge._ghost_mode = "disabled"
+    with pytest.raises(RuntimeError, match="explicit ghost-mode"):
+        bridge._capture({})
+
+
+@pytest.mark.parametrize("mode", ["disabled", "normal"])
+def test_dataset_row_mode_is_part_of_identity(mode):
+    row = make_episode_row(1, split="train", ghost_mode=mode)
+    validate_episode_row(row)
+    row["env"]["ghost_mode"] = "normal" if mode == "disabled" else "disabled"
+    with pytest.raises(ValueError, match="ruleset_revision"):
+        validate_episode_row(row)
+    del row["env"]["ghost_mode"]
+    with pytest.raises(ValueError, match="ghost_mode"):
+        validate_episode_row(row)
+
+
+@pytest.mark.parametrize("stage", [1, 2])
+def test_real_dataset_anchors_match_stage_and_reject_tampering(tmp_path, stage):
+    config = ROOT / f"configs/level1/train/curriculum{stage}.yaml"
+    environment, generation = load_recipe_settings(config)
+    output = tmp_path / "dataset"
+    _prepare_dataset(
+        SimpleNamespace(
+            config=config,
+            output_root=output,
+            train_episodes=2,
+            validation_episodes=1,
+            seed=None,
+            max_steps=None,
+            write_hf=False,
+            pacman_python_root=None,
+        )
+    )
+    manifest = json.loads((output / "manifest.json").read_text())
+    assert manifest["environment"]["ghost_mode"] == environment.ghost_mode
+    assert manifest["max_steps"] == environment.max_steps
+    assert manifest["splits"]["train"]["seeds"] == [
+        generation.seed,
+        generation.seed + 1,
+    ]
+    assert manifest["splits"]["validation"]["seeds"] == [generation.seed + 2]
+    for line in (output / "train.jsonl").read_text().splitlines():
+        row = json.loads(line)
+        audit_episode_spec_row(row)
+        anchor = row["audit_anchor"]
+        assert len(anchor["ghosts"]) == (0 if stage == 1 else 4)
+        corrupted = copy.deepcopy(anchor)
+        corrupted["atomic_substeps"][0]["ghost_mode"] = (
+            "normal" if stage == 1 else "disabled"
+        )
+        with pytest.raises(ValueError, match="ghost_mode"):
+            audit_planner_record(corrupted)
+
+
+def test_disabled_mode_rejects_ghost_events():
+    with pytest.raises(ValueError, match="ghost/death"):
+        validate_ghost_state(
+            {
+                "ghost_mode": "disabled",
+                "ghosts": [],
+                "edible_ticks": 0,
+                "events": [{"event_type": "death"}],
+            },
+            "disabled",
+        )
+
+
+@pytest.mark.parametrize("stage", [1, 2])
+def test_training_preflight_rejects_wrong_stage_data(tmp_path, monkeypatch, stage):
+    import train_areal
+
+    # Isolate framework discovery; exercise the real dataset/config validation.
+    monkeypatch.setattr(
+        train_areal,
+        "_load_workflow",
+        lambda _: SimpleNamespace(
+            __module__="areal_pacman.level1.workflow",
+            __name__="PacmanNativeVisionWorkflow",
+        ),
+    )
+    config = ROOT / f"configs/level1/train/curriculum{stage}.yaml"
+    environment, _ = load_recipe_settings(config)
+    args = ["--config", str(config)]
+    for split, key in (("train", "train_dataset"), ("validation", "valid_dataset")):
+        path = tmp_path / f"{split}.jsonl"
+        row = make_episode_row(
+            1,
+            split=split,
+            ghost_mode=environment.ghost_mode,
+            max_steps=environment.max_steps,
+        )
+        path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+        args.append(f"{key}.path={path}")
+    assert train_areal._production_dry_run(config, config_args=args)
+    opposite = "normal" if stage == 1 else "disabled"
+    with pytest.raises(ValueError, match="ghost_mode"):
+        train_areal._production_dry_run(
+            config, config_args=[*args, f"environment.ghost_mode={opposite}"]
+        )
+    horizon = 256 if stage == 1 else 32
+    with pytest.raises(ValueError, match="max_steps"):
+        train_areal._production_dry_run(
+            config, config_args=[*args, f"environment.max_steps={horizon}"]
+        )
+
+
+@pytest.mark.parametrize("stage", [1, 2])
+def test_new_config_sections_support_omegaconf_structured_loading(stage):
+    from omegaconf import OmegaConf
+    from areal_pacman.level1.recipe import EnvironmentConfig, DatasetGenerationConfig
+
+    raw = yaml.safe_load(
+        (ROOT / f"configs/level1/train/curriculum{stage}.yaml").read_text()
+    )
+    for key, schema in (
+        ("environment", EnvironmentConfig),
+        ("dataset_generation", DatasetGenerationConfig),
+    ):
+        value = OmegaConf.merge(OmegaConf.structured(schema), raw[key])
+        instance = OmegaConf.to_object(value)
+        assert vars(instance) == raw[key]
+
+
+@pytest.mark.parametrize("stage", [1, 2])
+def test_hf_roundtrip_and_run_manifest_preserve_mode(tmp_path, monkeypatch, stage):
+    datasets = pytest.importorskip("datasets")
+    from scripts.level1.dataset import write_level1_manifest
+
+    config = ROOT / f"configs/level1/train/curriculum{stage}.yaml"
+    output = tmp_path / "dataset"
+    _prepare_dataset(
+        SimpleNamespace(
+            config=config,
+            output_root=output,
+            train_episodes=1,
+            validation_episodes=1,
+            seed=None,
+            max_steps=None,
+            write_hf=True,
+            pacman_python_root=None,
+        )
+    )
+    row = datasets.load_from_disk(str(output / "train_hf"))[0]
+    audit_episode_spec_row(row)
+    mode = "disabled" if stage == 1 else "normal"
+    assert row["env"]["ghost_mode"] == mode
+    assert len(row["audit_anchor"]["ghosts"]) == (0 if stage == 1 else 4)
+    argv = [
+        "write_level1_manifest.py",
+        "--artifact-root",
+        str(tmp_path / "run"),
+        "--model-revision",
+        "test-model",
+        "--dataset-manifest",
+        str(output / "manifest.json"),
+        "--config",
+        str(config),
+        "--smoke-updates",
+        "2",
+    ]
+    monkeypatch.setattr("sys.argv", argv)
+    write_level1_manifest.main()
+    manifest = json.loads((tmp_path / "run/manifest.json").read_text())
+    assert manifest["ghost_mode"] == mode
+    assert manifest["environment_provenance"]["ghost_mode"] == mode
+    assert manifest["total_train_steps"] == 2
+    other_config = ROOT / f"configs/level1/train/curriculum{3 - stage}.yaml"
+    argv[argv.index("--config") + 1] = str(other_config)
+    with pytest.raises(ValueError, match="ghost_mode"):
+        write_level1_manifest.main()

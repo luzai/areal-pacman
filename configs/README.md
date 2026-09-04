@@ -3,18 +3,19 @@
 ## Production Level-1
 
 - `level1/train/`: active training configurations.
-  - `curriculum1.yaml`: complete 256-step Curriculum 1 initialized from
+  - `curriculum1.yaml`: ghost-disabled 32-step Curriculum 1 initialized from
     Qwen3.5-9B. It is a 50-epoch configuration (100 optimizer updates) with
-    the production Level-1 environment, reward, and whole-episode GRPO
+    8 training / 2 validation seeds, learning rate 1e-6, shaping alpha 0.1, and whole-episode GRPO
     contract.
+
   - `curriculum2.yaml`: complete Curriculum 2 initialized from the model path
     in `CURRICULUM1_CHECKPOINT`. It intentionally starts a new optimizer and
-    scheduler lineage while keeping the same formal training contract.
+    scheduler lineage. Normal moving ghosts, 256 steps, 40 training / 8 validation
+    seeds, 10 epochs, learning rate 5e-7 and shaping alpha 0.02.
 
-    Both recipes are 256-step,
-    50-epoch configurations (100 optimizer updates) with explicit
+    Both recipes use 100 optimizer updates with explicit
     pellet/completion rewards, late-game BFS nearest-pellet guidance, and
-    whole-episode GRPO over 12 complete games from the same initial state. Each
+    whole-episode GRPO over 12 episodes from the same initial state. Each
     episode first averages its valid objective-token loss, then the 12 episode
     losses are averaged with equal weight. The contract requires
     `actor.ppo_n_minibatches=1` so one optimizer update sees the complete set.
@@ -26,6 +27,7 @@
     with pellet-clear progress. A parse/canonical contract violation fails closed with
     `contract_violation_return: -1.0`; the terminal audit record stores the
     exact adjustment needed to make the whole-episode return equal `-1.0`.
+
   - Smoke testing reuses `curriculum1.yaml` with `--smoke-updates 2`; it is not
     a third formal configuration.
 - `level1/eval/`: evaluation-only configurations.

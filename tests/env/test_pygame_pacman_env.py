@@ -182,6 +182,7 @@ class PygamePacmanEnvTests(unittest.TestCase):
                     ],
                     "maapacman_dirty": info["maapacman_dirty"],
                     "level": 1,
+                    "ghost_mode": "normal",
                     "level_revision": EXPECTED_LEVEL_REVISION,
                     "env_id": env.spec.env_id,
                     "api_version": "3.0",

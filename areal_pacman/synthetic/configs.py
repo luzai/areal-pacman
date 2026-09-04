@@ -3,10 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from areal.api.cli_args import PPOConfig
+from areal_pacman.level1.recipe import EnvironmentConfig, DatasetGenerationConfig
 
 
 @dataclass
 class PacmanAgentConfig(PPOConfig):
+    environment: EnvironmentConfig = field(default_factory=EnvironmentConfig)
+    dataset_generation: DatasetGenerationConfig = field(default_factory=DatasetGenerationConfig)
     recipe_version: str = field(
         default="research-scaffold",
         metadata={"help": "Recipe contract identifier stored with run artifacts."},

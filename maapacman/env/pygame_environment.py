@@ -30,6 +30,7 @@ from maapacman.errors import (
 )
 
 from .config import PacmanEnvSpec
+from .ghost_modes import validate_ghost_mode, validate_ghost_state
 
 
 RULESET_CONTRACT = {
@@ -42,11 +43,14 @@ RULESET_CONTRACT = {
     "terminal_modes": [2, 3, 6, 9],
     "vulnerable_logic_frames": 360,
 }
-RULESET_REVISION = hashlib.sha256(
-    (json.dumps(RULESET_CONTRACT, sort_keys=True, separators=(",", ":")) + "\n").encode(
-        "utf-8"
-    )
-).hexdigest()
+def ruleset_revision(ghost_mode: str = "normal") -> str:
+    contract = {**RULESET_CONTRACT, "ghost_mode": validate_ghost_mode(ghost_mode)}
+    return hashlib.sha256(
+        (json.dumps(contract, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    ).hexdigest()
+
+
+RULESET_REVISION = ruleset_revision()
 
 TRANSITION_STATE_FIELDS = {
     "row",
@@ -140,6 +144,7 @@ class PygamePacmanEnvConfig:
     pacman_python_root: str | os.PathLike[str] | None = None
     level: int = 1
     max_steps: int = 512
+    ghost_mode: str = "normal"
     timeout_seconds: float = 15.0
     video_driver: str | None = "dummy"
     audio_driver: str | None = "dummy"
@@ -147,6 +152,10 @@ class PygamePacmanEnvConfig:
     worker_base_dir: str | os.PathLike[str] | None = None
 
     def __post_init__(self) -> None:
+        try:
+            validate_ghost_mode(self.ghost_mode)
+        except ValueError as exc:
+            raise InvalidConfigurationError(str(exc)) from exc
         if self.level != 1:
             raise InvalidConfigurationError(
                 "PygamePacmanEnv currently supports only pacman-python level 1"
@@ -205,7 +214,7 @@ class PygamePacmanEnv:
         self._spec = PacmanEnvSpec(
             api_version=self.API_VERSION,
             env_id=self.ENV_ID,
-            ruleset_revision=self.RULESET_REVISION,
+            ruleset_revision=ruleset_revision(self.config.ghost_mode),
             level_revision=self._level_revision,
             renderer_revision=f"pacman-python:{self._revision}",
             observation_shape=(400, 336, 3),
@@ -251,6 +260,7 @@ class PygamePacmanEnv:
             "maapacman_env_source_sha256": self._maapacman_source_revision,
             "maapacman_dirty": self._maapacman_revision_dirty,
             "level": self.config.level,
+            "ghost_mode": self.config.ghost_mode,
             "level_revision": self._level_revision,
             "env_id": self._spec.env_id,
             "api_version": self._spec.api_version,
@@ -433,8 +443,10 @@ class PygamePacmanEnv:
                 )
             if int(substep["logic_frame_index"]) != index:
                 raise self._worker_failure("worker logic-frame indexes are not contiguous")
-            if len(substep["ghosts"]) != 4:
-                raise self._worker_failure("worker atomic substep must contain four ghosts")
+            try:
+                validate_ghost_state(substep, self.config.ghost_mode)
+            except ValueError as exc:
+                raise self._worker_failure(str(exc)) from exc
             if any(
                 not ATOMIC_GHOST_FIELDS.issubset(ghost)
                 for ghost in substep["ghosts"]
@@ -623,6 +635,8 @@ class PygamePacmanEnv:
                     str(self._runtime_script),
                     "--seed",
                     str(self._seed),
+                    "--ghost-mode",
+                    self.config.ghost_mode,
                 ],
                 cwd=self._runtime_dir,
                 env=environment,
@@ -754,9 +768,12 @@ class PygamePacmanEnv:
                 f"worker API v3 transition state is incomplete: {missing}"
             )
         ghosts = self._state.get("ghosts")
+        try:
+            validate_ghost_state(self._state, self.config.ghost_mode)
+        except ValueError as exc:
+            raise self._worker_failure(str(exc)) from exc
         if (
             not isinstance(ghosts, list)
-            or len(ghosts) != 4
             or any(not ATOMIC_GHOST_FIELDS.issubset(ghost) for ghost in ghosts)
         ):
             raise self._worker_failure("worker API v3 ghost state is incomplete")
@@ -783,6 +800,7 @@ class PygamePacmanEnv:
             "env_id": self._spec.env_id,
             "ruleset_revision": self._spec.ruleset_revision,
             "backend": "original-pygame",
+            "ghost_mode": self.config.ghost_mode,
             "video_driver": self.config.video_driver or "platform-default",
             "worker_runtime_id": self._runtime_dir.name,
             "resource_mode": self._resource_mode,

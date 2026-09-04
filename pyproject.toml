@@ -6,10 +6,11 @@ requires-python = ">=3.10"
 dependencies = [
   "numpy>=1.24",
   "Pillow>=10",
+  "PyYAML>=6",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pygame>=2.5"]
+dev = ["pytest", "pygame>=2.5", "omegaconf>=2.3"]
 agent = ["openai"]
 dataset = ["datasets"]
 pygame = ["pygame>=2.5"]

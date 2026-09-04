@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import subprocess
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from maapacman.env.pygame_environment import ruleset_revision
 
 from areal_pacman.level1 import level1_dataset
 from areal_pacman.level1.level1_dataset import write_jsonl
@@ -61,6 +63,7 @@ def _atomic_frame(event=None):
     events = [] if event is None else [event]
     score = sum(item["score_delta"] for item in events)
     return {
+        "ghost_mode": "normal",
         "frame": 1,
         "logic_frame_index": 1,
         "pacman_position": [1, 2],
@@ -134,8 +137,9 @@ def _step_evidence():
 
 def _planner_record():
     evidence = _step_evidence()
-    state = {"row": 1, "col": 1, "open": ["R"]}
-    next_state = {"row": 1, "col": 2, "open": ["L", "R"]}
+    ghost_state = {"ghost_mode": "normal", "ghosts": [{"id": i} for i in range(4)], "edible_ticks": 0}
+    state = {**ghost_state, "row": 1, "col": 1, "open": ["R"]}
+    next_state = {**ghost_state, "row": 1, "col": 2, "open": ["L", "R"]}
     candidate = {
         "option_id": "C0",
         "strategy": "COLLECT",
@@ -161,6 +165,7 @@ def _planner_record():
             "AReaL": {"commit": "4" * 40, "dirty": True},
         },
         "env": {
+            "ghost_mode": "normal",
             "name": "pacman-python-level1-ghostdoor-v3",
             "api_version": "3.0",
             "backend": "original-pygame",
@@ -172,7 +177,7 @@ def _planner_record():
             "pacman_python_dirty": True,
             "maapacman_revision": "2" * 40,
             "maapacman_dirty": True,
-            "ruleset_revision": "c" * 64,
+            "ruleset_revision": ruleset_revision("normal"),
             "pacman_python_source_sha256": "d" * 64,
             "maapacman_env_source_sha256": "e" * 64,
             "maapacman_planner_source_sha256": "9" * 64,
@@ -453,6 +458,7 @@ def test_audit_generator_provenance_uses_relative_source_hashes():
     assert {
         "scripts/level1/dataset/prepare_level1_v3_audits.py",
         "areal_pacman/level1/level1_dataset.py",
+        "areal_pacman/level1/recipe.py",
         "areal_pacman/level1/prompts.py",
         "areal_pacman/level1/rewards.py",
         "areal_pacman/level1/trajectories.py",
@@ -595,7 +601,7 @@ def test_split_generator_writes_relative_immutable_manifest(tmp_path):
         train_episodes=2,
         validation_episodes=1,
         seed=10,
-        max_steps=256,
+        max_steps=32,
         write_hf=False,
         pacman_python_root=None,
     )
@@ -625,6 +631,7 @@ def test_split_generator_writes_relative_immutable_manifest(tmp_path):
         "scripts/level1/dataset/prepare_level1_dataset.py",
         "scripts/level1/dataset/prepare_level1_v3_audits.py",
         "areal_pacman/level1/level1_dataset.py",
+        "areal_pacman/level1/recipe.py",
         "areal_pacman/level1/prompts.py",
         "areal_pacman/level1/rewards.py",
         "areal_pacman/level1/trajectories.py",
@@ -675,6 +682,7 @@ def test_split_generator_writes_relative_immutable_manifest(tmp_path):
 
 def test_audit_metadata_carries_complete_environment_and_planner_provenance():
     env = SimpleNamespace(
+        config=SimpleNamespace(ghost_mode="normal"),
         provenance={
             "pacman_python_commit": "1" * 40,
             "pacman_python_source_sha256": "2" * 64,
@@ -710,6 +718,7 @@ def test_audit_metadata_carries_complete_environment_and_planner_provenance():
     ):
         metadata = _metadata(env)
     assert metadata == {
+        "ghost_mode": "normal",
         "name": "pacman-python-level1-ghostdoor-v3",
         "api_version": "3.0",
         "backend": "original-pygame",
@@ -747,6 +756,12 @@ def test_run_manifest_records_three_repositories_and_bundled_revision(
         encoding="utf-8",
     )
     artifact_root = tmp_path / "run"
+    dataset_manifest.write_text(json.dumps({
+        "splits": {"train": {"seeds": [11, 12]}},
+        "environment": {"ghost_mode": "normal", "ruleset_revision": "5" * 64},
+        "max_steps": 256,
+        "training_config_sha256": hashlib.sha256(config.read_bytes()).hexdigest(),
+    }), encoding="utf-8")
     revisions = {
         "pacman-python": {"commit": "1" * 40, "dirty": False},
         "areal-pacman": {"commit": "2" * 40, "dirty": True},

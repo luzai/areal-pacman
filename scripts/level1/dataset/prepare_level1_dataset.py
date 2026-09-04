@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Iterator
+from areal_pacman.level1.recipe import load_recipe_settings
 
 from areal_pacman.level1.level1_dataset import (
     DATASET_CONTRACT_VERSION,
@@ -80,6 +81,7 @@ def _split_generator_provenance() -> dict[str, Any]:
             / "dataset"
             / "prepare_level1_v3_audits.py",
             REPO_ROOT / "areal_pacman" / "level1" / "level1_dataset.py",
+            REPO_ROOT / "areal_pacman" / "level1" / "recipe.py",
             REPO_ROOT / "areal_pacman" / "level1" / "prompts.py",
             REPO_ROOT / "areal_pacman" / "level1" / "rewards.py",
             REPO_ROOT / "areal_pacman" / "level1" / "trajectories.py",
@@ -109,6 +111,7 @@ def audit_episode_spec_row(row: dict[str, Any]) -> None:
     if anchor.get("terminated") or anchor.get("truncated"):
         raise ValueError("episode audit_anchor initial transition must be nonterminal")
     identity_fields = {
+        "ghost_mode",
         "name",
         "api_version",
         "backend",
@@ -134,10 +137,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Prepare immutable API-v3 MaaPacman level-1 episode rows.")
     parser.add_argument("--output-root", type=Path, default=Path("artifacts/datasets/level1_dataset"))
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--train-episodes", type=int, default=8)
-    parser.add_argument("--validation-episodes", type=int, default=2)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--max-steps", type=int, default=256)
+    parser.add_argument("--train-episodes", type=int)
+    parser.add_argument("--validation-episodes", type=int)
+    parser.add_argument("--seed", type=int)
+    parser.add_argument("--max-steps", type=int)
     parser.add_argument("--write-hf", action="store_true")
     parser.add_argument("--pacman-python-root")
     return parser.parse_args()
@@ -170,10 +173,18 @@ def _temporary_pacman_python_root(
 
 
 def _prepare_dataset(args: argparse.Namespace) -> None:
+    environment, generation = load_recipe_settings(args.config)
+    for name in ("train_episodes", "validation_episodes", "seed"):
+        if getattr(args, name, None) is None:
+            setattr(args, name, getattr(generation, name))
+    if args.max_steps is None:
+        args.max_steps = environment.max_steps
+    if args.max_steps != environment.max_steps:
+        raise ValueError("--max-steps must match config environment.max_steps")
     if args.train_episodes < 1 or args.validation_episodes < 1:
         raise ValueError("train and validation datasets must both be non-empty")
     args.output_root.mkdir(parents=True, exist_ok=False)
-    metadata = environment_metadata()
+    metadata = environment_metadata(environment.ghost_mode)
     reward_config, config_sha256 = _reward_config(args.config)
     manifest: dict[str, Any] = {
         "preparation_contract_version": DATASET_PREPARATION_CONTRACT_VERSION,
@@ -209,6 +220,7 @@ def _prepare_dataset(args: argparse.Namespace) -> None:
                     split=split,
                     seed=next_seed + index,
                     max_steps=args.max_steps,
+                    ghost_mode=environment.ghost_mode,
                 )
             )
             for index in range(count)
@@ -220,6 +232,7 @@ def _prepare_dataset(args: argparse.Namespace) -> None:
                 max_steps=int(row["env"]["max_steps"]),
                 reward_config=reward_config,
                 pacman_python_root=args.pacman_python_root,
+                ghost_mode=environment.ghost_mode,
             )
             row["source_revisions"] = row["audit_anchor"]["source_revisions"]
             row["audit_anchor_sha256"] = _canonical_sha256(row["audit_anchor"])

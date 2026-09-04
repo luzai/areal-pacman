@@ -25,13 +25,17 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--script", required=True)
     parser.add_argument("--seed", required=True, type=int)
+    parser.add_argument("--ghost-mode", required=True, choices=("disabled", "normal"))
     return parser.parse_args()
 
 
 class _PygameBridge:
     LOGIC_FRAMES_PER_STEP = 16
 
-    def __init__(self, pygame: Any, protocol_output: Any) -> None:
+    def __init__(
+        self, pygame: Any, protocol_output: Any, ghost_mode: str = "normal"
+    ) -> None:
+        self._ghost_mode = ghost_mode
         self._pygame = pygame
         self._protocol_output = protocol_output
         self._commands: queue.Queue[dict[str, Any]] = queue.Queue()
@@ -217,6 +221,7 @@ class _PygameBridge:
             "pacman_speed": float(state["pacman_speed"]),
             "pacman_facing": str(state["facing"]),
             "level": int(state["level"]),
+            "ghost_mode": state["ghost_mode"],
             "mode": int(state["mode"]),
             "mode_name": str(state["mode_name"]),
             "mode_timer": int(state["mode_timer"]),
@@ -385,6 +390,23 @@ class _PygameBridge:
         }
 
     def _capture(self, globals_dict: dict[str, Any]) -> dict[str, Any]:
+        if (
+            globals_dict.get("GHOST_MODE") != self._ghost_mode
+            or globals_dict.get("CURRICULUM_ID") != 2
+        ):
+            raise RuntimeError(
+                "pacman-python must support the explicit ghost-mode contract"
+            )
+        if self._ghost_mode == "disabled":
+            # Validate the engine, not just the filtered observation. State 4
+            # is natively non-rendering, non-moving and non-colliding.
+            for index in range(4):
+                ghost = globals_dict["ghosts"][index]
+                if (
+                    ghost.state != 4 or ghost.velX != 0 or ghost.velY != 0
+                    or ghost.x != -64 or ghost.y != -64
+                ):
+                    raise RuntimeError("disabled ghost is active in the game engine")
         pygame = self._pygame
         game = globals_dict["thisGame"]
         player = globals_dict["player"]
@@ -469,6 +491,7 @@ class _PygameBridge:
                 "pacman_speed": float(player.speed),
                 "facing": player.lastMoveDir if player.lastMoveDir in "UDLRS" else "S",
                 "level": int(game.GetLevelNum()),
+                "ghost_mode": self._ghost_mode,
                 "mode": int(game.mode),
                 "mode_name": mode_names.get(int(game.mode), "unknown"),
                 "mode_timer": int(game.modeTimer),
@@ -523,6 +546,7 @@ class _PygameBridge:
                         ],
                     }
                     for index in range(4)
+                    if self._ghost_mode == "normal"
                 ],
                 "fruit": {
                     "active": bool(fruit.active),
@@ -579,7 +603,10 @@ def main() -> int:
     protocol_output = sys.stdout
     sys.stdout = sys.stderr
     sys.path[0] = str(script.parent)
-    sys.argv = [str(script), "--start-level", "1"]
+    sys.argv = [
+        str(script), "--start-level", "1", "--curriculum", "2",
+        "--ghost-mode", args.ghost_mode,
+    ]
     random.seed(args.seed)
     os.environ["MAAPACMAN_PAUSE_ON_START"] = "1"
 
@@ -591,7 +618,7 @@ def main() -> int:
 
     pygame.time.Clock = _FastClock
 
-    bridge = _PygameBridge(pygame, protocol_output)
+    bridge = _PygameBridge(pygame, protocol_output, args.ghost_mode)
     bridge.start()
     try:
         runpy.run_path(str(script), run_name="__main__")

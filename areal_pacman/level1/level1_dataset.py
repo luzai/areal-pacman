@@ -12,7 +12,9 @@ from typing import Any, Iterable, Iterator, Mapping
 
 from maapacman.env import (
     PygamePacmanEnv,
+    PygamePacmanEnvConfig,
 )
+from maapacman.env.ghost_modes import validate_ghost_mode
 from maapacman.planner import EdwardPlanner
 
 
@@ -106,9 +108,9 @@ def _validate_source_revisions(value: Any) -> None:
             raise ValueError(f"source_revisions.{name} is invalid")
 
 
-@lru_cache(maxsize=1)
-def environment_metadata() -> dict[str, Any]:
-    env = PygamePacmanEnv()
+@lru_cache(maxsize=2)
+def environment_metadata(ghost_mode: str = "normal") -> dict[str, Any]:
+    env = PygamePacmanEnv(PygamePacmanEnvConfig(ghost_mode=ghost_mode))
     try:
         info = env.provenance
         revisions = repository_revisions()
@@ -124,6 +126,7 @@ def environment_metadata() -> dict[str, Any]:
             "name": env.spec.env_id,
             "api_version": env.spec.api_version,
             "backend": ENV_BACKEND,
+            "ghost_mode": ghost_mode,
             "pacman_python_revision": info["pacman_python_commit"],
             "pacman_python_source_sha256": info[
                 "pacman_python_source_sha256"
@@ -157,7 +160,7 @@ def validate_episode_row(row: Mapping[str, Any]) -> None:
     env = row.get("env")
     if not isinstance(env, Mapping):
         raise ValueError("env must be an object")
-    installed = environment_metadata()
+    installed = environment_metadata(validate_ghost_mode(env.get("ghost_mode")))
     if env.get("name") != ENV_NAME or env.get("name") != installed["name"]:
         raise ValueError(f"env.name must be {ENV_NAME!r}")
     if (
@@ -298,6 +301,7 @@ def validate_episode_row(row: Mapping[str, Any]) -> None:
         if not isinstance(anchor_env, Mapping):
             raise ValueError("audit_anchor env must be an object")
         identity_fields = {
+            "ghost_mode",
             "name",
             "api_version",
             "backend",
@@ -321,16 +325,18 @@ def make_episode_row(
     split: str,
     seed: int = 0,
     max_steps: int = PRODUCTION_MAX_STEPS,
+    ghost_mode: str = "normal",
 ) -> dict[str, Any]:
     if not isinstance(index, int) or isinstance(index, bool) or index < 1:
         raise ValueError("index must be a positive integer")
-    installed = environment_metadata()
+    installed = environment_metadata(ghost_mode)
     row = {
-        "id": f"level1-seed{seed}-{split}-{index:04d}",
+        "id": f"level1-{ghost_mode}-seed{seed}-{split}-{index:04d}",
         "split": split,
         "dataset_contract_version": DATASET_CONTRACT_VERSION,
         "source_revisions": repository_revisions(),
         "env": {
+            "ghost_mode": ghost_mode,
             "name": ENV_NAME,
             "api_version": ENV_API_VERSION,
             "backend": ENV_BACKEND,
@@ -363,11 +369,14 @@ def generate_episode_rows(
     split: str,
     seed: int = 0,
     max_steps: int = PRODUCTION_MAX_STEPS,
+    ghost_mode: str = "normal",
 ) -> Iterator[dict[str, Any]]:
     if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
         raise ValueError("count must be a positive integer")
     for index in range(1, count + 1):
-        yield make_episode_row(index, split=split, seed=seed, max_steps=max_steps)
+        yield make_episode_row(
+            index, split=split, seed=seed, max_steps=max_steps, ghost_mode=ghost_mode
+        )
 
 
 def planner_baseline_state_prefixes(*, seed: int = 0) -> list[list[str]]:

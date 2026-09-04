@@ -16,7 +16,7 @@
 | ------------------------------------------------------------- | ------------------------------------------ | -------------------------------------------------------------------------- |
 | 本仓库                                                        | `areal_pacman` 配方与内置 `maapacman` 环境 | `release/maapacman-v0.1.0`；运行时记录实际 SHA                             |
 | [luzai/AReaL](https://github.com/luzai/AReaL)                 | 训练、rollout、FSDP 和 checkpoint          | `pacman/open-action-mask` @ `b40314ff84ae9422c9065f76065f880f599a0bb4`     |
-| [luzai/pacman-python](https://github.com/luzai/pacman-python) | 游戏规则、资源和 pygame renderer           | `release/maapacman-v0.1.0` 中的 `01eff954d4ee09bcc0937b77fea7d382496e891b` |
+| [luzai/pacman-python](https://github.com/luzai/pacman-python) | 游戏规则、资源和 pygame renderer           | `release/maapacman-v0.1.0` 中的 `cbb97115e407abc86a44adc82a1b8f360b3e8da0` |
 
 复现时以固定 SHA 为准，不能仅依赖会继续更新的分支名。更新依赖 revision 后，需要同步运行 manifest 并重新验证。`areal_pacman.synthetic.*` 保留用于历史合成迷宫实验。
 
@@ -38,7 +38,7 @@ git clone --branch release/maapacman-v0.1.0 --single-branch \
 
 git clone --branch release/maapacman-v0.1.0 --single-branch \
   https://github.com/luzai/pacman-python.git
-git -C pacman-python checkout 01eff954d4ee09bcc0937b77fea7d382496e891b
+git -C pacman-python checkout cbb97115e407abc86a44adc82a1b8f360b3e8da0
 ```
 
 三个 checkout 可以放在任意可写磁盘；以下命令使用并列目录：
@@ -126,7 +126,23 @@ CUDA_VISIBLE_DEVICES='' "$PYTHON" -m pytest -q
 | [curriculum1.yaml](configs/level1/train/curriculum1.yaml) | `Qwen/Qwen3.5-9B`           | 100 次 optimizer update |
 | [curriculum2.yaml](configs/level1/train/curriculum2.yaml) | `${CURRICULUM1_CHECKPOINT}` | 100 次 optimizer update |
 
-两份配置共享环境、奖励和训练规模，区别是模型初始化来源。默认使用 8 张 GPU、8 个训练 episode、2 个验证 episode、batch size 4、50 epochs，每个 episode 最多 256 步，每个 prompt 采样 12 条轨迹。
+两阶段使用相同关卡、画面尺寸与 prompt 字段，但具有明确不同的幽灵模式：
+
+| 项目                     | Curriculum 1       | Curriculum 2           |
+| ------------------------ | ------------------ | ---------------------- |
+| `environment.ghost_mode` | `disabled`，无幽灵 | `normal`，正常移动幽灵 |
+| 输入中的 `ghosts`        | `[]`               | 正常幽灵状态列表       |
+| 每局步数                 | 32                 | 256                    |
+| 训练 / 验证 seeds        | 0–7 / 8–9          | 100–139 / 140–147      |
+| Epochs                   | 50                 | 10                     |
+| 学习率                   | `1e-6`             | `5e-7`                 |
+| `nearest_pellet_alpha`   | `0.1`              | `0.02`                 |
+
+两者默认均为 8 张 GPU、batch size 4、100 次更新，每个 prompt 采样 12 条轨迹。
+C1 学导航与吃豆，C2 加入避敌、能量豆和通关。地图与初始位置不变，seeds 不是不同地图；这些是发布默认值，不代表已验证最优超参数。
+独立 ghost 开关不关闭水果、不改变奖励事件定义；C1 的能量豆仍得分，但没有幽灵易受攻击计时。
+启动器从 YAML 读取数据规模与步数；环境模式同时写入 dataset、run manifest 和每个原子帧，规则 hash 按模式区分。配置与数据不匹配时拒绝训练。
+旧数据没有 `ghost_mode`，须用当前固定源码重新生成；不要手工补字段或复用旧规则 hash。
 
 动作协议为 Edward option code，使用 `live_state_v3` 输入、`temperature=0.7`、`top_p=1.0` 和 `episode_return_group_v1` 目标。当前 YAML 未启用定期验证 rollout。奖励细节以 [rewards.py](areal_pacman/level1/rewards.py) 和配置为准。
 
@@ -140,9 +156,8 @@ export OWNER_ROOT=/path/to/writable/owner-root
 export ENV_ROOT="$CONDA_PREFIX"
 export PYTHON="$ENV_ROOT/bin/python"
 export MODEL_PATH=/path/to/Qwen3.5-9B
-export TRAIN_EPISODES=8
-export VALIDATION_EPISODES=2
-export DATASET_MAX_STEPS=256
+# 使用选中 YAML 的数据默认值，避免上次运行的环境变量覆盖本次配置。
+unset TRAIN_EPISODES VALIDATION_EPISODES DATASET_MAX_STEPS
 
 # 让启动器为每次运行自动生成新的名称、产物和数据集目录。
 unset RUN_ID ARTIFACT_ROOT DATASET_OUTPUT_ROOT
@@ -173,13 +188,17 @@ bash scripts/level1/train/run_level1_training.sh
 
 `CURRICULUM1_CHECKPOINT` 必须包含模型权重、配置和所需 tokenizer/processor 文件；不能直接指向训练产物根目录或不完整的恢复目录。需要补齐冻结视觉权重时，参见[完整 VLM checkpoint 工具](scripts/level1/report/build_complete_vlm_checkpoint.py)。
 
-Curriculum 2 继承模型权重并重新初始化 optimizer/scheduler。`recover.mode: auto` 用于同一 run 的中断恢复，与两个 curriculum 之间的模型初始化不同。
+Curriculum 2 继承模型权重并重新初始化 optimizer/scheduler。两份配置首次运行均为 `recover.mode: disabled`。
+注意：在当前 AReaL 中，`disabled` 同时禁止保存恢复状态；中断后才改为 `auto`，无法补回之前未保存的 optimizer/dataloader 状态。
+需要完整中断恢复的任务应在首次启动时就显式启用 `auto`，并保留同一 run 的数据、名称与路径；当前发布启动器面向新 run，不会覆盖或重建旧数据。
+只有确实存在完整恢复状态时，才应使用原始训练命令加 `recover.mode=auto` 恢复；只有模型 checkpoint 时属于权重初始化新 run。
 
 Smoke 使用同一份 YAML，通过 `total_train_steps=2` 限制更新次数，不需要第三份配置。也可以直接向 `train_areal.py --config ...` 传入 `--smoke-updates 2`，但需要先准备对应的数据集和运行环境。
 
 启动器会检查源码导入、模型文件、GPU 空闲状态、AReaL 补丁和 prompt budget，生成不可变数据集并执行配置 dry-run，然后启动训练。默认产物位于 `${OWNER_ROOT}/run_artifacts/maapacman-rl/<recipe>-<timestamp>/`，数据集保存在其中的 `dataset/`。指定自定义输出路径时应使用新目录。
 
-2026-09-04 的两份 recipe 已通过 CLI 单测、YAML 和启动脚本语法检查；这条新入口的分布式 GPU smoke 尚待运行。旧配置的 headless 测试不能替代这次验证。
+两阶段已新增真实 headless 环境、确定性、能量豆后无幽灵、数据生成与篡改拒绝测试；分布式 GPU smoke 尚待运行，CPU 环境测试不能代替它。
+Windows 可运行这些 CPU 检查；完整 AReaL workflow 的依赖包含 `uvloop`，仍需在 Linux 环境验证。
 
 ## 评估与产物
 

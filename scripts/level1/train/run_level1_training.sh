@@ -53,9 +53,11 @@ RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 RECIPE_NAME="$(basename "${CONFIG}" .yaml)"
 ARTIFACT_ROOT="${ARTIFACT_ROOT:-${OWNER_ROOT}/run_artifacts/maapacman-rl/${RECIPE_NAME}-${RUN_ID}}"
 DATASET_OUTPUT_ROOT="${DATASET_OUTPUT_ROOT:-${ARTIFACT_ROOT}/dataset}"
-TRAIN_EPISODES="${TRAIN_EPISODES:-8}"
-VALIDATION_EPISODES="${VALIDATION_EPISODES:-2}"
-DATASET_MAX_STEPS="${DATASET_MAX_STEPS:-256}"
+# Dataset defaults are read from the selected recipe, not shared shell defaults.
+DATASET_ARGS=()
+[[ -z "${TRAIN_EPISODES:-}" ]] || DATASET_ARGS+=(--train-episodes "${TRAIN_EPISODES}")
+[[ -z "${VALIDATION_EPISODES:-}" ]] || DATASET_ARGS+=(--validation-episodes "${VALIDATION_EPISODES}")
+[[ -z "${DATASET_MAX_STEPS:-}" ]] || DATASET_ARGS+=(--max-steps "${DATASET_MAX_STEPS}")
 
 if [[ ! -x "${PYTHON}" ]]; then
   echo "Python is not executable: ${PYTHON}" >&2
@@ -321,9 +323,7 @@ fi
 "${PYTHON}" scripts/level1/dataset/prepare_level1_dataset.py \
   --output-root "${DATASET_OUTPUT_ROOT}" \
   --config "${CONFIG}" \
-  --train-episodes "${TRAIN_EPISODES}" \
-  --validation-episodes "${VALIDATION_EPISODES}" \
-  --max-steps "${DATASET_MAX_STEPS}" \
+  "${DATASET_ARGS[@]}" \
   --write-hf
 "${PYTHON}" train_areal.py \
   --config "${CONFIG}" \
@@ -337,7 +337,8 @@ cp "${CONFIG}" "${ARTIFACT_ROOT}/config.yaml"
   --artifact-root "${ARTIFACT_ROOT}" \
   --model-revision "${MODEL_PATH}" \
   --dataset-manifest "${DATASET_OUTPUT_ROOT}/manifest.json" \
-  --config "${CONFIG}"
+  --config "${CONFIG}" \
+  "${SMOKE_ARGS[@]}"
 
 if [[ "${PREFLIGHT_ONLY:-0}" == "1" ]]; then
   echo "preflight=ok"

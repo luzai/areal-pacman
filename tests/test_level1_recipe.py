@@ -236,7 +236,7 @@ class DatasetContractTests(unittest.TestCase):
         first = list(generate_episode_rows(3, split="train", seed=0))
         second = list(generate_episode_rows(3, split="train", seed=0))
         self.assertEqual(first, second)
-        self.assertEqual(first[0]["id"], "level1-seed0-train-0001")
+        self.assertEqual(first[0]["id"], "level1-normal-seed0-train-0001")
         self.assertEqual(
             first[0]["env"]["name"], "pacman-python-level1-ghostdoor-v3"
         )
@@ -855,7 +855,7 @@ class RewardAndTrajectoryTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         for expected in (
             "recipe_version: maapacman-level1-ghostdoor-v3",
-            "trial_name: curriculum1-qwen3p5-9b-step256-100update-group12",
+            "trial_name: curriculum1-qwen3p5-9b-step32-100update-group12",
             "total_train_epochs: 50",
             "total_train_steps: null",
             "path: Qwen/Qwen3.5-9B",
@@ -898,8 +898,8 @@ class RewardAndTrajectoryTests(unittest.TestCase):
             "enable_offload: true",
             "max_tokens_per_mb: 1024",
             "offload: true",
-            "artifacts/datasets/level1_dataset_step256/train_hf",
-            "artifacts/datasets/level1_dataset_step256/validation_hf",
+            "artifacts/datasets/curriculum1/train_hf",
+            "artifacts/datasets/curriculum1/validation_hf",
         ):
             self.assertIn(expected, config)
         actor_section = config.split("\nref:\n", 1)[0].split("\nactor:\n", 1)[1]
@@ -934,15 +934,16 @@ class RewardAndTrajectoryTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         for expected in (
             "trial_name: curriculum2-from-curriculum1-step256-100update-group12",
-            "total_train_epochs: 50",
+            "total_train_epochs: 10",
             "total_train_steps: null",
             "path: ${oc.env:CURRICULUM1_CHECKPOINT}",
             "tokenizer_path: ${actor.path}",
             "model: ${actor.path}",
             "reward_objective_contract: episode_return_group_v1",
-            "artifacts/datasets/level1_dataset_step256/train_hf",
-            "artifacts/datasets/level1_dataset_step256/validation_hf",
-            "mode: auto",
+            "artifacts/datasets/curriculum2/train_hf",
+            "artifacts/datasets/curriculum2/validation_hf",
+            "ghost_mode: normal",
+            "mode: disabled",
         ):
             self.assertIn(expected, config)
         self.assertNotIn("path: Qwen/Qwen3.5-9B", config)
@@ -2300,6 +2301,7 @@ class TrainerGenerationContractTests(unittest.TestCase):
     @staticmethod
     def _config() -> SimpleNamespace:
         return SimpleNamespace(
+            environment=SimpleNamespace(ghost_mode="normal", max_steps=256),
             enable_thinking=False,
             reward_objective_contract="episode_return_group_v1",
             image_prompt_style="live_static_v2",
@@ -2576,8 +2578,8 @@ class TrainerGenerationContractTests(unittest.TestCase):
             "configs/level1/archive/level1_image_overfit_4epoch_group12_8gpu.yaml",
             launcher,
         )
-        self.assertIn('TRAIN_EPISODES="${TRAIN_EPISODES:-8}"', launcher)
-        self.assertIn('DATASET_MAX_STEPS="${DATASET_MAX_STEPS:-256}"', launcher)
+        self.assertIn('DATASET_ARGS=()', launcher)
+        self.assertNotIn('DATASET_MAX_STEPS="${DATASET_MAX_STEPS:-256}"', launcher)
         self.assertIn('SMOKE_ARGS=(--smoke-updates "${SMOKE_UPDATES}")', launcher)
         self.assertIn(
             "'${oc.env:CURRICULUM1_CHECKPOINT}'",

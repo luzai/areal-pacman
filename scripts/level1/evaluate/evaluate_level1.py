@@ -22,6 +22,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--episodes", type=int, default=4)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-steps", type=int, default=256)
+    parser.add_argument("--ghost-mode", choices=("disabled", "normal"), default="normal")
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--max-completion-tokens", type=int, default=3)
@@ -66,6 +67,7 @@ async def evaluate(args: argparse.Namespace) -> dict[str, object]:
                 split="test",
                 seed=args.seed,
                 max_steps=args.max_steps,
+                ghost_mode=args.ghost_mode,
             )
             workflow = PacmanImageOnlyWorkflow(
                 open_action_mask=args.open_action_mask,
@@ -96,6 +98,7 @@ async def evaluate(args: argparse.Namespace) -> dict[str, object]:
         "model": args.model,
         "seed": args.seed,
         "max_steps": args.max_steps,
+        "ghost_mode": args.ghost_mode,
         "concurrency": args.concurrency,
         "safety_limits": {
             "wall_clock_limit_seconds": args.wall_clock_limit_seconds,

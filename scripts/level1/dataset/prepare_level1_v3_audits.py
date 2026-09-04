@@ -12,6 +12,7 @@ import subprocess
 from typing import Any, Mapping
 
 import yaml
+from areal_pacman.level1.recipe import load_recipe_settings
 from maapacman.env import (
     Position,
     PygamePacmanEnv,
@@ -37,6 +38,8 @@ from areal_pacman.level1.rewards import (
     shape_reward,
 )
 from areal_pacman.level1.trajectories import audit_step_environment_evidence
+from maapacman.env.ghost_modes import validate_ghost_mode, validate_ghost_state
+from maapacman.env.pygame_environment import ruleset_revision
 
 
 AUDIT_CONTRACT_VERSION = "maapacman-level1-planner-audit-v3"
@@ -108,6 +111,7 @@ def _audit_generator_provenance() -> dict[str, Any]:
         [
             Path(__file__),
             REPO_ROOT / "areal_pacman" / "level1" / "level1_dataset.py",
+            REPO_ROOT / "areal_pacman" / "level1" / "recipe.py",
             REPO_ROOT / "areal_pacman" / "level1" / "prompts.py",
             REPO_ROOT / "areal_pacman" / "level1" / "rewards.py",
             REPO_ROOT / "areal_pacman" / "level1" / "trajectories.py",
@@ -136,6 +140,7 @@ def _metadata(env: PygamePacmanEnv) -> dict[str, Any]:
         "name": env.spec.env_id,
         "api_version": env.spec.api_version,
         "backend": "original-pygame",
+        "ghost_mode": env.config.ghost_mode,
         "pacman_python_revision": provenance["pacman_python_commit"],
         "pacman_python_source_sha256": provenance[
             "pacman_python_source_sha256"
@@ -266,6 +271,9 @@ def audit_planner_record(record: Mapping[str, Any]) -> None:
     environment = record["env"]
     if not isinstance(environment, Mapping):
         raise ValueError("planner audit env must be an object")
+    ghost_mode = validate_ghost_mode(environment.get("ghost_mode"))
+    if environment.get("ruleset_revision") != ruleset_revision(ghost_mode):
+        raise ValueError("planner audit ruleset_revision does not match ghost_mode")
     if (
         environment.get("api_version") != ENV_API_VERSION
         or environment.get("name") != ENV_NAME
@@ -331,6 +339,8 @@ def audit_planner_record(record: Mapping[str, Any]) -> None:
         record["next_structured_state"]
     ):
         raise ValueError("planner audit next-state hash mismatch")
+    validate_ghost_state(record["structured_state"], ghost_mode)
+    validate_ghost_state(record["next_structured_state"], ghost_mode)
 
     legal_actions = record["legal_actions"]
     if (
@@ -406,6 +416,7 @@ def audit_planner_record(record: Mapping[str, Any]) -> None:
         },
         previous_score=int(record["score_before"]),
         previous_logic_frame=int(record["logic_frame_before"]),
+        ghost_mode=ghost_mode,
     )
 
 
@@ -567,6 +578,7 @@ def _collect_seed(
             evidence,
             previous_score=previous_score,
             previous_logic_frame=previous_logic_frame,
+            ghost_mode=env.config.ghost_mode,
         )
         audit_reward(evidence)
         next_snapshot = env.snapshot()
@@ -642,6 +654,7 @@ def collect_initial_audit_anchor(
     max_steps: int,
     reward_config: RewardConfig,
     pacman_python_root: str | None = None,
+    ghost_mode: str = "normal",
 ) -> dict[str, Any]:
     """Capture one real Edward transition without calling it a model rollout."""
 
@@ -649,6 +662,7 @@ def collect_initial_audit_anchor(
         PygamePacmanEnvConfig(
             pacman_python_root=pacman_python_root,
             max_steps=max_steps,
+            ghost_mode=ghost_mode,
         )
     )
     try:
@@ -687,6 +701,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    environment, _ = load_recipe_settings(args.config)
     if len(args.seeds) != len(set(args.seeds)):
         raise ValueError("audit seeds must be unique")
     args.output_root.mkdir(parents=True, exist_ok=False)
@@ -699,6 +714,7 @@ def main() -> None:
             PygamePacmanEnvConfig(
                 pacman_python_root=args.pacman_python_root,
                 max_steps=args.max_steps,
+                ghost_mode=environment.ghost_mode,
             )
         )
         try:

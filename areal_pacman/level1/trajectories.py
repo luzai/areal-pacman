@@ -6,6 +6,8 @@ import json
 import math
 from pathlib import Path
 from typing import Any, Mapping
+from maapacman.env.ghost_modes import validate_ghost_mode, validate_ghost_state
+from maapacman.env.pygame_environment import ruleset_revision
 
 from .level1_dataset import (
     DATASET_CONTRACT_VERSION,
@@ -19,6 +21,7 @@ from .token_constraints import EDWARD_OPTION_CONSTRAINT, OPTION_CODE_BY_ID
 
 
 REQUIRED_ENV_FIELDS = {
+    "ghost_mode",
     "env_api_version",
     "env_id",
     "backend",
@@ -223,6 +226,7 @@ def audit_step_environment_evidence(
     *,
     previous_score: int,
     previous_logic_frame: int,
+    ghost_mode: str = "normal",
 ) -> tuple[int, int]:
     """Reconcile one recorded action with every API-v3 atomic frame."""
 
@@ -255,9 +259,7 @@ def audit_step_environment_evidence(
         if current_logic_frame != logic_frame + 1:
             raise ValueError("source logic frames are not globally contiguous")
         logic_frame = current_logic_frame
-        ghosts = raw_substep["ghosts"]
-        if not isinstance(ghosts, list) or len(ghosts) != 4:
-            raise ValueError("atomic substep must contain four ghosts")
+        validate_ghost_state(raw_substep, ghost_mode)
 
         frame_score = _integer(raw_substep["score"], "atomic score")
         frame_delta = _integer(
@@ -578,6 +580,9 @@ def audit_trajectory(payload: Mapping[str, Any]) -> None:
         digest = payload.get(digest_field)
         if not isinstance(digest, str) or len(digest) != 64:
             raise ValueError(f"trajectory has invalid {digest_field}")
+    mode = validate_ghost_mode(payload["ghost_mode"])
+    if payload["ruleset_revision"] != ruleset_revision(mode):
+        raise ValueError("trajectory ruleset_revision does not match ghost_mode")
     if payload["max_steps"] not in SUPPORTED_MAX_STEPS:
         supported = ", ".join(str(value) for value in sorted(SUPPORTED_MAX_STEPS))
         raise ValueError(f"trajectory max_steps must be one of: {supported}")
@@ -658,6 +663,7 @@ def audit_trajectory(payload: Mapping[str, Any]) -> None:
                 step,
                 previous_score=previous_score,
                 previous_logic_frame=previous_logic_frame,
+                ghost_mode=mode,
             )
         if payload.get("action_constraint") == EDWARD_OPTION_CONSTRAINT:
             option_missing = {
