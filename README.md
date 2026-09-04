@@ -354,10 +354,13 @@ distance_reward = 0
 
 ## 最小验证
 
+下面的占位 key 只用于不启动服务的本地 dry-run；正式训练入口会自动生成随机
+`AREAL_ADMIN_API_KEY`，不要在生产环境复用这个值。
+
 ```bash
 python -m pytest -q tests/test_level1_recipe.py
 
-python train_areal.py \
+AREAL_ADMIN_API_KEY=local-dry-run-only python train_areal.py \
   --config configs/level1/train/level1_edward_step512_2update_group12_8gpu.yaml \
   --dry-run \
   --validate-areal
