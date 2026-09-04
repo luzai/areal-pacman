@@ -1,31 +1,96 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SMOKE_UPDATES=""
+SMOKE_UPDATES_SET=0
+while (( $# )); do
+  case "$1" in
+    --smoke-updates)
+      if (( SMOKE_UPDATES_SET )); then
+        echo "--smoke-updates may be specified only once." >&2
+        exit 2
+      fi
+      if (( $# < 2 )); then
+        echo "--smoke-updates requires a positive integer." >&2
+        exit 2
+      fi
+      SMOKE_UPDATES="$2"
+      SMOKE_UPDATES_SET=1
+      shift 2
+      ;;
+    --smoke-updates=*)
+      if (( SMOKE_UPDATES_SET )); then
+        echo "--smoke-updates may be specified only once." >&2
+        exit 2
+      fi
+      SMOKE_UPDATES="${1#*=}"
+      SMOKE_UPDATES_SET=1
+      shift
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+if (( SMOKE_UPDATES_SET )) && [[ ! "${SMOKE_UPDATES}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "--smoke-updates requires a positive integer." >&2
+  exit 2
+fi
+SMOKE_ARGS=()
+if (( SMOKE_UPDATES_SET )); then
+  SMOKE_ARGS=(--smoke-updates "${SMOKE_UPDATES}")
+fi
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 WORKSPACE_ROOT="$(cd "${REPO_ROOT}/.." && pwd)"
 OWNER_ROOT="${OWNER_ROOT:-${HOME:?HOME must be set}}"
 ENV_ROOT="${ENV_ROOT:-${OWNER_ROOT}/miniconda/envs/maapacman-rl}"
 PYTHON="${PYTHON:-${ENV_ROOT}/bin/python}"
 AREAL_ROOT="${AREAL_ROOT:-${WORKSPACE_ROOT}/AReaL}"
-MODEL_PATH="${MODEL_PATH:-${OWNER_ROOT}/models/Qwen3.5-9B}"
+CONFIG="${CONFIG:-${REPO_ROOT}/configs/level1/train/curriculum1.yaml}"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
-ARTIFACT_ROOT="${ARTIFACT_ROOT:-${OWNER_ROOT}/run_artifacts/maapacman-rl/level1-overfit-${RUN_ID}}"
-CONFIG="${CONFIG:-${REPO_ROOT}/configs/level1/train/level1_edward_step512_2update_group12_8gpu.yaml}"
+RECIPE_NAME="$(basename "${CONFIG}" .yaml)"
+ARTIFACT_ROOT="${ARTIFACT_ROOT:-${OWNER_ROOT}/run_artifacts/maapacman-rl/${RECIPE_NAME}-${RUN_ID}}"
 DATASET_OUTPUT_ROOT="${DATASET_OUTPUT_ROOT:-${ARTIFACT_ROOT}/dataset}"
-TRAIN_EPISODES="${TRAIN_EPISODES:-4}"
+TRAIN_EPISODES="${TRAIN_EPISODES:-8}"
 VALIDATION_EPISODES="${VALIDATION_EPISODES:-2}"
-DATASET_MAX_STEPS="${DATASET_MAX_STEPS:-512}"
+DATASET_MAX_STEPS="${DATASET_MAX_STEPS:-256}"
 
 if [[ ! -x "${PYTHON}" ]]; then
   echo "Python is not executable: ${PYTHON}" >&2
   exit 2
 fi
-if [[ ! -f "${MODEL_PATH}/config.json" ]]; then
-  echo "Model checkout is incomplete: ${MODEL_PATH}" >&2
-  exit 2
-fi
 if [[ ! -f "${CONFIG}" ]]; then
   echo "Training config does not exist: ${CONFIG}" >&2
+  exit 2
+fi
+ACTOR_PATH_SPEC="$(
+  awk '
+    /^actor:/ { in_actor = 1; next }
+    in_actor && /^[^[:space:]]/ { exit }
+    in_actor && /^[[:space:]]+path:/ { print $2; exit }
+  ' "${CONFIG}"
+)"
+if [[ -z "${ACTOR_PATH_SPEC}" ]]; then
+  echo "Training config has no actor.path: ${CONFIG}" >&2
+  exit 2
+fi
+if [[ "${ACTOR_PATH_SPEC}" == '${oc.env:CURRICULUM1_CHECKPOINT}' ]]; then
+  if [[ -z "${CURRICULUM1_CHECKPOINT:-}" ]]; then
+    echo "curriculum2.yaml requires CURRICULUM1_CHECKPOINT." >&2
+    exit 2
+  fi
+  MODEL_PATH="${CURRICULUM1_CHECKPOINT}"
+else
+  MODEL_PATH="${MODEL_PATH:-${OWNER_ROOT}/models/Qwen3.5-9B}"
+fi
+if [[ ! -f "${MODEL_PATH}/config.json" ]] \
+  || [[ ! -f "${MODEL_PATH}/model.safetensors" \
+    && ! -f "${MODEL_PATH}/model.safetensors.index.json" \
+    && ! -f "${MODEL_PATH}/pytorch_model.bin" \
+    && ! -f "${MODEL_PATH}/pytorch_model.bin.index.json" ]]; then
+  echo "Model checkpoint is incomplete: ${MODEL_PATH}" >&2
   exit 2
 fi
 if [[ ! -f "${AREAL_ROOT}/areal/__init__.py" ]]; then
@@ -262,6 +327,7 @@ fi
   --write-hf
 "${PYTHON}" train_areal.py \
   --config "${CONFIG}" \
+  "${SMOKE_ARGS[@]}" \
   --dry-run \
   --validate-areal \
   "train_dataset.path=${DATASET_OUTPUT_ROOT}/train_hf" \
@@ -283,6 +349,10 @@ fi
 
 echo "Starting AReaL level-1 training"
 echo "  run_id=${RUN_ID}"
+echo "  recipe=${RECIPE_NAME}"
+if (( SMOKE_UPDATES_SET )); then
+  echo "  smoke_updates=${SMOKE_UPDATES}"
+fi
 echo "  areal=${AREAL_ROOT_REAL}"
 echo "  gpu_ids=${GPU_IDS}"
 echo "  model=${MODEL_PATH}"
@@ -290,6 +360,7 @@ echo "  artifacts=${ARTIFACT_ROOT}"
 
 exec "${PYTHON}" train_areal.py \
   --config "${CONFIG}" \
+  "${SMOKE_ARGS[@]}" \
   "artifact_root=${ARTIFACT_ROOT}" \
   "cluster.fileroot=${ARTIFACT_ROOT}/training" \
   "cluster.name_resolve.nfs_record_root=${ARTIFACT_ROOT}/name_resolve" \
@@ -297,4 +368,4 @@ exec "${PYTHON}" train_areal.py \
   "train_dataset.path=${DATASET_OUTPUT_ROOT}/train_hf" \
   "valid_dataset.path=${DATASET_OUTPUT_ROOT}/validation_hf" \
   "experiment_name=maapacman-level1" \
-  "trial_name=overfit-${RUN_ID}"
+  "trial_name=${RECIPE_NAME}-${RUN_ID}"

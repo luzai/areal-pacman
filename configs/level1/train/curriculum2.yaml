@@ -1,11 +1,14 @@
 recipe_version: maapacman-level1-ghostdoor-v3
-artifact_root: artifacts/runs/generated/level1_edward_options_step256_100update
+artifact_root: artifacts/runs/generated/curriculum2
 trajectory_dir: ${artifact_root}/trajectories
 experiment_name: pacman-agentic-rl
-trial_name: level1-edward-options-step256-qwen3p5-9b-100update-group12
+trial_name: curriculum2-from-curriculum1-step256-100update-group12
 
 seed: 1
-# Longer-episode reward-trend run:
+# Curriculum 2: the complete follow-up initialized from Curriculum 1.
+# CURRICULUM1_CHECKPOINT must name a complete model checkpoint. This starts a
+# new optimizer/scheduler lineage; recover.mode handles interruption recovery
+# only inside this Curriculum 2 run.
 # - 8 train rows / batch size 4 = 2 updates per epoch
 # - 50 epochs = 100 total updates
 # - both train and validation dataset rows must use max_steps=256
@@ -26,6 +29,7 @@ validation_contract: sampled12_uniform_shaped
 reward_objective_contract: episode_return_group_v1
 image_prompt_style: live_state_v3
 total_train_epochs: 50
+total_train_steps: null
 tokenizer_path: ${actor.path}
 workflow: areal_pacman.workflow.PacmanNativeVisionWorkflow
 eval_workflow: ${workflow}
@@ -106,7 +110,7 @@ actor:
   backend: "fsdp:d4p1t1"
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  path: Qwen/Qwen3.5-9B
+  path: ${oc.env:CURRICULUM1_CHECKPOINT}
   attn_impl: sdpa
   init_from_scratch: false
   disable_dropout: true

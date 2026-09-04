@@ -11,6 +11,7 @@ os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
 os.environ.setdefault("AREAL_ALLOW_DEFAULT_ADMIN_KEY", "1")
 os.environ.setdefault("TORCH_COMPILE_DISABLE", "1")
 
+
 def _load_workflow(path: str):
     module_name, class_name = path.rsplit(".", 1)
     module = importlib.import_module(module_name)
@@ -30,6 +31,44 @@ def _config_override(args: list[str], key: str) -> str | None:
     prefix = f"{key}="
     matches = [argument[len(prefix) :] for argument in args if argument.startswith(prefix)]
     return matches[-1] if matches else None
+
+
+def _apply_smoke_updates(args: list[str]) -> tuple[list[str], int | None]:
+    """Translate the release smoke flag into AReaL's exact step limit."""
+
+    cleaned: list[str] = []
+    raw_updates: str | None = None
+    index = 0
+    while index < len(args):
+        argument = args[index]
+        if argument == "--smoke-updates":
+            if raw_updates is not None:
+                raise ValueError("--smoke-updates may be specified only once")
+            if index + 1 >= len(args):
+                raise ValueError("--smoke-updates requires a positive integer")
+            raw_updates = args[index + 1]
+            index += 2
+            continue
+        if argument.startswith("--smoke-updates="):
+            if raw_updates is not None:
+                raise ValueError("--smoke-updates may be specified only once")
+            raw_updates = argument.split("=", 1)[1]
+            index += 1
+            continue
+        cleaned.append(argument)
+        index += 1
+
+    if raw_updates is None:
+        return cleaned, None
+    if re.fullmatch(r"[1-9][0-9]*", raw_updates) is None:
+        raise ValueError("--smoke-updates requires a positive integer")
+    if _config_override(cleaned, "total_train_steps") is not None:
+        raise ValueError(
+            "--smoke-updates cannot be combined with total_train_steps"
+        )
+    smoke_updates = int(raw_updates)
+    cleaned.append(f"total_train_steps={smoke_updates}")
+    return cleaned, smoke_updates
 
 
 def _backend_degree(backend: str) -> int:
@@ -468,6 +507,7 @@ def _production_dry_run(
 
 
 def main(args: list[str]) -> None:
+    args, smoke_updates = _apply_smoke_updates(args)
     dry_run = "--dry-run" in args
     args = [arg for arg in args if arg != "--dry-run"]
     validate_areal = "--validate-areal" in args
@@ -484,6 +524,8 @@ def main(args: list[str]) -> None:
         validate_areal=validate_areal,
         config_args=args,
     ):
+        if smoke_updates is not None:
+            print(f"smoke_updates={smoke_updates}")
         return
 
     from areal import PPOTrainer
@@ -494,6 +536,8 @@ def main(args: list[str]) -> None:
     from datasets import load_from_disk
 
     config, _ = load_expr_config(args, PacmanAgentConfig)
+    if smoke_updates is not None:
+        print(f"smoke_updates={smoke_updates}")
 
     if dry_run:
         dataset_path = Path(config.train_dataset.path)

@@ -200,7 +200,7 @@ backend: original-pygame
 ```bash
 "${PYTHON}" scripts/level1/dataset/prepare_level1_dataset.py \
   --output-root artifacts/datasets/level1_dataset_step32 \
-  --config configs/level1/train/level1_edward_step512_2update_group12_8gpu.yaml \
+  --config configs/level1/train/curriculum1.yaml \
   --train-episodes 8 \
   --validation-episodes 2 \
   --max-steps 32 \
@@ -212,7 +212,7 @@ backend: original-pygame
 ```bash
 "${PYTHON}" scripts/level1/dataset/prepare_level1_dataset.py \
   --output-root artifacts/datasets/level1_dataset_step256 \
-  --config configs/level1/train/level1_edward_step512_2update_group12_8gpu.yaml \
+  --config configs/level1/train/curriculum1.yaml \
   --train-episodes 8 \
   --validation-episodes 2 \
   --max-steps 256 \
@@ -241,15 +241,39 @@ export PYTHON="${ENV_ROOT}/bin/python"
 export AREAL_ROOT=/path/to/AReaL
 export MAAPACMAN_PACMAN_PYTHON_ROOT=/path/to/pacman-python
 export MODEL_PATH=/path/to/Qwen3.5-9B
-export CONFIG="$PWD/configs/level1/train/level1_edward_step512_2update_group12_8gpu.yaml"
-export DATASET_MAX_STEPS=512
+export CONFIG="$PWD/configs/level1/train/curriculum1.yaml"
+export DATASET_MAX_STEPS=256
 RUN_TS="$(date -u +%Y%m%dT%H%M%SZ)"
-export RUN_ID="edward-v3-step512-${RUN_TS}"
+export RUN_ID="curriculum1-${RUN_TS}"
 export DATASET_OUTPUT_ROOT="$PWD/artifacts/datasets/${RUN_ID}"
 export ARTIFACT_ROOT="$PWD/run_artifacts/${RUN_ID}"
 
 bash scripts/level1/train/run_level1_training.sh
 ```
+
+对同一份正式配置做 2-update smoke test：
+
+```bash
+bash scripts/level1/train/run_level1_training.sh --smoke-updates 2
+```
+
+Curriculum 2 从 Curriculum 1 导出的完整、可加载模型 checkpoint 开始；该目录必须
+包含 `config.json`：
+
+```bash
+export CONFIG="$PWD/configs/level1/train/curriculum2.yaml"
+export CURRICULUM1_CHECKPOINT=/path/to/curriculum1-model-checkpoint
+RUN_TS="$(date -u +%Y%m%dT%H%M%SZ)"
+export RUN_ID="curriculum2-${RUN_TS}"
+export DATASET_OUTPUT_ROOT="$PWD/artifacts/datasets/${RUN_ID}"
+export ARTIFACT_ROOT="$PWD/run_artifacts/${RUN_ID}"
+
+bash scripts/level1/train/run_level1_training.sh
+```
+
+`CURRICULUM1_CHECKPOINT` 只初始化 Curriculum 2 的模型权重；Curriculum 2 会建立新的
+optimizer/scheduler 训练谱系。配置里的 `recover.mode: auto` 只用于恢复同一个
+Curriculum 2 run 的中断，不用于连接两个 curriculum。
 
 启动器会依次：
 
@@ -266,11 +290,16 @@ bash scripts/level1/train/run_level1_training.sh
 `DATASET_OUTPUT_ROOT` 在启动前必须不存在；若要改到其他磁盘，请把它和
 `ARTIFACT_ROOT` 都改为当前用户可写的新目录。
 
-## 256-step / 100-update 配置
+## 两阶段正式 recipe
 
-配置文件：
+发布目录只包含两份正式训练配置：
 
-[configs/level1/train/level1_live_state_step256_100update_group12_8gpu.yaml](configs/level1/train/level1_live_state_step256_100update_group12_8gpu.yaml)
+- [curriculum1.yaml](configs/level1/train/curriculum1.yaml)：从
+  `Qwen/Qwen3.5-9B` 开始完整训练。
+- [curriculum2.yaml](configs/level1/train/curriculum2.yaml)：从
+  `${CURRICULUM1_CHECKPOINT}` 开始下一阶段完整训练。
+
+两份配置共享训练规模和环境/奖励契约；区别仅是初始模型来源。
 
 主要参数：
 
@@ -287,69 +316,37 @@ n_samples：12
 temperature：0.7
 top_p：1.0
 thinking：false
-open_action_mask：true
+edward_options：true
+open_action_mask：false
 ```
 
-## Reward v2
+Smoke test 不是第三份配置。`--smoke-updates 2` 会临时设置
+`total_train_steps=2`，不修改 YAML，也不改变完整训练的 50 epochs / 100 updates。
+
+## Reward v3
 
 奖励公式：
 
 ```text
-R_t = base_reward
+R_t = event_reward
       - 0.05
-      - 1.0 * wall
-      - 0.2 * revisit
-      + distance_reward
+      - 0.5 * wall
+      + 0.1 * pellet_clear_ratio * nearest_pellet_progress
 ```
 
-其中：
-
-```text
-base_reward = current_game_score - previous_game_score
-revisit = next_position in recent_positions[-8:]
-```
-
-普通豆子的原始游戏分数是 `+10`。未吃东西的普通移动和撞墙的
-`base_reward` 为 `0`；能量豆和幽灵保留原版游戏分数变化。
-
-当普通豆剩余比例不超过 `25%`，并且当前步骤没有吃普通豆时：
-
-```text
-distance_reward =
-    0.2 * (nearest_distance_before - nearest_distance_after)
-```
-
-否则：
-
-```text
-distance_reward = 0
-```
-
-跳过吃豆步骤的 distance shaping，是为了避免吃掉当前目标后，下一颗最近豆子
-突然变远而错误处罚吃豆行为。
-
-示例：
-
-| 行为 | 最终 reward |
-| --- | ---: |
-| 吃普通豆 | `+9.95` |
-| 普通移动 | `-0.05` |
-| 回到最近 8 步访问过的格子 | `-0.25` |
-| 后期向最近豆子靠近一格 | `+0.15` |
-| 后期远离最近豆子一格 | `-0.25` |
-| 撞墙并触发 revisit | `-1.25` |
+其中普通豆/能量豆分别为 `+1`，吃幽灵为 `+5`，通关为 `+50`，死亡和
+Edward safety refusal 分别为 `-25`。`use_base_reward: false`，因此不会把原游戏
+score 再叠加一次；吃豆步骤跳过 nearest-pellet shaping。
 
 ## 训练配置
 
 生产配置位于 `configs/level1/train/`：
 
-- `level1_edward_step512_2update_group12_8gpu.yaml`：Edward-v3 正式复现 gate，
-  2 次 optimizer update、每次 48 条完整游戏轨迹。
-- `level1_live_state_step256_100update_group12_8gpu.yaml`：256-step、
-  50-epoch、Reward v2 配置。
-- `level1_logprob_alignment_probe_8gpu.yaml`：log-prob 对齐探针。
+- `curriculum1.yaml`：Qwen3.5-9B 起点，256-step、50 epochs、100 updates。
+- `curriculum2.yaml`：Curriculum 1 checkpoint 起点，其余正式训练契约相同。
 
-较早的 Level-1 gate 保存在 `configs/level1/archive/`。更早的合成文本/视觉
+旧的独立 smoke gate 和 log-prob probe 保存在 `configs/level1/archive/`，不属于
+正式 recipe。更早的合成文本/视觉
 机器专用配置未纳入此发布分支；它们不是当前生产或复现路径。
 
 ## 最小验证
@@ -361,16 +358,15 @@ distance_reward = 0
 python -m pytest -q tests/test_level1_recipe.py
 
 AREAL_ADMIN_API_KEY=local-dry-run-only python train_areal.py \
-  --config configs/level1/train/level1_edward_step512_2update_group12_8gpu.yaml \
+  --config configs/level1/train/curriculum1.yaml \
+  --smoke-updates 2 \
   --dry-run \
   --validate-areal
 ```
 
-2026-09-04 发布 smoke 在 `H100_2_1` 别名对应的 8×NVIDIA H800 节点完成。
-测试时设置 `CUDA_VISIBLE_DEVICES=''`，未占用 GPU、未启动训练；固定三仓源码下的
-完整 headless 测试结果为 `258 passed, 25 subtests passed`，上述配置 dry-run 也通过。
-这证明环境、导入、游戏契约和启动配置可用，不等同于一次完整的分布式 GPU 训练。
-下文 2026-07-30 的 8×H100 训练 gate 是另一项历史验证。
+2026-09-04 已有的 headless smoke 对应现已归档的独立 smoke gate，不应被当作
+这两份新正式 recipe 的 GPU 验证结果。发布前应使用上面的
+`curriculum1.yaml --smoke-updates 2` 路径重新记录验证产物。
 
 正式训练前还必须验证真实 `PygamePacmanEnv`、vLLM vision 请求、reference
 log-prob、optimizer update 和 checkpoint save。
@@ -429,8 +425,8 @@ vllm:
 - 当前 `sampled12_uniform_shaped` contract 固定要求 `n_samples=12`，
   使用 group 4 前必须增加对应 validator，不能只改 YAML。
 
-建议先跑 2-update gate，并验证 rollout、reference log-prob、optimizer update、
-checkpoint save 和每张 GPU 峰值显存。OOM 时依次尝试：
+建议先用 `curriculum1.yaml --smoke-updates 2` 跑 gate，并验证 rollout、reference
+log-prob、optimizer update、checkpoint save 和每张 GPU 峰值显存。OOM 时依次尝试：
 
 ```text
 1. max_concurrent_rollouts: 2 -> 1
@@ -512,7 +508,7 @@ python -m pytest -q tests/test_level1_recipe.py
 
 ```bash
 python train_areal.py \
-  --config configs/level1/train/level1_live_state_step256_100update_group12_8gpu.yaml \
+  --config configs/level1/train/curriculum1.yaml \
   --dry-run \
   --validate-areal
 ```

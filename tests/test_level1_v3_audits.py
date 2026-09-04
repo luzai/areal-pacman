@@ -590,7 +590,7 @@ def test_split_generator_writes_relative_immutable_manifest(tmp_path):
             / "configs"
             / "level1"
             / "train"
-            / "level1_edward_step512_2update_group12_8gpu.yaml"
+            / "curriculum1.yaml"
         ),
         train_episodes=2,
         validation_episodes=1,

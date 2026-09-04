@@ -845,17 +845,20 @@ class RewardAndTrajectoryTests(unittest.TestCase):
                 RewardConfig(step_penalty=0.0),
             )
 
-    def test_step256_reward_config_contract(self) -> None:
+    def test_curriculum1_reward_config_contract(self) -> None:
         config = (
             Path(__file__).parents[1]
             / "configs"
             / "level1"
             / "train"
-            / "level1_live_state_step256_100update_group12_8gpu.yaml"
+            / "curriculum1.yaml"
         ).read_text(encoding="utf-8")
         for expected in (
             "recipe_version: maapacman-level1-ghostdoor-v3",
+            "trial_name: curriculum1-qwen3p5-9b-step256-100update-group12",
             "total_train_epochs: 50",
+            "total_train_steps: null",
+            "path: Qwen/Qwen3.5-9B",
             "validation_contract: sampled12_uniform_shaped",
             "reward_objective_contract: episode_return_group_v1",
             "use_base_reward: false",
@@ -912,12 +915,44 @@ class RewardAndTrajectoryTests(unittest.TestCase):
         self.assertIn("\n  offload: true", "\n" + ref_section)
         self.assertNotIn("revisit_penalty:", config)
 
-    def test_step512_edward_gate_config_contract(self) -> None:
+    def test_only_two_formal_curriculum_recipes_are_published(self) -> None:
+        train_dir = (
+            Path(__file__).parents[1] / "configs" / "level1" / "train"
+        )
+        self.assertEqual(
+            sorted(path.name for path in train_dir.glob("*.yaml")),
+            ["curriculum1.yaml", "curriculum2.yaml"],
+        )
+
+    def test_curriculum2_initializes_from_curriculum1_checkpoint(self) -> None:
         config = (
             Path(__file__).parents[1]
             / "configs"
             / "level1"
             / "train"
+            / "curriculum2.yaml"
+        ).read_text(encoding="utf-8")
+        for expected in (
+            "trial_name: curriculum2-from-curriculum1-step256-100update-group12",
+            "total_train_epochs: 50",
+            "total_train_steps: null",
+            "path: ${oc.env:CURRICULUM1_CHECKPOINT}",
+            "tokenizer_path: ${actor.path}",
+            "model: ${actor.path}",
+            "reward_objective_contract: episode_return_group_v1",
+            "artifacts/datasets/level1_dataset_step256/train_hf",
+            "artifacts/datasets/level1_dataset_step256/validation_hf",
+            "mode: auto",
+        ):
+            self.assertIn(expected, config)
+        self.assertNotIn("path: Qwen/Qwen3.5-9B", config)
+
+    def test_archived_step512_edward_gate_config_contract(self) -> None:
+        config = (
+            Path(__file__).parents[1]
+            / "configs"
+            / "level1"
+            / "archive"
             / "level1_edward_step512_2update_group12_8gpu.yaml"
         ).read_text(encoding="utf-8")
         for expected in (
@@ -2525,7 +2560,7 @@ class TrainerGenerationContractTests(unittest.TestCase):
         )
         self.assertIn("AReaL import escaped selected checkout", launcher)
 
-    def test_training_launcher_defaults_to_current_v3_gate_and_chunks_logps(self) -> None:
+    def test_training_launcher_defaults_to_curriculum1_and_chunks_logps(self) -> None:
         launcher = (
             Path(__file__).parents[1]
             / "scripts"
@@ -2534,15 +2569,22 @@ class TrainerGenerationContractTests(unittest.TestCase):
             / "run_level1_training.sh"
         ).read_text(encoding="utf-8")
         self.assertIn(
-            "configs/level1/train/level1_edward_step512_2update_group12_8gpu.yaml",
+            "configs/level1/train/curriculum1.yaml",
             launcher,
         )
         self.assertNotIn(
             "configs/level1/archive/level1_image_overfit_4epoch_group12_8gpu.yaml",
             launcher,
         )
-        self.assertIn('TRAIN_EPISODES="${TRAIN_EPISODES:-4}"', launcher)
-        self.assertIn('DATASET_MAX_STEPS="${DATASET_MAX_STEPS:-512}"', launcher)
+        self.assertIn('TRAIN_EPISODES="${TRAIN_EPISODES:-8}"', launcher)
+        self.assertIn('DATASET_MAX_STEPS="${DATASET_MAX_STEPS:-256}"', launcher)
+        self.assertIn('SMOKE_ARGS=(--smoke-updates "${SMOKE_UPDATES}")', launcher)
+        self.assertIn(
+            "'${oc.env:CURRICULUM1_CHECKPOINT}'",
+            launcher,
+        )
+        self.assertIn('MODEL_PATH="${CURRICULUM1_CHECKPOINT}"', launcher)
+        self.assertIn('model.safetensors.index.json', launcher)
         self.assertIn(
             'DATASET_OUTPUT_ROOT="${DATASET_OUTPUT_ROOT:-${ARTIFACT_ROOT}/dataset}"',
             launcher,
