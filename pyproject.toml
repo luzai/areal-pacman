@@ -4,21 +4,25 @@ version = "0.1.0"
 description = "AReaL image-only reinforcement-learning recipe for MaaPacman"
 requires-python = ">=3.10"
 dependencies = [
-  "maapacman>=0.4,<0.5",
   "numpy>=1.24",
   "Pillow>=10",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = ["pytest", "pygame>=2.5"]
 agent = ["openai"]
 dataset = ["datasets"]
+pygame = ["pygame>=2.5"]
 h100-offload = [
   "torch-memory-saver==0.0.9.post1; platform_system == 'Linux'",
 ]
 
 [tool.setuptools.packages.find]
-include = ["areal_pacman*"]
+include = ["areal_pacman*", "maapacman*"]
+
+[tool.setuptools.package-data]
+"areal_pacman.synthetic" = ["maze_suites/*.json"]
+"maapacman.env" = ["*.md", "levels/*.txt", "levels/*.json", "levels/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

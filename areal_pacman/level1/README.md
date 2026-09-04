@@ -10,6 +10,9 @@ This package owns the MaaPacman Level-1 reinforcement-learning recipe:
 - `rewards.py`: Level-1 reward composition and audit.
 - `trajectories.py`: Level-1 trajectory validation and summaries.
 
+The headless environment is the bundled sibling package `maapacman` in the
+same repository. A separate MaaPacman checkout is not required.
+
 New code should import from `areal_pacman.level1`. Root modules with the same
 names are compatibility shims for existing Python callers and YAML workflow
 paths.

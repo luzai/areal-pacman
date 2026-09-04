@@ -5,6 +5,7 @@ __pycache__/
 .coverage
 .env
 .venv/
+.codex-tmp/
 build/
 dist/
 ~$*
