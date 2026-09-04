@@ -366,6 +366,12 @@ AREAL_ADMIN_API_KEY=local-dry-run-only python train_areal.py \
   --validate-areal
 ```
 
+2026-09-04 发布 smoke 在 `H100_2_1` 别名对应的 8×NVIDIA H800 节点完成。
+测试时设置 `CUDA_VISIBLE_DEVICES=''`，未占用 GPU、未启动训练；固定三仓源码下的
+完整 headless 测试结果为 `258 passed, 25 subtests passed`，上述配置 dry-run 也通过。
+这证明环境、导入、游戏契约和启动配置可用，不等同于一次完整的分布式 GPU 训练。
+下文 2026-07-30 的 8×H100 训练 gate 是另一项历史验证。
+
 正式训练前还必须验证真实 `PygamePacmanEnv`、vLLM vision 请求、reference
 log-prob、optimizer update 和 checkpoint save。
 
