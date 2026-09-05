@@ -131,11 +131,14 @@ actor:
   init_from_scratch: false
   disable_dropout: true
   offload: true
+  fsdp:
+    # Keep phase-level offload, but disable FSDP CPU parameter offload.
+    offload_params: false
   gradient_checkpointing: true
   dtype: bfloat16
   optimizer_dtype: bfloat16
   mb_spec:
-    # The Edward JSON-option trajectory can exceed 512 tokens. Keep enough
+    # The Edward option-code trajectory can exceed 512 tokens. Keep enough
     # headroom for those sequences and NCCL's grad-norm all-reduce.
     max_tokens_per_mb: 1024
   optimizer:
@@ -203,7 +206,7 @@ ref:
   optimizer: null
   offload: true
   fsdp:
-    offload_params: true
+    offload_params: false
   scheduling_strategy:
     type: colocation
     target: actor

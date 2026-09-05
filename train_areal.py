@@ -79,6 +79,40 @@ def _backend_degree(backend: str) -> int:
     return int(match.group(1))
 
 
+def _validate_actor_colocated_reference_offload(config) -> None:
+    """Require a supported memory policy without conflating TMS and FSDP."""
+
+    ref = config.ref
+    if (
+        ref is None
+        or ref.scheduling_strategy.type != "colocation"
+        or ref.scheduling_strategy.target != "actor"
+    ):
+        return
+    if ref.fsdp.offload_params:
+        return
+    if getattr(config, "allow_unoffloaded_actor_colocated_ref_for_smoke", False):
+        return
+    # The pinned AReaL trainer offloads both engines initially, onloads/refills
+    # the reference only for ref_logp, and offloads it before onloading actor.
+    # FSDPEngine's TMS pause/resume is independent of CPUOffloadPolicy. Require
+    # both phase transitions and matching FSDP allocations for this extra path.
+    phase_offload = (
+        config.enable_offload is True
+        and config.actor.offload is True
+        and ref.offload is True
+        and config.actor.backend.startswith("fsdp:")
+        and ref.backend == config.actor.backend
+    )
+    if not phase_offload:
+        raise ValueError(
+            "an actor-colocated reference requires native FSDP parameter "
+            "offload, or enable_offload=true with actor.offload=true and "
+            "ref.offload=true on matching FSDP backends, unless the explicit "
+            "small-model smoke override is enabled"
+        )
+
+
 def _validate_reward_objective_contract(config) -> None:
     contract = config.reward_objective_contract
     if contract == "legacy":
@@ -689,16 +723,7 @@ def _production_dry_run(
                     raise ValueError(
                         "a colocated reference engine must target actor or rollout"
                     )
-                if (
-                    config.ref.scheduling_strategy.target == "actor"
-                    and not config.ref.fsdp.offload_params
-                    and not config.allow_unoffloaded_actor_colocated_ref_for_smoke
-                ):
-                    raise ValueError(
-                        "an actor-colocated reference must use native FSDP "
-                        "parameter offload unless the explicit small-model "
-                        "smoke override is enabled"
-                    )
+                _validate_actor_colocated_reference_offload(config)
             else:
                 allocated_gpus += ref_degree
         if allocated_gpus != gpu_count:

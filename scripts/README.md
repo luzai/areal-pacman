@@ -75,6 +75,27 @@ image-inference test. Do not label base placeholders or smoke weights as the
 final trained agent. `recover.mode=disabled` also disables recovery-state saving
 in the pinned AReaL; ordinary model weights do not restore optimizer state.
 
+### Temporary C2 test from legacy Iter25 gs24
+
+This explicit compatibility-test entry point does not change the formal C2
+default or replace the new C1 -> C2 acceptance gate. Confirm that the supplied
+complete checkpoint is actually Iter25 **globalstep24**; a directory name alone
+does not prove its identity. No server-specific checkpoint path is assumed.
+After the usual environment setup and live GPU/ownership checks, run:
+
+```bash
+bash scripts/level1/train/run_c2_legacy_iter25_gs24_smoke.sh \
+  /absolute/path/to/verified-iter25-gs24-complete-checkpoint \
+  /absolute/path/to/new-legacy-smoke-output
+```
+
+The wrapper fixes C2 YAML, two updates, a `legacy-iter25-gs24-smoke-*` run name,
+and a fresh output/dataset directory. It clears inherited dataset overrides,
+uses a fresh optimizer, and retains the shared launcher's model validation and
+GPU safeguards. Existing output paths are rejected. This runs a training smoke,
+not an MP4-only rollout; legacy video evaluation is a separate task. This
+wrapper does not itself certify checkpoint provenance or successful inference.
+
 Data preparation creates a new immutable bundle containing `train.jsonl`,
 `validation.jsonl`, `train_hf/`, `validation_hf/`, `manifest.json` and
 `manifest.sha256`. Keep the bundle together and retain these canonical names.
@@ -88,6 +109,16 @@ C1 executes the first legal U/D/L/R without constructing Edward; C2 records the
 advertised/selected Edward candidate. These anchors are neither model rollout
 nor training samples. `prepare_level1_v3_audits.py` is an Edward-only baseline
 diagnostic and explicitly rejects C1 configurations.
+
+### Actor/reference offload validation
+
+For an actor-colocated reference, native FSDP parameter offload and phase-level
+TMS offload are separate policies. The pinned trainer also supports disabling
+`fsdp.offload_params` when `enable_offload`, `actor.offload`, and `ref.offload`
+are all true and both engines use the same FSDP backend allocation. The launcher
+rejects other phase-only combinations; do not use the legacy small-model smoke
+override for the 9B recipe. Passing this check is not a GPU memory or training
+completion guarantee: validate the real smoke before a full run.
 
 ### Recipe-driven evaluation
 

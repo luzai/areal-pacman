@@ -131,6 +131,9 @@ actor:
   init_from_scratch: false
   disable_dropout: true
   offload: true
+  fsdp:
+    # Keep phase-level offload, but disable FSDP CPU parameter offload.
+    offload_params: false
   gradient_checkpointing: true
   dtype: bfloat16
   optimizer_dtype: bfloat16
@@ -198,7 +201,7 @@ ref:
   optimizer: null
   offload: true
   fsdp:
-    offload_params: true
+    offload_params: false
   scheduling_strategy:
     type: colocation
     target: actor
