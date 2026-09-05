@@ -157,7 +157,7 @@ recipe mirror and is separated from robotics development:
 ```text
 ${AREAL_ROOT}
   release branch: release/pacman-v0.1.0
-  pinned revision: a15a66a07e81d541e421c28e1a4e5fc1cc843653
+  pinned revision: ee872bae29152f4b553349385aced59abd1651ba
   origin: https://github.com/luzai/AReaL.git
 
 ${UNRELATED_AREAL_ROOT}

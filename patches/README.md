@@ -7,6 +7,12 @@ float bounds, required to preserve C1 `reward_clip: .inf` instead of converting 
 to `null`. This does not permit non-finite task rewards. The release remains
 source/recipe-only; this runtime fix does not establish a passing GPU smoke test.
 
+It also counts the actual sequence rows inside grouped PPO batches when
+computing the synchronized padding target. C1 keeps multi-row prompt groups;
+their container count is not the worker batch size. C2 singleton row dispatch
+retains its existing target. CPU regressions cover both representations and
+metadata-only RTensors; distributed training still requires the GPU gates.
+
 ## Required for dynamic open-action-mask training
 
 - `areal_pacman_action_logprobs.patch`
