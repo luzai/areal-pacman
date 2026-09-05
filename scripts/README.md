@@ -35,6 +35,25 @@ unset RUN_ID ARTIFACT_ROOT DATASET_OUTPUT_ROOT
 bash scripts/level1/train/run_level1_training.sh --smoke-updates 2
 ```
 
+vLLM uses Unix-domain sockets whose full path is limited to 107 bytes. Its
+directory plus `/` and a 36-character UUID must fit. A long `TMPDIR` under a run
+artifact directory can exceed this limit even when the directory is writable.
+Before launching, explicitly create a short directory within your own task area,
+then set `VLLM_RPC_BASE_PATH` (supported by the pinned vLLM 0.22.1), for example:
+
+```bash
+mkdir -p /path/to/own/short-ipc
+chmod 700 /path/to/own/short-ipc
+export VLLM_RPC_BASE_PATH=/path/to/own/short-ipc
+```
+
+Replace that example with your own task-owned path; do not use another person's
+directory. The launcher checks the byte limit before any model/GPU checks and
+briefly binds a test socket only in an explicitly selected directory. It never
+creates or rewrites a temporary-directory setting. A valid short override lets
+you retain a long `TMPDIR` and long artifact paths. Without an explicit temporary
+path, the existing library default is preserved and only its length is checked.
+
 For Curriculum 2, select `configs/level1/train/curriculum2.yaml` and export
 `CURRICULUM1_CHECKPOINT` as the complete loadable model checkpoint produced by
 Curriculum 1. The launcher loads its config, tokenizer, and processor offline

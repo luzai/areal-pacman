@@ -63,6 +63,65 @@ if [[ ! -x "${PYTHON}" ]]; then
   echo "Python is not executable: ${PYTHON}" >&2
   exit 2
 fi
+# vLLM 0.22.1 uses VLLM_RPC_BASE_PATH (default tempfile.gettempdir())
+# followed by '/' + a 36-character UUID for its Unix-domain socket path.
+# Check this before importing model/GPU libraries or creating run artifacts.
+"${PYTHON}" - --pacman-vllm-ipc-preflight <<'PY'
+import json
+import os
+import socket
+import sys
+import tempfile
+import uuid
+
+def fail(message):
+    print(f"vllm_ipc_preflight=failed: {message}", file=sys.stderr)
+    raise SystemExit(2)
+
+override = os.environ.get("VLLM_RPC_BASE_PATH")
+explicit_temp = next((name for name in ("TMPDIR", "TEMP", "TMP") if os.environ.get(name)), None)
+base = (override if override is not None else
+        os.environ[explicit_temp] if explicit_temp else tempfile.gettempdir())
+source = "VLLM_RPC_BASE_PATH" if override is not None else (explicit_temp or "tempfile default")
+if not base or not os.path.isabs(base):
+    fail(f"{source} must identify an existing absolute directory")
+endpoint = f"{base}/{uuid.uuid4()}"
+endpoint_bytes = len(os.fsencode(endpoint))
+if endpoint_bytes > 107:
+    fail(
+        f"{source} gives a {endpoint_bytes}-byte Unix socket path (maximum 107; "
+        "base + '/' + 36-character UUID). Set VLLM_RPC_BASE_PATH to an existing "
+        "short task-owned directory; TMPDIR and artifact paths need not change."
+    )
+if not os.path.isdir(base):
+    fail(f"{source} directory does not exist: {base}")
+bound = False
+if override is not None or explicit_temp:
+    # Probe only the explicitly selected directory. Do not create a directory,
+    # alter TMPDIR, or introduce an implicit short path elsewhere.
+    if not hasattr(socket, "AF_UNIX"):
+        fail("selected Python does not support AF_UNIX; run this launcher on Linux")
+    probe = None
+    try:
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        probe.bind(endpoint)
+        bound = True
+        inode = os.lstat(endpoint)
+    except OSError as error:
+        fail(f"cannot bind a Unix socket in {source}: {error}")
+    finally:
+        if probe is not None:
+            probe.close()
+        if bound:
+            current = os.lstat(endpoint)
+            if (current.st_dev, current.st_ino) != (inode.st_dev, inode.st_ino):
+                fail("probe socket was replaced; refusing to remove another file")
+            os.unlink(endpoint)
+print("vllm_ipc_preflight=ok " + json.dumps({
+    "source": source, "base_path": base, "endpoint_bytes": endpoint_bytes,
+    "max_endpoint_bytes": 107, "socket_bind_verified": bound,
+}, sort_keys=True))
+PY
 if [[ ! -f "${CONFIG}" ]]; then
   echo "Training config does not exist: ${CONFIG}" >&2
   exit 2
