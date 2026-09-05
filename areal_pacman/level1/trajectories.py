@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Mapping
 from maapacman.env.ghost_modes import validate_ghost_mode, validate_ghost_state
 from maapacman.env.pygame_environment import ruleset_revision
@@ -17,6 +18,11 @@ from .level1_dataset import (
     SUPPORTED_MAX_STEPS,
 )
 from .rewards import REWARD_RECIPE_VERSION, audit_reward
+from .prompts import (
+    EDWARD_OPTION_CODE_V1_SYSTEM_PROMPT, compact_edward_decision_prompt,
+    live_state_instruction, prompt_contract_metadata, prompt_text,
+    sent_prompt_sha256, text_sha256,
+)
 from .token_constraints import EDWARD_OPTION_CONSTRAINT, OPTION_CODE_BY_ID
 
 
@@ -435,7 +441,13 @@ def _audit_parse_failure_evidence(
     previous_score: int,
     accumulated_shaped_reward: float,
     expected_target_return: float,
+    ghost_mode: str,
 ) -> None:
+    validate_ghost_state(
+        {"ghost_mode": ghost_mode, "ghosts": step.get("ghosts"),
+         "edible_ticks": step.get("edible_ticks"), "events": step.get("events")},
+        ghost_mode,
+    )
     score_components = step.get("score_components")
     zero_fields = (
         "base_reward",
@@ -505,9 +517,81 @@ def _audit_parse_failure_evidence(
             )
         )
     ):
-        raise ValueError(
-            "parse-failure step has invalid fail-closed contract evidence"
+        raise ValueError("parse-failure step has invalid fail-closed contract evidence")
+
+
+def _audit_prompt_evidence(payload: Mapping[str, Any]) -> None:
+    # Older archived payloads did not record prompt fingerprints.
+    if "prompt_template_sha256" not in payload:
+        return
+    decoding = payload.get("decoding") or {}
+    edward = bool(decoding.get("edward_options"))
+    style = payload["image_prompt_style"]
+    expected = prompt_contract_metadata(style, edward_options=edward)
+    if not edward and not decoding.get("open_action_mask"):
+        expected["action_protocol"] = "direct-action-token-v1"
+    if any(payload.get(key) != value for key, value in expected.items()):
+        raise ValueError("trajectory prompt template does not match actual harness")
+    system = EDWARD_OPTION_CODE_V1_SYSTEM_PROMPT if edward else prompt_text(style)[0]
+    if payload.get("system_prompt") != system:
+        raise ValueError("trajectory system prompt does not match harness")
+    for step in payload.get("trajectory", []):
+        fields = (
+            "model_system_prompt",
+            "model_user_prompt_sha256",
+            "sent_prompt_sha256",
         )
+        if not step.get("model_called"):
+            if (
+                any(step.get(field) is not None for field in fields)
+                or step.get("model_user_instruction") is not None
+            ):
+                raise ValueError(
+                    "non-model environment step cannot claim a sent prompt"
+                )
+            continue
+        user = step.get("model_user_instruction")
+        if not isinstance(user, str) or step.get("model_system_prompt") != system:
+            raise ValueError("trajectory missing actual model prompt text")
+        if step.get("model_user_prompt_sha256") != text_sha256(user) or step.get(
+            "sent_prompt_sha256"
+        ) != sent_prompt_sha256(system, user, step["observation_png_sha256"]):
+            raise ValueError("trajectory actual model prompt hash mismatch")
+        context = step.get("observation_context")
+        if style == "live_state_v3":
+            validate_ghost_state(
+                {**context, "ghost_mode": payload["ghost_mode"], "events": []},
+                payload["ghost_mode"],
+            )
+        if edward:
+            code_map = context.get("option_code_map") or {}
+            inverse = {option: code for code, option in code_map.items()}
+            candidates = [
+                SimpleNamespace(**candidate)
+                for candidate in context["planner_candidates"]
+            ]
+            constraint = SimpleNamespace(
+                code_for_option=inverse.__getitem__,
+                rendered_choices=tuple(
+                    inverse[candidate.option_id] for candidate in candidates
+                ),
+            )
+            actual = compact_edward_decision_prompt(context, candidates, constraint)
+        else:
+            actual = (
+                live_state_instruction(context)
+                if style == "live_state_v3"
+                else prompt_text(style)[1]
+            )
+        if user != actual:
+            raise ValueError("actual model prompt disagrees with observation context")
+        if (
+            not edward
+            and decoding.get("open_action_mask")
+            and not step.get("parse_failed")
+        ):
+            if step.get("action") not in step.get("open_action_mask", []):
+                raise ValueError("direct action violates the open-action mask")
 
 
 def audit_trajectory(payload: Mapping[str, Any]) -> None:
@@ -546,6 +630,11 @@ def audit_trajectory(payload: Mapping[str, Any]) -> None:
         raise ValueError(
             "trajectory maapacman revision must match bundled areal-pacman"
         )
+    pacman_revision = source_revisions["pacman-python"]["commit"]
+    if payload["pacman_python_revision"] != pacman_revision:
+        raise ValueError("trajectory pacman-python revision must match source revisions")
+    if payload["renderer_revision"] != f"pacman-python:{pacman_revision}":
+        raise ValueError("trajectory renderer revision must match pacman-python")
     if payload["reward_recipe_version"] != REWARD_RECIPE_VERSION:
         raise ValueError("trajectory has the wrong reward recipe")
     has_safety_refusal_contract = (
@@ -654,6 +743,7 @@ def audit_trajectory(payload: Mapping[str, Any]) -> None:
                 previous_score=previous_score,
                 accumulated_shaped_reward=shaped_total,
                 expected_target_return=contract_violation_return,
+                ghost_mode=mode,
             )
         else:
             if step["action"] not in {"U", "D", "L", "R", "S"}:
@@ -904,10 +994,12 @@ def audit_trajectory(payload: Mapping[str, Any]) -> None:
     )
     if expected_normal_eaten != int(final["normal_pellets_eaten"]):
         raise ValueError("trajectory normal-pellet counts do not reconcile")
+    _audit_prompt_evidence(payload)
 
 
 def write_trajectory(payload: Mapping[str, Any], directory: Path) -> Path:
     audit_trajectory(payload)
+    encoded = json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n"
     directory.mkdir(parents=True, exist_ok=True)
     safe_id = "".join(
         character if character.isalnum() or character in "-_" else "_"
@@ -922,7 +1014,7 @@ def write_trajectory(payload: Mapping[str, Any], directory: Path) -> Path:
     )
     output = directory / f"{safe_id}--sample-{safe_sample_id}.json"
     with output.open("x", encoding="utf-8", newline="\n") as handle:
-        handle.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        handle.write(encoded)
     return output
 
 

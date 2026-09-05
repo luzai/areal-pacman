@@ -855,21 +855,21 @@ class RewardAndTrajectoryTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         for expected in (
             "recipe_version: maapacman-level1-ghostdoor-v3",
-            "trial_name: curriculum1-qwen3p5-9b-step32-100update-group12",
-            "total_train_epochs: 50",
+            "trial_name: curriculum1-qwen3p5-9b-step512-100update-direct",
+            "total_train_epochs: 5",
             "total_train_steps: null",
             "path: Qwen/Qwen3.5-9B",
             "validation_contract: sampled12_uniform_shaped",
-            "reward_objective_contract: episode_return_group_v1",
+            "reward_objective_contract: step_local_raw_v1",
             "use_base_reward: false",
             "normal_pellet_reward: 1.0",
             "power_pellet_reward: 1.0",
             "ghost_reward: 5.0",
             "fruit_reward: 0.0",
             "reward_recipe_version: maapacman-level1-event-reward-v3",
-            "death_penalty: 25.0",
+            "death_penalty: 100.0",
             "completion_reward: 50.0",
-            "safety_refusal_penalty: 25.0",
+            "safety_refusal_penalty: 100.0",
             "gdn_prefill_backend: triton",
             "kl_logprob_source: proximal",
             "prox_logp_method: recompute",
@@ -886,10 +886,10 @@ class RewardAndTrajectoryTests(unittest.TestCase):
             "nearest_pellet_remaining_ratio_threshold: 1.0",
             "nearest_pellet_scale_by_cleared_ratio: true",
             "nearest_pellet_skip_on_eat: true",
-            "edward_options: true",
-            "objective_encoding: edward-option-code-v1",
-            "action_token_choice: false",
-            "open_action_mask: false",
+            "edward_options: false",
+            "objective_encoding: direct-action-token-v1",
+            "action_token_choice: true",
+            "open_action_mask: true",
             "max_new_tokens: 1",
             "temperature: ${actor.temperature}",
             "keep_last: 2",
@@ -898,19 +898,15 @@ class RewardAndTrajectoryTests(unittest.TestCase):
             "enable_offload: true",
             "max_tokens_per_mb: 1024",
             "offload: true",
-            "artifacts/datasets/curriculum1/train_hf",
-            "artifacts/datasets/curriculum1/validation_hf",
+            "artifacts/datasets/curriculum1-step512-v1/train_hf",
+            "artifacts/datasets/curriculum1-step512-v1/validation_hf",
         ):
             self.assertIn(expected, config)
         actor_section = config.split("\nref:\n", 1)[0].split("\nactor:\n", 1)[1]
         ref_section = config.split("\nref:\n", 1)[1].split("\nvllm:\n", 1)[0]
         self.assertIn("\n  offload: true", "\n" + actor_section)
-        self.assertIn("\n  reward_norm:", "\n" + actor_section)
-        self.assertIn("\n    mean_level: group", "\n" + actor_section)
-        self.assertIn("\n    std_level: group", "\n" + actor_section)
-        self.assertIn(
-            "\n    group_size: ${gconfig.n_samples}", "\n" + actor_section
-        )
+        self.assertIn("\n  reward_norm: null", "\n" + actor_section)
+        self.assertIn("\n  reward_clip: .inf", "\n" + actor_section)
         self.assertIn("\n  adv_norm: null", "\n" + actor_section)
         self.assertIn("\n  offload: true", "\n" + ref_section)
         self.assertNotIn("revisit_penalty:", config)
@@ -933,15 +929,15 @@ class RewardAndTrajectoryTests(unittest.TestCase):
             / "curriculum2.yaml"
         ).read_text(encoding="utf-8")
         for expected in (
-            "trial_name: curriculum2-from-curriculum1-step256-100update-group12",
-            "total_train_epochs: 10",
+            "trial_name: curriculum2-from-curriculum1-step512-100update-group12",
+            "total_train_epochs: 5",
             "total_train_steps: null",
             "path: ${oc.env:CURRICULUM1_CHECKPOINT}",
             "tokenizer_path: ${actor.path}",
             "model: ${actor.path}",
             "reward_objective_contract: episode_return_group_v1",
-            "artifacts/datasets/curriculum2/train_hf",
-            "artifacts/datasets/curriculum2/validation_hf",
+            "artifacts/datasets/curriculum2-step512-v1/train_hf",
+            "artifacts/datasets/curriculum2-step512-v1/validation_hf",
             "ghost_mode: normal",
             "mode: disabled",
         ):
@@ -1656,6 +1652,10 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertEqual(failure["reward_accumulated_before_violation"], 0.0)
         self.assertEqual(failure["contract_violation_adjustment"], -1.0)
         audit_trajectory(payload)
+        tampered = copy.deepcopy(payload)
+        tampered["trajectory"][-1]["ghosts"] = []
+        with self.assertRaisesRegex(ValueError, "ghost count"):
+            audit_trajectory(tampered)
 
     def test_parse_failure_overrides_accumulated_episode_return_to_minus_one(
         self,

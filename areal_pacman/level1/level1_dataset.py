@@ -17,6 +17,13 @@ from maapacman.env import (
 from maapacman.env.ghost_modes import validate_ghost_mode
 from maapacman.planner import EdwardPlanner
 
+from .recipe import (
+    DIRECT_ACTION_PROTOCOL,
+    DIRECT_PROMPT_VERSION,
+    EDWARD_OPTION_PROTOCOL,
+    EDWARD_PROMPT_VERSION,
+)
+
 
 ENV_NAME = "pacman-python-level1-ghostdoor-v3"
 ENV_API_VERSION = "3.0"
@@ -25,7 +32,7 @@ DATASET_CONTRACT_VERSION = "maapacman-level1-dataset-v4"
 PREFIX_AUDIT_CONTRACT_VERSION = "planner-preterminal-prefix-audit-v1"
 # Production horizons are selected by each immutable dataset row.  The v4
 # contract deliberately has no implicit 287-step episode assumption.
-PRODUCTION_MAX_STEPS = 256
+PRODUCTION_MAX_STEPS = 512
 SHORT_HORIZON_MAX_STEPS = 32
 LONG_HORIZON_MAX_STEPS = 256
 STRESS_MAX_STEPS = 512
@@ -39,6 +46,20 @@ SUPPORTED_MAX_STEPS = frozenset(
     }
 )
 REPOSITORY_NAMES = ("pacman-python", "areal-pacman", "AReaL")
+
+
+def audit_anchor_semantics(action_protocol: str) -> dict[str, Any]:
+    if action_protocol not in {DIRECT_ACTION_PROTOCOL, EDWARD_OPTION_PROTOCOL}:
+        raise ValueError("unsupported episode action_protocol")
+    return {
+        "scope": (
+            "initial_state_one_direct_step"
+            if action_protocol == DIRECT_ACTION_PROTOCOL
+            else "initial_state_one_edward_step"
+        ),
+        "model_rollout": False,
+        "training_sample": False,
+    }
 
 
 def _canonical_sha256(value: Any) -> str:
@@ -220,6 +241,16 @@ def validate_episode_row(row: Mapping[str, Any]) -> None:
         raise ValueError(f"env.max_steps must be one of: {supported}")
     if env.get("observation_mode") != "rgb":
         raise ValueError("env.observation_mode must be 'rgb'")
+    action_protocol = row.get("action_protocol", EDWARD_OPTION_PROTOCOL)
+    if "action_protocol" in row:
+        audit_anchor_semantics(action_protocol)
+        expected_prompt = (
+            DIRECT_PROMPT_VERSION
+            if action_protocol == DIRECT_ACTION_PROTOCOL
+            else EDWARD_PROMPT_VERSION
+        )
+        if row.get("prompt_version") != expected_prompt:
+            raise ValueError("episode prompt_version does not match action_protocol")
     prefix_actions = row.get("state_prefix_actions", [])
     if (
         not isinstance(prefix_actions, list)
@@ -233,6 +264,8 @@ def validate_episode_row(row: Mapping[str, Any]) -> None:
         raise ValueError("decision_steps, when present, must be exactly 1")
     prefix_audit = row.get("state_prefix_audit")
     if prefix_actions or decision_steps is not None:
+        if action_protocol == DIRECT_ACTION_PROTOCOL:
+            raise ValueError("direct episode cannot contain Edward state prefixes")
         if not isinstance(prefix_audit, Mapping):
             raise ValueError("state-prefix rows require state_prefix_audit")
         if prefix_audit.get("contract_version") != PREFIX_AUDIT_CONTRACT_VERSION:
@@ -285,17 +318,20 @@ def validate_episode_row(row: Mapping[str, Any]) -> None:
             or anchor.get("step") != 1
         ):
             raise ValueError("audit_anchor identity does not match episode spec")
-        if anchor.get("audit_anchor_semantics") != {
-            "scope": "initial_state_one_edward_step",
-            "model_rollout": False,
-            "training_sample": False,
-        }:
+        if anchor.get("audit_anchor_semantics") != audit_anchor_semantics(action_protocol):
             raise ValueError("audit_anchor semantics are invalid")
+        if anchor.get("action_protocol", EDWARD_OPTION_PROTOCOL) != action_protocol:
+            raise ValueError("audit_anchor action_protocol does not match episode")
         if row.get("source_revisions") != anchor.get("source_revisions"):
             raise ValueError("episode source revisions differ from audit_anchor")
         selected = anchor.get("selected_option")
         action = anchor.get("executed_primitive_action")
-        if not isinstance(selected, Mapping) or selected.get("first_action") != action:
+        if action_protocol == DIRECT_ACTION_PROTOCOL:
+            if selected is not None or anchor.get("planner_candidates") != []:
+                raise ValueError("direct audit_anchor cannot contain Edward options")
+            if action not in {"U", "D", "L", "R"}:
+                raise ValueError("direct audit_anchor must execute U/D/L/R")
+        elif not isinstance(selected, Mapping) or selected.get("first_action") != action:
             raise ValueError("audit_anchor selected option/action mismatch")
         anchor_env = anchor.get("env")
         if not isinstance(anchor_env, Mapping):
@@ -314,6 +350,7 @@ def validate_episode_row(row: Mapping[str, Any]) -> None:
             "level_revision",
             "renderer_revision",
             "ruleset_revision",
+            "max_steps",
         }
         if any(anchor_env.get(field) != env.get(field) for field in identity_fields):
             raise ValueError("audit_anchor provenance differs from episode spec")
@@ -326,6 +363,7 @@ def make_episode_row(
     seed: int = 0,
     max_steps: int = PRODUCTION_MAX_STEPS,
     ghost_mode: str = "normal",
+    action_protocol: str | None = None,
 ) -> dict[str, Any]:
     if not isinstance(index, int) or isinstance(index, bool) or index < 1:
         raise ValueError("index must be a positive integer")
@@ -359,6 +397,13 @@ def make_episode_row(
             "observation_mode": "rgb",
         },
     }
+    if action_protocol is not None:
+        row["action_protocol"] = action_protocol
+        row["prompt_version"] = (
+            DIRECT_PROMPT_VERSION
+            if action_protocol == DIRECT_ACTION_PROTOCOL
+            else EDWARD_PROMPT_VERSION
+        )
     validate_episode_row(row)
     return row
 
@@ -370,12 +415,14 @@ def generate_episode_rows(
     seed: int = 0,
     max_steps: int = PRODUCTION_MAX_STEPS,
     ghost_mode: str = "normal",
+    action_protocol: str | None = None,
 ) -> Iterator[dict[str, Any]]:
     if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
         raise ValueError("count must be a positive integer")
     for index in range(1, count + 1):
         yield make_episode_row(
-            index, split=split, seed=seed, max_steps=max_steps, ghost_mode=ghost_mode
+            index, split=split, seed=seed, max_steps=max_steps, ghost_mode=ghost_mode,
+            action_protocol=action_protocol,
         )
 
 

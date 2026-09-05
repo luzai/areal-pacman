@@ -86,7 +86,7 @@ def measure(processor: object) -> dict[str, int]:
         enable_thinking=False,
     )
     processed = processor(
-        text=[text], images=[image], padding=False, return_tensors="pt"
+        text=[text], images=[image], padding=False, truncation=False, return_tensors="pt"
     )
     return {
         "input_tokens": int(processed["input_ids"].shape[-1]),
@@ -107,7 +107,7 @@ def main() -> None:
 
     from transformers import AutoProcessor
 
-    processor = AutoProcessor.from_pretrained(args.model_path)
+    processor = AutoProcessor.from_pretrained(args.model_path, local_files_only=True, trust_remote_code=False)
     result = measure(processor)
     print(json.dumps(result, sort_keys=True))
     if result["input_tokens"] >= args.max_input_tokens:

@@ -40,19 +40,41 @@ def _write_summary(
         "decoding": {
             "enable_thinking": False,
             "temperature": temperature,
-            "top_p": 1.0 if temperature == 0 else 0.95,
+            "top_p": 1.0,
         },
         "average_final_score": score,
         "average_pellet_clear_rate": clear_rate,
         "average_wall_collisions": walls,
-        "average_episode_length": 287,
+        "average_episode_length": 512,
         "max_no_progress_streak": 20,
         "average_base_reward": score,
         "average_shaped_reward": score - walls,
         "full_completions": completions,
         "reasoning_turns": 0,
-        "action_counts": {"L": 287},
+        "action_counts": {"L": 512},
     }
+    protocol = {
+        "version": "pacman-release-evaluation-v1",
+        "purpose": "validation",
+        "environment": {"max_steps": 512, "ghost_mode": "normal"},
+        "source_revisions": {"fixture": "fixed"},
+        "harness": {"action_protocol": "edward-option-code-v1"},
+        "prompt": {"prompt_version": "edward-option-code-v1"},
+        "reward": {"formula_version": "maapacman-level1-event-reward-v3"},
+        "seeds": [108],
+        "generation_seeds": list(range(metrics["episodes"])),
+        "samples_per_seed": metrics["episodes"],
+        "decoding": dict(metrics["decoding"]),
+    }
+    metrics.update(
+        evaluation_contract=protocol,
+        evaluation_contract_sha256=MODULE.contract_hash(protocol),
+        evaluation_completed=True,
+        model=label,
+        checkpoint={"path": label},
+        error_attempts=0,
+        completed_episodes=metrics["episodes"],
+    )
     (directory / filename).write_text(
         json.dumps(metrics) + "\n",
         encoding="utf-8",
@@ -110,6 +132,16 @@ def test_compare_selects_completion_before_score(tmp_path: Path) -> None:
         "update01",
     ]
     assert result["contract"]["thinking"] is False
+
+
+def test_baseline_is_reported_but_cannot_be_selected_as_trained_release(tmp_path):
+    for label, wins, clear in (("base", 12, 1.0), ("update01", 0, 0.1)):
+        _write_summary(tmp_path, label=label, score=1000 * clear, clear_rate=clear,
+            walls=0, completions=wins, filename="sampled12.json", temperature=0.7)
+    report = MODULE.compare(tmp_path, "sampled12.json", sampled_only=True)
+    assert report["best_overall_sampled_label"] == "base"
+    assert report["best_sampled_label"] == "update01"
+    assert report["base_is_release_candidate"] is False
 
 
 def test_compare_breaks_non_completion_tie_by_clear_rate(tmp_path: Path) -> None:
@@ -176,9 +208,7 @@ def test_compare_uses_sampled_as_primary_and_reports_greedy_separately(
         "update01",
         "update02",
     }
-    assert result["contract"]["primary_checkpoint_selection"] == (
-        "matched_sampled"
-    )
+    assert result["contract"]["primary_checkpoint_selection"] == ("matched_sampled")
     assert result["contract"]["greedy_is_separately_reported"] is True
     assert result["missing_sampled_labels"] == []
 
@@ -208,7 +238,7 @@ def test_complete_dual_report_rejects_missing_sampled_label(
     (
         ("episodes", 1, "expected 12 episodes"),
         ("temperature", 0.0, "unexpected validation temperature"),
-        ("top_p", 1.0, "unexpected validation top_p"),
+        ("top_p", 0.95, "unexpected validation top_p"),
         ("reasoning_turns", 1, "reasoning content was observed"),
     ),
 )

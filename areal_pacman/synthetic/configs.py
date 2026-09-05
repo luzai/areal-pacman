@@ -3,13 +3,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from areal.api.cli_args import PPOConfig
-from areal_pacman.level1.recipe import EnvironmentConfig, DatasetGenerationConfig
+from areal_pacman.level1.recipe import (
+    EnvironmentConfig,
+    DatasetGenerationConfig,
+    PlannerAuditConfig,
+)
 
 
 @dataclass
 class PacmanAgentConfig(PPOConfig):
     environment: EnvironmentConfig = field(default_factory=EnvironmentConfig)
     dataset_generation: DatasetGenerationConfig = field(default_factory=DatasetGenerationConfig)
+    planner_audit: PlannerAuditConfig = field(default_factory=PlannerAuditConfig)
     recipe_version: str = field(
         default="research-scaffold",
         metadata={"help": "Recipe contract identifier stored with run artifacts."},
@@ -171,6 +176,24 @@ class PacmanAgentConfig(PPOConfig):
                 "Level-1 prompt contract: minimal_v1, live_static_v2, or "
                 "live_state_v3 (screenshot plus authoritative engine state "
                 "and bounded navigation history)."
+            )
+        },
+    )
+    prompt_version: str = field(
+        default="legacy",
+        metadata={
+            "help": (
+                "Versioned prompt protocol recorded in manifests and "
+                "trajectory audit payloads."
+            )
+        },
+    )
+    action_protocol: str = field(
+        default="legacy",
+        metadata={
+            "help": (
+                "Model-to-harness action contract: direct open movement "
+                "token or Edward option code."
             )
         },
     )

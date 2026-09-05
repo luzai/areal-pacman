@@ -1,34 +1,38 @@
 recipe_version: maapacman-level1-ghostdoor-v3
-artifact_root: artifacts/runs/generated/curriculum2
+artifact_root: artifacts/runs/generated/curriculum2-step512-v1
 trajectory_dir: ${artifact_root}/trajectories
 experiment_name: pacman-agentic-rl
-trial_name: curriculum2-from-curriculum1-step256-100update-group12
+trial_name: curriculum2-from-curriculum1-step512-100update-group12
 
 environment:
   ghost_mode: normal
-  max_steps: 256
+  max_steps: 512
 dataset_generation:
-  train_episodes: 40
-  validation_episodes: 8
-  seed: 100
+  train_episodes: 80
+  validation_episodes: 4
+  seed: 28
 
+planner_audit:
+  max_steps: 512
+
+# Training RNG; dataset_generation.seed separately fixes rows 28-111.
 seed: 1
 # Curriculum 2: the complete follow-up initialized from Curriculum 1.
 # CURRICULUM1_CHECKPOINT must name a complete model checkpoint. This starts a
 # new optimizer/scheduler lineage; recover.mode handles interruption recovery
 # only inside this Curriculum 2 run.
-# - moving ghosts; 40 train rows / batch size 4 = 10 updates per epoch
-# - 10 epochs = 100 total updates
-# - both train and validation dataset rows must use max_steps=256
-# - no scheduled validation rollouts
+# - moving ghosts; 80 train rows / batch size 4 = 20 updates per epoch
+# - 5 epochs = 100 total updates
+# - both train and validation dataset rows use 512 environment steps
+# - evaluate the 4 validation rows after every training update
 # - training samples at temperature=0.7, top_p=1.0
 # - explicit +1 normal-pellet, +1 power-pellet, and +50 completion rewards
 # - fixed 0.05 penalty per executed environment step
 # - BFS nearest-pellet guidance scaled smoothly by normal-pellet clear ratio
 # - screenshot plus live engine state and bounded navigation history
-# - the model chooses one canonical C*/A*/E* objective JSON from Edward's
-#   planner-approved set; execution is bounded and replans on invalidation
-# - save every 10 updates to bound checkpoint storage
+# - the model emits one advertised C*/A*/E* option code (not JSON or a
+#   movement action); Edward executes it with bounded replanning
+# - save every update so a 2-update smoke has a real checkpoint
 # - TMS alternates the colocated actor and reference model: actor is offloaded
 #   during rollout/ref log-prob, then reference is offloaded before actor update
 enable_offload: true
@@ -36,7 +40,9 @@ enable_thinking: false
 validation_contract: sampled12_uniform_shaped
 reward_objective_contract: episode_return_group_v1
 image_prompt_style: live_state_v3
-total_train_epochs: 10
+prompt_version: edward-option-code-v1
+action_protocol: edward-option-code-v1
+total_train_epochs: 5
 total_train_steps: null
 tokenizer_path: ${actor.path}
 workflow: areal_pacman.workflow.PacmanNativeVisionWorkflow
@@ -48,13 +54,13 @@ power_pellet_reward: 1.0
 ghost_reward: 5.0
 fruit_reward: 0.0
 reward_recipe_version: maapacman-level1-event-reward-v3
-death_penalty: 25.0
+death_penalty: 100.0
 completion_reward: 50.0
-safety_refusal_penalty: 25.0
+safety_refusal_penalty: 100.0
 step_penalty: 0.05
 step_penalty_cleared_ratio_scale: 0.0
 wall_penalty: 0.5
-nearest_pellet_alpha: 0.02
+nearest_pellet_alpha: 0.1
 nearest_pellet_remaining_ratio_threshold: 1.0
 nearest_pellet_scale_by_cleared_ratio: true
 nearest_pellet_skip_on_eat: true
@@ -64,6 +70,8 @@ open_action_mask: false
 edward_options: true
 objective_encoding: edward-option-code-v1
 completion_api: chat
+critic: null
+teacher: null
 
 cluster:
   n_nodes: 1
@@ -144,6 +152,8 @@ actor:
   temperature: ${gconfig.temperature}
   reward_scaling: 1.0
   reward_bias: 0.0
+  # AReaL normalizes the 12 episode returns before applying this bound.
+  reward_clip: 20.0
   kl_ctl: 0.01
   kl_logprob_source: proximal
   ppo_n_minibatches: 1
@@ -163,6 +173,8 @@ actor:
     mean_level: group
     mean_leave1out: false
     std_level: group
+    std_unbiased: true
+    eps: 1.0e-5
     group_size: ${gconfig.n_samples}
   adv_norm: null
   weight_update_mode: xccl
@@ -213,16 +225,16 @@ train_dataset:
   shuffle: true
   pin_memory: true
   num_workers: 0
-  path: artifacts/datasets/curriculum2/train_hf
+  path: artifacts/datasets/curriculum2-step512-v1/train_hf
   type: rl
   max_length: 1024
 
 valid_dataset:
-  batch_size: 2
+  batch_size: 4
   shuffle: false
   pin_memory: true
   num_workers: 0
-  path: artifacts/datasets/curriculum2/validation_hf
+  path: artifacts/datasets/curriculum2-step512-v1/validation_hf
   type: rl
   max_length: 1024
 
@@ -237,7 +249,7 @@ saver:
   keep_best_metric: ppo_actor/task_reward/avg
   keep_best_mode: max
   freq_epochs: null
-  freq_steps: 10
+  freq_steps: 1
   freq_secs: null
 
 recover:
@@ -255,7 +267,7 @@ evaluator:
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   freq_epochs: null
-  freq_steps: null
+  freq_steps: 1
   freq_secs: null
 
 stats_logger:

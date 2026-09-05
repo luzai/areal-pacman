@@ -1,14 +1,14 @@
 # AReaL Pacman RL Recipe Design
 
-Status: bundled-source API-v3 contract synchronized with the current code;
-dated training and evaluation evidence is retained below as history
+Status: two-stage source/recipe integration; final C2 inference and game-clear
+acceptance remain unverified. Dated evidence below is historical, not new gates.
 Environment provider: bundled `maapacman.PygamePacmanEnv` API `3.0`
 Environment ID: `pacman-python-level1-ghostdoor-v3`
 Dataset contract: `maapacman-level1-dataset-v4`
-Production dataset default: `256` actions
+Production C1/C2 dataset default: `512` underlying `env.step` calls
 Supported episode caps: `32`, `256`, `512`, and `2000` actions
-Reusable `PygamePacmanEnvConfig` default: `512` actions, not the production
-dataset default
+Reusable `PygamePacmanEnvConfig` default: `512` actions; immutable rows still
+determine the actual horizon
 Remote Linux backend: SDL dummy
 Contract synchronized with code: `2026-09-04`
 Historical remote evidence last verified: `2026-07-23`
@@ -23,6 +23,57 @@ ${WORKSPACE_ROOT}/AReaL
 ${WORKSPACE_ROOT}/areal-pacman
 ${WORKSPACE_ROOT}/pacman-python
 ```
+
+## 0. Current two-stage release contract
+
+| Setting | C1 | C2 |
+| --- | --- | --- |
+| Initialization | Qwen3.5-9B | Complete C1 weights, fresh optimizer/scheduler |
+| Ghosts / harness | Disabled; no Edward in data, training or native evaluation | Normal; Edward options |
+| Output protocol | One legal U/D/L/R, `direct-open-action-token-v1` | One advertised code, `edward-option-code-v1`, mapped to C*/A*/E* |
+| Prompt version | `live-state-direct-action-v3` | `edward-option-code-v1` |
+| Objective / normalization / clip | `step_local_raw_v1` / none / `.inf` | `episode_return_group_v1` / group-12 mean/sample std / 20 |
+
+Both stages use 512 underlying steps, 80/4 train/validation rows, seeds
+28–107/108–111, batch 4, 12 samples and 5 epochs = 100 updates. Training RNG
+seed 1 is separate. Learning rate is 5e-7 and shaping alpha is 0.1. Both retain
+KL 0.01 with a reference model, `ppo_n_minibatches=1`, no critic/teacher, and no
+advantage normalization. Seeds are not new maps or a guarantee of task diversity.
+
+C1 assigns only each direction's own shaped reward, without episode broadcast,
+group normalization or cross-game-step GAE, preserving its original loss
+reduction. C2 normalizes whole-episode returns over 12 same-state episodes and
+then clips, distributing that signal to model decisions with equal total loss
+weight per episode; option returns are audit records, not additive rewards.
+The sample standard deviation uses `std_unbiased=true`, `mean_leave1out=false`
+and `eps=1e-5`. `.inf` is only C1's clipping bound, serialized as `"inf"` in
+JSON; task rewards still must be finite and PPO/gradient clipping stays active.
+
+Current delivery is source/recipe-only. A download-and-run agent requires the
+selected complete C2 checkpoint, tokenizer/processor, exact Edward harness,
+config and tested inference backend. Record file hashes, C1 parent lineage,
+base revision, run/update, three source revisions and export settings; no
+external symlinks to training-machine files. C1 weights are recommended for
+reproducing C2; optimizer recovery state is a separate artifact.
+
+Select release weights using a declared validation-only rule among actual
+retained trained candidates, record their update IDs, retain last, then freeze
+held-out evaluation. Current `keep_last=2` and training-reward `keep_best_metric`
+run before evaluation; saving each update does not retain all 100 or protect
+the global validation best. A validation-best protection mechanism or all-model
+retention needs separate implementation/storage planning. The proposed test is seeds 112–131 × three
+fixed generation RNG seeds (60 games), not a completed result. Measure normal
+ghosts + Edward + 512-step games, report all attempts/errors and actual win
+rate **without a minimum threshold**. A zero rate must be reported honestly;
+provide a win video only when one is observed. Loading success is not a win.
+Complete-model loading, real-image end-to-end gameplay, full-game reporting,
+and re-download verification are distinct release gates; all remain required.
+
+The 2026-09-04 targeted CPU check passed 53 tests across
+`test_dataset_stage_contract.py`, `test_level1_v3_audits.py` and
+`test_curriculum_ghost_modes.py`; two workflow parse-failure tests were excluded
+because Windows lacks `uvloop`. This does not establish Linux full-suite,
+distributed GPU, final checkpoint inference or game-completion results.
 
 ## 1. Ownership
 
@@ -61,17 +112,17 @@ does not define or expose an alternative Pacman environment contract.
 
 ```text
 episode row
-  -> PacmanImageOnlyWorkflow
+  -> PacmanNativeVisionWorkflow (training) / PacmanImageOnlyWorkflow (evaluation)
   -> PygamePacmanEnv.reset()
   -> original pacman-python process and pygame Surface
   -> RGB observation
   -> AReaL multimodal rollout endpoint
   -> VLM completion
-  -> canonical U/D/L/R/S parser
-  -> PygamePacmanEnv.step(action)
+  -> C1: constrained U/D/L/R -> one PygamePacmanEnv.step(action)
+     C2: constrained option code -> Edward option -> one or more env.step calls
   -> original score delta and state metrics
   -> recipe reward adapter
-  -> completion-token reward
+  -> C1 step-local task reward / C2 whole-episode task objective
   -> repeat until terminated or truncated
 ```
 
@@ -105,8 +156,9 @@ recipe mirror and is separated from robotics development:
 
 ```text
 ${AREAL_ROOT}
-  local branch: areal-main
-  upstream: https://github.com/inclusionAI/AReaL.git main
+  release branch: release/pacman-v0.1.0
+  pinned revision: a9e45c18094091b36ed4256d34e3e9c79947feca
+  origin: https://github.com/luzai/AReaL.git
 
 ${UNRELATED_AREAL_ROOT}
   local branch: <unrelated-development-branch>
@@ -123,7 +175,7 @@ Use a project-specific Conda prefix rather than system Python or an unrelated
 existing environment:
 
 ```bash
-OWNER_ROOT="${OWNER_ROOT:-$HOME}"
+OWNER_ROOT="${OWNER_ROOT:?set an owner-controlled project root}"
 CODE_ROOT="${CODE_ROOT:-$OWNER_ROOT/maapacman-stack}"
 AREAL_ROOT="${AREAL_ROOT:-$OWNER_ROOT/AReaL}"
 AREAL_PACMAN_ROOT="${AREAL_PACMAN_ROOT:-$CODE_ROOT/areal-pacman}"
@@ -146,7 +198,7 @@ training. The bundled `maapacman` package shares the areal-pacman revision.
 Treat the `pacman-python` mirror as read-only during rollout. Per-worker copies,
 `agent_state.json`, pygame processes, and IPC remain disposable under `/tmp`.
 
-The H100 validation deliberately used `/tmp + pip --target` so it could be
+The historical H100 validation used `/tmp + pip --target` so it could be
 removed without touching persistent environments. That method proves runtime
 compatibility but is not the production installation recipe.
 
@@ -171,18 +223,18 @@ env = PygamePacmanEnv(
     PygamePacmanEnvConfig(
         pacman_python_root=os.environ["MAAPACMAN_PACMAN_PYTHON_ROOT"],
         level=1,
-        max_steps=256,
+        max_steps=512,
+        ghost_mode="normal",  # C2; C1 explicitly selects "disabled".
         video_driver="dummy",
         audio_driver="dummy",
     )
 )
 ```
 
-`256` is the production dataset default. The reusable
-`PygamePacmanEnvConfig` class has a broader default of `512`; that generic
-environment default is not the production recipe default. API-v3 rows may
-select exactly `32`, `256`, `512`, or `2000` actions, and the workflow must use
-the immutable value recorded in each row.
+Both formal recipes and row generation default to `512` underlying steps.
+Generic/historical API-v3 rows still support `32`, `256`, `512`, or `2000`;
+the workflow uses the immutable row value and formal recipe checks reject a
+different horizon. This count is not the number of C2 option selections.
 
 The workflow validates before rollout:
 
@@ -205,19 +257,21 @@ One abbreviated row constructs one complete original-game episode:
 
 ```json
 {
-  "id": "level1-seed0-train-0001",
+  "id": "level1-normal-seed28-train-0001",
   "split": "train",
   "dataset_contract_version": "maapacman-level1-dataset-v4",
+  "action_protocol": "edward-option-code-v1",
+  "prompt_version": "edward-option-code-v1",
   "env": {
     "ghost_mode": "normal",
     "name": "pacman-python-level1-ghostdoor-v3",
     "api_version": "3.0",
     "backend": "original-pygame",
-    "pacman_python_revision": "d258122eecf6e0dc0a04d6fb8ff57a9b43f0c1d8",
+    "pacman_python_revision": "cbb97115e407abc86a44adc82a1b8f360b3e8da0",
     "level_revision": "36116c17c6c0805fdb1a07216357ac64c88d2c3108a0e37dce2a01b4ea2a8b97",
     "level": 1,
-    "seed": 0,
-    "max_steps": 256,
+    "seed": 28,
+    "max_steps": 512,
     "observation_mode": "rgb"
   }
 }
@@ -234,8 +288,17 @@ Dataset v4 requires `env.ghost_mode`. `disabled` records expose no ghosts;
 revision and must match the selected training recipe, runtime state, audit
 anchor, and trajectory evidence.
 
+This abbreviated example is not a complete accepted row. Formal bundles also
+bind three-repository provenance, recipe/prompt/reward metadata and hashes,
+audited real one-step anchors, JSONL/HF content and a manifest checksum sidecar.
+C1 anchors execute the first legal U/D/L/R with no Edward construction or
+planner provenance; C2 anchors retain candidates and the selected option.
+Neither anchor is a model rollout or training sample. Existing v4 data without
+the new metadata is rejected; regenerate into a new directory, never patch it.
+Keep canonical bundle paths and pass CLI counts/seeds/horizon matching YAML.
+
 Production level-1 dataset validation accepts only `env.max_steps` values
-`32`, `256`, `512`, and `2000`; row generation defaults to `256`. The selected
+`32`, `256`, `512`, and `2000`; row generation defaults to `512`. The selected
 cap is part of the immutable row contract, so incompatible horizons must not be
 mixed into one training/evaluation split. If a terminal transition lands
 exactly on the cap, `terminated=True` takes precedence and that successful
@@ -247,11 +310,15 @@ Each model turn contains:
 
 1. One fixed system prompt.
 2. Exactly one PNG encoded from the current `(400,336,3)` RGB Surface.
-3. One fixed instruction to return exactly one action.
+3. Stage-specific live-state context and a single-token instruction; C2 also
+   advertises the current Edward candidates and their code mapping.
 
-Allowed response tokens are `U`, `D`, `L`, `R`, and `S`. Parsing failure must
-not send arbitrary text to the environment; the recipe applies its documented
-fallback and parse penalty.
+C1 allows only currently open `U/D/L/R`, not `S` or JSON. C2 permits only an
+advertised option code, not a primitive direction or JSON; the harness executes
+the mapped option. Both masks are dynamic. Preserve fail-closed parsing and
+the documented −1 episode target; never hide model failure by substituting an
+automatic planner's choice. The environment's generic `S` operation below is
+not an allowed formal C1 model response.
 
 One environment step is one action transaction ending at an original pygame
 frame boundary. Directional input moves one cell in the committed level-1
@@ -335,13 +402,14 @@ MaaPacman returns the original game score delta:
 | Normal pellet | `10` |
 | Power pellet | `100` |
 
-AReaL may add:
-
-- Progress shaping.
-- Wall penalties.
-- Parse-failure penalties.
-- Episode completion bonuses.
-- Other experiment-specific terms.
+The shared event-reward-v3 recipe sets `use_base_reward=false`: normal/power
+pellets +1 each, ghosts +5, fruit 0, completion +50, death −100, actual step
+−0.05, wall collision −0.5, plus nearest-pellet shaping with alpha 0.1,
+threshold 1, cleared-ratio scaling and skip-on-eat. The original score remains
+auditable but is not added again. Edward safety refusal subtracts 100 exactly
+once from the episode/last decision; initial refusal without a model decision
+rejects the sample. AVOID itself has no penalty. C1 has neither ghosts nor
+Edward, so those corresponding events do not arise.
 
 Every step record stores both `base_reward` and `shaped_reward`.
 
@@ -362,6 +430,9 @@ pacman_python_revision
 level_revision
 renderer_revision
 seed and max_steps
+ghost_mode and three-repository provenance
+action_protocol, prompt_version, template and actual prompt hashes
+reward objective, reward clipping/normalization contract
 RGB frame hashes where requested
 action and parse status
 base_reward and shaped_reward
@@ -378,9 +449,9 @@ merged as if they used the same environment.
 The production workflow constructs `PygamePacmanEnv` directly and validates
 API `3.0`, environment ID `pacman-python-level1-ghostdoor-v3`, and dataset
 contract `maapacman-level1-dataset-v4`. It takes the episode cap from the
-validated row; row generation defaults to `256`, while the exact supported set
-is `32`, `256`, `512`, and `2000`. The environment class's reusable `512`
-default does not override that row contract.
+validated row; formal C1/C2 and row generation default to `512`, while generic
+rows support `32`, `256`, `512`, and `2000`. No environment default overrides
+the immutable row or selected recipe contract.
 
 The former `107`-test/`13`-subtest claim and the 287-action oracle were part of
 the dated API-v1 evidence. They are not a current API-v3 acceptance result;
@@ -403,16 +474,17 @@ Every rollout has a random `trajectory_sample_id` and is persisted as:
 <dataset-row-id>--sample-<trajectory-sample-id>.json
 ```
 
-Exclusive file creation prevents repeated GRPO samples of one dataset row from
+Exclusive file creation prevents repeated rollout samples of one dataset row from
 replacing each other. The earlier group-12 run wrote only the last sample for
 each row; its two validation files are not a 24-sample mean.
 
 Training and evaluation decoding are independent:
 
 ```text
-training: sampled, configured temperature/top_p, group size 12
-current per-update validation: sampled12, temperature 0.7, top_p 0.95
-post-run validation: separately report greedy1 and sampled12 for every checkpoint
+training: sampled12, temperature 0.7, top_p 1.0, exactly one token
+per-update validation: freq_steps=1, sampled12, temperature 0.7, top_p 1.0
+saving: freq_steps=1 independently of validation
+post-run: explicit recipe/config; sampled and greedy results remain separate
 ```
 
 `PacmanImageOnlyWorkflow` defaults to `enable_thinking=false`, rejects
@@ -421,6 +493,21 @@ post-run validation: separately report greedy1 and sampled12 for every checkpoin
 style, decoding contract, request body, verbatim response, and reasoning
 content. Both sampled and greedy validation require thinking to be disabled and
 the report rejects any observed reasoning content.
+
+Use the selected recipe for ghost/harness/reward/prompt settings. Fair
+Base/C1/C2 comparison fixes one common evaluation protocol; unlike native-stage
+returns are not directly comparable. Full-game success requires
+`terminal_reason=all_normal_pellets`, zero normal pellets and the matching
+clear event, not merely high reward. Evaluation completion and game completion
+are separate fields. No minimum win rate is imposed.
+
+The same YAML supports `--smoke-updates 2`; C2 smoke must use a real complete
+C1 smoke checkpoint. Full training remains 100 updates per stage. Initial
+`recover.mode=disabled` also disables recovery-state saving in this AReaL;
+switching to auto after interruption cannot recover unsaved optimizer state.
+Enable recovery from the first run if complete recovery is required. Final
+model loading, GPU evaluation artifacts and downloadable weights remain
+unverified; source delivery alone is not a directly runnable trained agent.
 
 ## 10. Historical corrected group-12 evidence
 

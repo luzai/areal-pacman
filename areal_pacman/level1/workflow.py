@@ -38,11 +38,16 @@ from .level1_dataset import SUPPORTED_MAX_STEPS, validate_episode_row
 from .prompts import (
     EDWARD_OPTION_CODE_V1_SYSTEM_PROMPT,
     build_image_messages,
+    compact_edward_decision_prompt,
     crop_pacman_local_view,
     encode_png,
     image_count,
     png_sha256,
     prompt_text,
+    prompt_contract_metadata,
+    prompt_user_template,
+    sent_prompt_sha256,
+    text_sha256,
 )
 from .rewards import RewardConfig, shape_reward
 from .trajectories import audit_trajectory, write_trajectory
@@ -68,58 +73,7 @@ def _compact_edward_decision_prompt(
     constraint: ObjectiveTokenConstraint,
 ) -> str:
     """Render the exemplar's decision facts without its free-form reason."""
-    candidate_rows = [
-        [
-            constraint.code_for_option(candidate.option_id),
-            candidate.option_id,
-            candidate.strategy,
-            list(candidate.target),
-            candidate.first_action,
-            candidate.route_distance,
-            candidate.commit_moves,
-            candidate.safety_margin,
-            candidate.future_safe_exits,
-            candidate.entity_id,
-        ]
-        for candidate in candidates
-    ]
-    ghost_rows = []
-    for ghost in state_context.get("ghosts") or []:
-        if not isinstance(ghost, Mapping):
-            continue
-        ghost_rows.append(
-            [
-                ghost.get("id"),
-                ghost.get("state"),
-                ghost.get("position"),
-            ]
-        )
-    decision_state = {
-        "p": state_context.get("pacman_position"),
-        "f": state_context.get("facing"),
-        "pellets": state_context.get("pellets_remaining"),
-        "maze": state_context.get("maze_size"),
-        "ghosts": ghost_rows,
-        "edible_ticks": state_context.get("edible_ticks"),
-        "last": state_context.get("last_action"),
-        "c": candidate_rows,
-    }
-    option_codes = ",".join(constraint.rendered_choices)
-    return (
-        "Choose one tactical objective. Keys: p=Pac-Man [row,column], f=facing, "
-        "pellets=normal+power pellets remaining, maze=[rows,columns], "
-        "ghosts=[[id,state,position]], edible_ticks=vulnerability time, "
-        "last=previous action, c=candidates. Candidate row: "
-        "[code,id,strategy,target,first_action,distance,commit,safety,exits,entity].\n"
-        "Metrics: distance=route steps, commit=max executed moves, larger "
-        "safety/exits are better, entity=ELIMINATE ghost id.\n"
-        + json.dumps(decision_state, separators=(",", ":"))
-        + "\nEach row maps code to id. Use only the candidates shown for this turn. "
-        "Structured state overrides the image. Return exactly one code "
-        "from ["
-        + option_codes
-        + "]; nothing else."
-    )
+    return compact_edward_decision_prompt(state_context, candidates, constraint)
 
 
 def _nearest_reachable_distance_with_diagnostics(
@@ -451,6 +405,30 @@ class PacmanImageOnlyWorkflow:
             raise ValueError(
                 "edward objective constraints replace the legacy action mask"
             )
+        prompt_metadata = prompt_contract_metadata(
+            image_prompt_style, edward_options=edward_options
+        )
+        if not edward_options and not options.get("open_action_mask"):
+            prompt_metadata["action_protocol"] = "direct-action-token-v1"
+        for field in ("action_protocol", "prompt_version"):
+            configured = options.get(field)
+            if configured not in (None, "legacy"):
+                if configured != prompt_metadata[field]:
+                    raise ValueError(f"configured {field} does not match actual harness")
+                if data.get(field) != configured:
+                    raise ValueError(f"dataset {field} does not match actual harness")
+        recipe_contract = options.get("recipe_contract")
+        if recipe_contract is not None:
+            # Config bounds are strings (e.g. "inf"); rewards remain finite.
+            json.dumps(recipe_contract, allow_nan=False)
+            if recipe_contract.get("ghost_mode", config.ghost_mode) != config.ghost_mode:
+                raise ValueError("recipe_contract ghost_mode differs from runtime")
+            coefficients = (recipe_contract.get("reward") or {}).get("coefficients") or {}
+            if any(value != getattr(reward_config, name, None) for name, value in coefficients.items()):
+                raise ValueError("recipe_contract reward coefficients differ from runtime")
+        user_instruction = prompt_user_template(
+            image_prompt_style, edward_options=edward_options
+        )
         trajectory: list[dict[str, Any]] = []
         rewards_by_completion: dict[str, float] = {}
         parse_failures = 0
@@ -680,6 +658,9 @@ class PacmanImageOnlyWorkflow:
                         recent_actions[-1] if recent_actions else None
                     )
                     state_context = {
+                        "ghosts": list(live_snapshot.get("ghosts") or []),
+                        "edible_ticks": int(live_snapshot.get("edible_ticks", 0)),
+                        "maze_size": [int(live_snapshot["height"]), int(live_snapshot["width"])],
                         "pacman_position": list(position),
                         "facing": str(live_snapshot.get("facing") or "S"),
                         "pellets_remaining": int(
@@ -763,6 +744,18 @@ class PacmanImageOnlyWorkflow:
                 )
                 if not model_called:
                     model_user_instruction = None
+                sent_prompt = {
+                    "requested_model_id": options.get("model"),
+                    "checkpoint_manifest_sha256": options.get("checkpoint_manifest_sha256"),
+                    "model_system_prompt": system_prompt if model_called else None,
+                    "model_user_prompt_sha256": (
+                        text_sha256(model_user_instruction) if model_called else None
+                    ),
+                    "sent_prompt_sha256": (
+                        sent_prompt_sha256(system_prompt, model_user_instruction, png_sha256(png))
+                        if model_called else None
+                    ),
+                }
                 if image_count(messages) != 1:
                     raise RuntimeError("model request must contain exactly one image")
                 try:
@@ -837,6 +830,8 @@ class PacmanImageOnlyWorkflow:
                                 current_open_actions=current_open_actions,
                             )
                         action = parse_action(turn.completion)
+                        if options.get("open_action_mask") and action.value not in current_open_actions:
+                            raise ActionParseError("direction is not in the advertised open-action mask")
                         option_step = None
                 except (ActionParseError, ObjectiveParseError) as exc:
                     if turn is None:
@@ -862,6 +857,7 @@ class PacmanImageOnlyWorkflow:
                         "request_extra_body": turn.request_extra_body,
                         "model_called": model_called,
                         "model_user_instruction": model_user_instruction,
+                        **sent_prompt,
                         "observation_context": state_context,
                         "open_action_mask": current_open_actions,
                         "option_id": None,
@@ -1162,6 +1158,7 @@ class PacmanImageOnlyWorkflow:
                     "request_extra_body": turn.request_extra_body,
                     "model_called": model_called,
                     "model_user_instruction": model_user_instruction,
+                    **sent_prompt,
                     "observation_context": state_context,
                     "open_action_mask": current_open_actions,
                     "option_id": (
@@ -1293,6 +1290,8 @@ class PacmanImageOnlyWorkflow:
             payload = {
                 "id": str(data["id"]),
                 "trajectory_sample_id": trajectory_sample_id,
+                "model": options.get("model"),
+                "checkpoint_manifest_sha256": options.get("checkpoint_manifest_sha256"),
                 "split": str(data["split"]),
                 "env_api_version": env.spec.api_version,
                 "env_id": env.spec.env_id,
@@ -1322,6 +1321,8 @@ class PacmanImageOnlyWorkflow:
                 "prefix_end_logic_frame": prefix_end_logic_frame,
                 "decision_steps": 1 if single_step else None,
                 "image_prompt_style": image_prompt_style,
+                **prompt_metadata,
+                "recipe_contract": recipe_contract,
                 "system_prompt": system_prompt,
                 "user_instruction": user_instruction,
                 "observation_contract": (
@@ -1343,10 +1344,11 @@ class PacmanImageOnlyWorkflow:
                     "top_p": float(options.get("top_p", 1.0)),
                     "max_completion_tokens": (
                         1
-                        if edward_options
+                        if edward_options or options.get("open_action_mask")
                         else int(options.get("max_completion_tokens", 3))
                     ),
                     "enable_thinking": False,
+                    "generation_seed": options.get("generation_seed"),
                     "open_action_mask": bool(
                         options.get("open_action_mask", False)
                     ),
@@ -1499,6 +1501,8 @@ class PacmanImageOnlyWorkflow:
             ),
             "extra_body": extra_body,
         }
+        if options.get("generation_seed") is not None:
+            request["seed"] = int(options["generation_seed"])
         try:
             response = await client.chat.completions.create(**request)
         finally:
@@ -1661,6 +1665,7 @@ class PacmanNativeVisionWorkflow(PacmanImageOnlyWorkflow, RolloutWorkflow):
             text=[text],
             images=[image],
             padding=False,
+            truncation=False,
             return_tensors="pt",
         )
         mm_ids = processed.get("mm_token_type_ids")
@@ -1782,6 +1787,7 @@ class PacmanNativeVisionWorkflow(PacmanImageOnlyWorkflow, RolloutWorkflow):
                 ),
             },
         )
+        self._validate_native_token_budget(input_ids, request.gconfig)
         response = await engine.agenerate(request)
         if response.input_tokens != input_ids:
             raise RuntimeError(
@@ -1809,6 +1815,13 @@ class PacmanNativeVisionWorkflow(PacmanImageOnlyWorkflow, RolloutWorkflow):
                 )
             option_token_ledger = objective_constraint.support_ledger(
                 response.output_tokens
+            )
+        elif allowed_token_ids and (
+            len(response.output_tokens) != 1
+            or response.output_tokens[0] not in allowed_token_ids
+        ):
+            raise RuntimeError(
+                "native action token is absent from the exact rollout support"
             )
         native_turns[request_id] = (
             processed,
@@ -1841,6 +1854,23 @@ class PacmanNativeVisionWorkflow(PacmanImageOnlyWorkflow, RolloutWorkflow):
             },
         )
 
+    def _validate_native_token_budget(self, input_ids: list[int], gconfig: Any) -> None:
+        """Never submit a silently truncated formal image request to inference."""
+        total = getattr(gconfig, "max_tokens", None)
+        generated = getattr(gconfig, "max_new_tokens", None)
+        formal = self.workflow_kwargs.get("action_protocol") in {
+            "direct-open-action-token-v1", "edward-option-code-v1"
+        }
+        if total is None or generated is None:
+            if formal:
+                raise ValueError("formal native request requires an explicit token budget")
+            return
+        if total <= 0 or generated <= 0 or len(input_ids) + generated > total:
+            raise ValueError(
+                "native multimodal request exceeds the token budget: "
+                f"{len(input_ids)} input + {generated} output > {total}; no truncation"
+            )
+
     @staticmethod
     def _tensor_sample(
         processed: dict[str, Any],
@@ -1855,6 +1885,8 @@ class PacmanNativeVisionWorkflow(PacmanImageOnlyWorkflow, RolloutWorkflow):
     ) -> dict[str, Any] | None:
         import torch
 
+        if not math.isfinite(float(reward)):
+            raise ValueError("training reward must be finite")
         input_ids = list(response.input_tokens)
         output_ids = list(response.output_tokens)
         sequence = input_ids + output_ids
@@ -2016,6 +2048,10 @@ class PacmanNativeVisionWorkflow(PacmanImageOnlyWorkflow, RolloutWorkflow):
         reward_contract = str(
             self.workflow_kwargs.get("reward_objective_contract", "legacy")
         )
+        if reward_contract == "step_local_raw_v1" and self.workflow_kwargs.get("edward_options"):
+            raise ValueError("step_local_raw_v1 requires direct actions, not Edward options")
+        if any(not math.isfinite(float(value)) for value in rewards.values()):
+            raise ValueError("native training completion rewards must be finite")
         episode_kwargs: dict[str, Any] = {}
         if reward_contract in {
             "option_return_raw_v1",

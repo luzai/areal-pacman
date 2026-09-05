@@ -12,7 +12,13 @@ import subprocess
 from typing import Any, Mapping
 
 import yaml
-from areal_pacman.level1.recipe import load_recipe_settings
+from areal_pacman.level1.recipe import (
+    DIRECT_ACTION_PROTOCOL,
+    EDWARD_OPTION_PROTOCOL,
+    load_recipe_document,
+    load_planner_audit_settings,
+    load_recipe_settings,
+)
 from maapacman.env import (
     Position,
     PygamePacmanEnv,
@@ -27,6 +33,8 @@ from areal_pacman.level1.level1_dataset import (
     ENV_API_VERSION,
     ENV_NAME,
     REPOSITORY_NAMES,
+    SUPPORTED_MAX_STEPS,
+    audit_anchor_semantics,
     repository_revisions,
 )
 from areal_pacman.level1.prompts import encode_png, png_sha256
@@ -126,7 +134,9 @@ def _write_text_exclusive(
         stream.write(text)
 
 
-def _metadata(env: PygamePacmanEnv) -> dict[str, Any]:
+def _metadata(
+    env: PygamePacmanEnv, *, action_protocol: str = EDWARD_OPTION_PROTOCOL
+) -> dict[str, Any]:
     provenance = env.provenance
     recipe_revision = repository_revisions()["areal-pacman"]
     if (
@@ -150,9 +160,12 @@ def _metadata(env: PygamePacmanEnv) -> dict[str, Any]:
         "maapacman_env_source_sha256": provenance[
             "maapacman_env_source_sha256"
         ],
-        "maapacman_planner_source_sha256": _planner_source_sha256(),
+        "maapacman_planner_source_sha256": (
+            _planner_source_sha256() if action_protocol == EDWARD_OPTION_PROTOCOL else None
+        ),
         "maapacman_dirty": recipe_revision["dirty"],
         "level": int(provenance["level"]),
+        "max_steps": int(env.config.max_steps),
         "level_revision": env.spec.level_revision,
         "renderer_revision": env.spec.renderer_revision,
         "ruleset_revision": env.spec.ruleset_revision,
@@ -248,6 +261,8 @@ def audit_planner_record(record: Mapping[str, Any]) -> None:
         raise ValueError("planner audit contract version mismatch")
     if record["dataset_contract_version"] != DATASET_CONTRACT_VERSION:
         raise ValueError("planner audit dataset contract mismatch")
+    action_protocol = record.get("action_protocol", EDWARD_OPTION_PROTOCOL)
+    audit_anchor_semantics(action_protocol)
     revisions = record["source_revisions"]
     if not isinstance(revisions, Mapping) or set(revisions) != set(
         REPOSITORY_NAMES
@@ -279,6 +294,8 @@ def audit_planner_record(record: Mapping[str, Any]) -> None:
         or environment.get("name") != ENV_NAME
         or environment.get("backend") != "original-pygame"
         or environment.get("level") != 1
+        or environment.get("max_steps") not in SUPPORTED_MAX_STEPS
+        or isinstance(environment.get("max_steps"), bool)
         or environment.get("dataset_contract_version")
         != DATASET_CONTRACT_VERSION
     ):
@@ -287,7 +304,6 @@ def audit_planner_record(record: Mapping[str, Any]) -> None:
         "ruleset_revision",
         "pacman_python_source_sha256",
         "maapacman_env_source_sha256",
-        "maapacman_planner_source_sha256",
         "level_revision",
     ):
         digest = environment.get(digest_field)
@@ -295,6 +311,12 @@ def audit_planner_record(record: Mapping[str, Any]) -> None:
             raise ValueError(
                 f"planner audit environment has invalid {digest_field}"
             )
+    planner_digest = environment.get("maapacman_planner_source_sha256")
+    if action_protocol == DIRECT_ACTION_PROTOCOL:
+        if planner_digest is not None:
+            raise ValueError("direct audit must not claim Edward planner provenance")
+    elif not isinstance(planner_digest, str) or len(planner_digest) != 64:
+        raise ValueError("planner audit environment has invalid maapacman_planner_source_sha256")
     renderer_revision = environment.get("renderer_revision")
     if not isinstance(renderer_revision, str) or not renderer_revision:
         raise ValueError("planner audit environment has invalid renderer_revision")
@@ -321,6 +343,20 @@ def audit_planner_record(record: Mapping[str, Any]) -> None:
         raise ValueError(
             "planner audit maapacman provenance must match bundled "
             "areal-pacman"
+        )
+    pacman_revision = revisions["pacman-python"]
+    if (
+        environment["pacman_python_revision"] != pacman_revision["commit"]
+        or environment["pacman_python_dirty"] is not pacman_revision["dirty"]
+    ):
+        raise ValueError(
+            "planner audit pacman-python provenance must match source revisions"
+        )
+    if environment["renderer_revision"] != (
+        f"pacman-python:{pacman_revision['commit']}"
+    ):
+        raise ValueError(
+            "planner audit renderer revision must match pacman-python"
         )
     for digest_field in (
         "observation_png_sha256",
@@ -361,13 +397,20 @@ def audit_planner_record(record: Mapping[str, Any]) -> None:
         raise ValueError("planner audit legal_actions disagree with structured state")
     candidates = record["planner_candidates"]
     selected = record["selected_option"]
-    if not isinstance(candidates, list) or not candidates:
-        raise ValueError("planner audit requires advertised candidates")
-    matching = [item for item in candidates if item == selected]
-    if len(matching) != 1:
-        raise ValueError("selected option is not unique in planner candidates")
-    if selected.get("first_action") != action:
-        raise ValueError("selected option disagrees with executed action")
+    if action_protocol == DIRECT_ACTION_PROTOCOL:
+        if candidates != [] or selected is not None:
+            raise ValueError("direct audit cannot contain Edward options")
+        directions = [token for token in ("U", "D", "L", "R") if token in legal_actions]
+        if not directions or action != directions[0]:
+            raise ValueError("direct anchor must execute the first legal U/D/L/R")
+    else:
+        if not isinstance(candidates, list) or not candidates:
+            raise ValueError("planner audit requires advertised candidates")
+        matching = [item for item in candidates if item == selected]
+        if len(matching) != 1:
+            raise ValueError("selected option is not unique in planner candidates")
+        if not isinstance(selected, Mapping) or selected.get("first_action") != action:
+            raise ValueError("selected option disagrees with executed action")
 
     breakdown = record["reward_breakdown"]
     if not isinstance(breakdown, Mapping):
@@ -467,7 +510,7 @@ def _collect_seed(
     *,
     seed: int,
     env: PygamePacmanEnv,
-    planner: EdwardPlanner,
+    planner: EdwardPlanner | None,
     reward_config: RewardConfig,
     max_records: int | None = None,
     require_successful_clear: bool = True,
@@ -478,17 +521,30 @@ def _collect_seed(
     remaining_normal_pellets = set(level.pellets)
     initial_normal_pellets = len(remaining_normal_pellets)
     image, info = env.reset(seed=seed)
-    metadata = _metadata(env)
+    action_protocol = EDWARD_OPTION_PROTOCOL if planner is not None else DIRECT_ACTION_PROTOCOL
+    if planner is None and (max_records != 1 or require_successful_clear):
+        raise ValueError("direct audit collection is limited to one initial transition")
+    metadata = _metadata(env, action_protocol=action_protocol)
     records: list[dict[str, Any]] = []
     terminated = truncated = False
     previous_score = 0
     previous_logic_frame = 0
     while not (terminated or truncated):
         snapshot = env.snapshot()
-        decision = planner.decide(snapshot)
-        selected = _selected_candidate(decision)
         legal_actions = list(info["legal_actions"])
-        if decision.action not in legal_actions:
+        if planner is None:
+            directions = [token for token in ("U", "D", "L", "R") if token in legal_actions]
+            if not directions:
+                raise RuntimeError("initial direct state has no legal direction")
+            action = directions[0]
+            selected = None
+            candidates = []
+        else:
+            decision = planner.decide(snapshot)
+            action = decision.action
+            selected = _selected_candidate(decision)
+            candidates = [candidate.as_dict() for candidate in decision.candidates]
+        if action not in legal_actions:
             raise RuntimeError("planner selected an illegal primitive action")
         before_ratio = len(remaining_normal_pellets) / initial_normal_pellets
         distance_before = None
@@ -510,7 +566,7 @@ def _collect_seed(
             )
 
         next_image, base_reward, terminated, truncated, next_info = env.step(
-            decision.action
+            action
         )
         next_position = Position(
             int(next_info["pacman_position"][0]),
@@ -585,6 +641,7 @@ def _collect_seed(
         record = {
             "audit_contract_version": AUDIT_CONTRACT_VERSION,
             "dataset_contract_version": DATASET_CONTRACT_VERSION,
+            "action_protocol": action_protocol,
             "seed": seed,
             "step": int(next_info["step"]),
             "env": metadata,
@@ -593,11 +650,9 @@ def _collect_seed(
             "structured_state_sha256": _canonical_sha256(snapshot),
             "structured_state": snapshot,
             "legal_actions": legal_actions,
-            "planner_candidates": [
-                candidate.as_dict() for candidate in decision.candidates
-            ],
+            "planner_candidates": candidates,
             "selected_option": selected,
-            "executed_primitive_action": decision.action,
+            "executed_primitive_action": action,
             "next_observation_png_sha256": png_sha256(
                 encode_png(next_image)
             ),
@@ -655,8 +710,11 @@ def collect_initial_audit_anchor(
     reward_config: RewardConfig,
     pacman_python_root: str | None = None,
     ghost_mode: str = "normal",
+    action_protocol: str = EDWARD_OPTION_PROTOCOL,
 ) -> dict[str, Any]:
-    """Capture one real Edward transition without calling it a model rollout."""
+    """Capture one real stage-specific transition, never a model rollout."""
+
+    semantics = audit_anchor_semantics(action_protocol)
 
     env = PygamePacmanEnv(
         PygamePacmanEnvConfig(
@@ -669,7 +727,7 @@ def collect_initial_audit_anchor(
         records, _ = _collect_seed(
             seed=seed,
             env=env,
-            planner=EdwardPlanner(),
+            planner=EdwardPlanner() if action_protocol == EDWARD_OPTION_PROTOCOL else None,
             reward_config=reward_config,
             max_records=1,
             require_successful_clear=False,
@@ -679,11 +737,7 @@ def collect_initial_audit_anchor(
     anchor = {
         **records[0],
         "audit_role": "episode_spec_audit_anchor",
-        "audit_anchor_semantics": {
-            "scope": "initial_state_one_edward_step",
-            "model_rollout": False,
-            "training_sample": False,
-        },
+        "audit_anchor_semantics": semantics,
     }
     audit_planner_record(anchor)
     return anchor
@@ -694,7 +748,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--seeds", type=int, nargs="+", default=[0])
-    parser.add_argument("--max-steps", type=int, default=512)
+    parser.add_argument("--max-steps", type=int)
     parser.add_argument("--pacman-python-root")
     return parser.parse_args()
 
@@ -702,6 +756,13 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     environment, _ = load_recipe_settings(args.config)
+    planner_audit = load_planner_audit_settings(args.config)
+    if args.max_steps is None:
+        args.max_steps = planner_audit.max_steps
+    if args.max_steps != planner_audit.max_steps:
+        raise ValueError("--max-steps must match config planner_audit.max_steps")
+    if load_recipe_document(args.config).get("action_protocol") != EDWARD_OPTION_PROTOCOL:
+        raise ValueError("Edward baseline audit requires an Edward recipe; C1 uses direct anchors")
     if len(args.seeds) != len(set(args.seeds)):
         raise ValueError("audit seeds must be unique")
     args.output_root.mkdir(parents=True, exist_ok=False)
@@ -794,7 +855,8 @@ def main() -> None:
         "generator_provenance": _audit_generator_provenance(),
         "seeds": args.seeds,
         "per_seed_rows": per_seed_rows,
-        "max_steps": args.max_steps,
+        "audit_max_steps": args.max_steps,
+        "training_environment_max_steps": environment.max_steps,
         "reward_recipe_version": REWARD_RECIPE_VERSION,
         "reward_config": asdict(reward_config),
         "training_config_sha256": config_sha256,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import math
 import os
 import re
 import sys
@@ -127,23 +128,30 @@ def _validate_reward_objective_contract(config) -> None:
             or reward_norm.std_level != "group"
             or int(reward_norm.group_size) != n_samples
             or bool(reward_norm.mean_leave1out)
+            or not bool(getattr(reward_norm, "std_unbiased", False))
+            or not math.isclose(
+                float(getattr(reward_norm, "eps", 0.0)),
+                1.0e-5,
+                rel_tol=0.0,
+                abs_tol=1.0e-12,
+            )
         ):
             raise ValueError(
                 "episode_return_group_v1 requires group mean/std normalization, "
-                "group_size=gconfig.n_samples, and mean_leave1out=false"
+                "group_size=gconfig.n_samples, mean_leave1out=false, "
+                "std_unbiased=true, and eps=1e-5"
             )
         if getattr(config.actor, "overlong_reward_penalty", False):
             raise ValueError(
                 "episode_return_group_v1 does not support per-completion "
                 "overlong reward penalties"
             )
-        if getattr(config, "critic", None) is not None or getattr(
-            config, "teacher", None
-        ) is not None:
-            raise ValueError(
-                "episode_return_group_v1 requires critic=null and teacher=null"
-            )
-    elif config.actor.reward_norm is not None:
+    if contract in {"step_local_raw_v1", "episode_return_group_v1"} and (
+        getattr(config, "critic", None) is not None
+        or getattr(config, "teacher", None) is not None
+    ):
+        raise ValueError(f"{contract} requires critic=null and teacher=null")
+    if contract != "episode_return_group_v1" and config.actor.reward_norm is not None:
         raise ValueError(
             f"{contract} requires actor.reward_norm=null; normalization across "
             "unrelated maze states changes the sign of state-local returns"
@@ -155,10 +163,166 @@ def _validate_reward_objective_contract(config) -> None:
         )
 
 
+def _validate_release_stage_contract(config, *, smoke_updates: int | None = None) -> None:
+    """Fail closed on drift in either public two-stage training recipe."""
+
+    from areal_pacman.level1.recipe import (
+        DIRECT_ACTION_PROTOCOL,
+        DIRECT_PROMPT_VERSION,
+        EDWARD_OPTION_PROTOCOL,
+        EDWARD_PROMPT_VERSION,
+    )
+
+    protocol = str(getattr(config, "action_protocol", "legacy"))
+    if protocol == "legacy":
+        return
+    if protocol not in {DIRECT_ACTION_PROTOCOL, EDWARD_OPTION_PROTOCOL}:
+        raise ValueError(f"unsupported action_protocol: {protocol}")
+
+    def require(condition: bool, message: str) -> None:
+        if not condition:
+            raise ValueError(f"release two-stage recipe requires {message}")
+
+    require(int(config.environment.max_steps) == 512, "environment.max_steps=512")
+    require(int(config.dataset_generation.train_episodes) == 80, "80 train rows")
+    require(
+        int(config.dataset_generation.validation_episodes) == 4,
+        "4 validation rows",
+    )
+    require(int(config.dataset_generation.seed) == 28, "dataset seed 28")
+    require(int(config.train_dataset.batch_size) == 4, "train batch_size=4")
+    require(int(config.valid_dataset.batch_size) == 4, "valid batch_size=4")
+    require(int(config.gconfig.n_samples) == 12, "gconfig.n_samples=12")
+    require(int(config.eval_gconfig.n_samples) == 12, "eval_gconfig.n_samples=12")
+    require(int(config.seed) == 1, "training RNG seed 1")
+    require(int(config.cluster.n_gpus_per_node) == 8, "8 GPUs")
+    require(config.rollout.backend == "vllm:d4p1t1", "4 rollout GPUs")
+    require(config.actor.backend == "fsdp:d4p1t1", "4 actor GPUs")
+    require(int(config.total_train_epochs) == 5, "5 epochs")
+    require(
+        config.total_train_steps is None if smoke_updates is None
+        else 1 <= smoke_updates <= 100 and config.total_train_steps == smoke_updates,
+        "total_train_steps=null unless explicitly set by --smoke-updates (1-100)",
+    )
+    require(
+        80 // int(config.train_dataset.batch_size) * int(config.total_train_epochs)
+        == 100,
+        "a 100-update full budget",
+    )
+    require(
+        math.isclose(float(config.actor.optimizer.lr), 5.0e-7),
+        "actor learning rate 5e-7",
+    )
+    require(
+        math.isclose(float(config.nearest_pellet_alpha), 0.1),
+        "nearest_pellet_alpha=0.1",
+    )
+    require(config.validation_contract == "sampled12_uniform_shaped", "matched sampled validation")
+    require(config.image_prompt_style == "live_state_v3", "image_prompt_style=live_state_v3")
+    require(config.enable_thinking is False, "enable_thinking=false")
+    require(config.actor.init_from_scratch is False, "pretrained actor initialization")
+    require(config.tokenizer_path == config.actor.path, "tokenizer_path to follow actor.path")
+    require(config.rollout.tokenizer_path == config.actor.path, "rollout tokenizer to follow actor.path")
+    require(config.gconfig.greedy is False, "sampled training, not greedy decoding")
+    require(config.eval_gconfig.greedy is False, "sampled validation, not greedy decoding")
+    require(
+        config.gconfig.max_tokens == config.eval_gconfig.max_tokens == config.vllm.max_model_len,
+        "matching train/eval/serving token budgets",
+    )
+    require(int(config.actor.ppo_n_minibatches) == 1, "ppo_n_minibatches=1")
+    require(math.isclose(float(config.actor.kl_ctl), 0.01), "KL coefficient 0.01")
+    require(config.ref is not None, "a reference model")
+    require(config.ref.path == config.actor.path, "ref.path to follow actor.path")
+    require(getattr(config, "critic", None) is None, "critic=null")
+    require(getattr(config, "teacher", None) is None, "teacher=null")
+    require(config.saver.freq_steps == 1, "saver.freq_steps=1")
+    require(config.evaluator.freq_steps == 1, "evaluator.freq_steps=1")
+    require(str(config.recover.mode) == "disabled", "recover.mode=disabled")
+    require(config.gconfig.min_new_tokens == 1, "one-token train decoding")
+    require(config.gconfig.max_new_tokens == 1, "one-token train decoding")
+    require(config.eval_gconfig.min_new_tokens == 1, "one-token evaluation decoding")
+    require(config.eval_gconfig.max_new_tokens == 1, "one-token evaluation decoding")
+    require(math.isclose(float(config.gconfig.temperature), 0.7), "temperature=0.7")
+    require(math.isclose(float(config.eval_gconfig.temperature), 0.7), "evaluation temperature=0.7")
+    require(math.isclose(float(config.gconfig.top_p), 1.0), "top_p=1.0")
+    require(math.isclose(float(config.eval_gconfig.top_p), 1.0), "evaluation top_p=1.0")
+    require(math.isclose(float(config.death_penalty), 100.0), "death_penalty=100")
+    require(
+        math.isclose(float(config.safety_refusal_penalty), 100.0),
+        "safety_refusal_penalty=100",
+    )
+    expected_reward = {
+        "normal_pellet_reward": 1.0,
+        "power_pellet_reward": 1.0,
+        "ghost_reward": 5.0,
+        "fruit_reward": 0.0,
+        "completion_reward": 50.0,
+        "step_penalty": 0.05,
+        "step_penalty_cleared_ratio_scale": 0.0,
+        "wall_penalty": 0.5,
+        "nearest_pellet_remaining_ratio_threshold": 1.0,
+    }
+    require(config.use_base_reward is False, "use_base_reward=false")
+    require(config.nearest_pellet_scale_by_cleared_ratio is True, "scaled nearest-pellet shaping")
+    require(config.nearest_pellet_skip_on_eat is True, "nearest-pellet skip-on-eat")
+    for field, expected in expected_reward.items():
+        require(
+            math.isclose(float(getattr(config, field)), expected),
+            f"{field}={expected}",
+        )
+
+    reward_clip = float(config.actor.reward_clip)
+    require(not math.isnan(reward_clip) and reward_clip > 0, "a positive non-NaN reward_clip")
+    require(config.actor.adv_norm is None, "actor.adv_norm=null")
+    if protocol == DIRECT_ACTION_PROTOCOL:
+        require(config.environment.ghost_mode == "disabled", "C1 ghost_mode=disabled")
+        # A local, validated copy is required on offline training nodes. Model
+        # identity/revision is bound by the launcher checkpoint/run manifest.
+        require(bool(str(config.actor.path)), "a non-empty C1 initialization model")
+        require(config.prompt_version == DIRECT_PROMPT_VERSION, "the C1 prompt version")
+        require(config.reward_objective_contract == "step_local_raw_v1", "C1 step-local raw rewards")
+        require(config.edward_options is False, "C1 edward_options=false")
+        require(config.action_token_choice is True, "C1 action_token_choice=true")
+        require(config.open_action_mask is True, "C1 open_action_mask=true")
+        require(config.objective_encoding == "direct-action-token-v1", "the direct action encoding")
+        require(config.actor.reward_norm is None, "C1 actor.reward_norm=null")
+        require(math.isinf(reward_clip) and reward_clip > 0, "C1 actor.reward_clip=.inf")
+    else:
+        require(config.environment.ghost_mode == "normal", "C2 ghost_mode=normal")
+        require(config.prompt_version == EDWARD_PROMPT_VERSION, "the C2 prompt version")
+        require(config.reward_objective_contract == "episode_return_group_v1", "C2 episode-return group rewards")
+        require(config.edward_options is True, "C2 edward_options=true")
+        require(config.action_token_choice is False, "C2 action_token_choice=false")
+        require(config.open_action_mask is False, "C2 open_action_mask=false")
+        require(config.objective_encoding == EDWARD_OPTION_PROTOCOL, "the Edward option-code encoding")
+        require(math.isclose(reward_clip, 20.0), "C2 actor.reward_clip=20")
+
+
 def _build_workflow_kwargs(
     config, generation_config, *, training: bool = True
 ) -> dict[str, object]:
+    from dataclasses import is_dataclass
+    from types import SimpleNamespace
+    from collections.abc import Mapping
+    from omegaconf import OmegaConf
+    from areal_pacman.level1.recipe import recipe_contract_metadata
+
+    def plain(value):
+        if OmegaConf.is_config(value):
+            return OmegaConf.to_container(value, resolve=True)
+        if is_dataclass(value):
+            return OmegaConf.to_container(OmegaConf.structured(value), resolve=True)
+        if isinstance(value, SimpleNamespace):
+            return {key: plain(item) for key, item in vars(value).items()}
+        if isinstance(value, Mapping):
+            return {key: plain(item) for key, item in value.items()}
+        return value
+
+    raw_config = plain(config)
     kwargs = dict(
+        action_protocol=getattr(config, "action_protocol", "legacy"),
+        prompt_version=getattr(config, "prompt_version", "legacy"),
+        recipe_contract=recipe_contract_metadata(raw_config),
         ghost_mode=config.environment.ghost_mode,
         environment_max_steps=config.environment.max_steps,
         temperature=generation_config.temperature,
@@ -256,11 +420,41 @@ def _build_workflow_kwargs(
     return kwargs
 
 
+def _validate_release_dataset_inputs(config_path: Path, train_path: str, valid_path: str):
+    """Bind formal training inputs to the immutable bundle, not just its rows."""
+    import hashlib
+    from areal_pacman.level1.recipe import load_recipe_document, recipe_contract_metadata
+    from areal_pacman.level1.level1_dataset import environment_metadata, repository_revisions
+    from scripts.level1.dataset.prepare_level1_dataset import validate_prepared_dataset_manifest
+
+    raw = load_recipe_document(config_path)
+    if raw.get("action_protocol", "legacy") == "legacy":
+        return
+    root = Path(__file__).resolve().parent
+    paths = [Path(value).expanduser() for value in (train_path, valid_path)]
+    paths = [(root / value).resolve() if not value.is_absolute() else value.resolve() for value in paths]
+    if paths[0].parent != paths[1].parent:
+        raise ValueError("release train/validation inputs must belong to the same immutable bundle")
+    if paths[0].name != "train_hf" or paths[1].name != "validation_hf":
+        raise ValueError("release training requires canonical train_hf/validation_hf bundle paths")
+    manifest = validate_prepared_dataset_manifest(
+        paths[0].parent / "manifest.json",
+        expected_environment=environment_metadata(raw["environment"]["ghost_mode"]),
+        expected_source_revisions=repository_revisions(),
+        expected_training_config_sha256=hashlib.sha256(config_path.read_bytes()).hexdigest(),
+        expected_recipe_contract=recipe_contract_metadata(raw),
+    )
+    for split in ("train", "validation"):
+        if manifest["splits"][split].get("hf") is None:
+            raise ValueError(f"release bundle is missing {split} HF data")
+
+
 def _production_dry_run(
     config_path: Path,
     *,
     validate_areal: bool = False,
     config_args: list[str] | None = None,
+    smoke_updates: int | None = None,
 ) -> bool:
     text = config_path.read_text(encoding="utf-8")
     recipe_version = _yaml_scalar(text, "recipe_version")
@@ -316,6 +510,7 @@ def _production_dry_run(
             or environment.max_steps
         ),
     )
+    _validate_release_dataset_inputs(config_path, *dataset_matches[-2:])
     rows = 0
     for raw_path in dataset_matches[-2:]:
         dataset_path = Path(raw_path.strip().strip('"\''))
@@ -360,6 +555,7 @@ def _production_dry_run(
 
         config, _ = load_expr_config(effective_args, PacmanAgentConfig)
         _validate_reward_objective_contract(config)
+        _validate_release_stage_contract(config, smoke_updates=smoke_updates)
         gpu_count = config.cluster.n_gpus_per_node
         if gpu_count not in (4, 6, 8):
             raise ValueError(
@@ -381,7 +577,7 @@ def _production_dry_run(
             raise ValueError("train batch size must divide evenly across actor workers")
         if config.enable_thinking is not False:
             raise ValueError("production image-only config must disable thinking")
-        if recipe_version == "maapacman-level1-ghostdoor-v3":
+        if recipe_version == "maapacman-level1-ghostdoor-v3" and config.edward_options:
             if not config.edward_options:
                 raise ValueError("Edward v3 recipe must enable edward_options")
             if config.open_action_mask or config.action_token_choice:
@@ -546,6 +742,7 @@ def main(args: list[str]) -> None:
         config_path,
         validate_areal=validate_areal,
         config_args=args,
+        smoke_updates=smoke_updates,
     ):
         if smoke_updates is not None:
             print(f"smoke_updates={smoke_updates}")
@@ -559,6 +756,10 @@ def main(args: list[str]) -> None:
     from datasets import load_from_disk
 
     config, _ = load_expr_config(args, PacmanAgentConfig)
+    _validate_reward_objective_contract(config)
+    _validate_release_stage_contract(config, smoke_updates=smoke_updates)
+    if config_path is not None:
+        _validate_release_dataset_inputs(config_path, config.train_dataset.path, config.valid_dataset.path)
     if smoke_updates is not None:
         print(f"smoke_updates={smoke_updates}")
 

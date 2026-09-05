@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import inspect
+import json
 from io import BytesIO
 from typing import Any, Mapping, Sequence
 
@@ -15,9 +17,7 @@ MINIMAL_V1_SYSTEM_PROMPT = (
     "wasting moves. Respond with exactly one action token: U, D, L, R, or S. "
     "Do not explain the action."
 )
-MINIMAL_V1_USER_INSTRUCTION = (
-    "Choose the next action. Return exactly U, D, L, R, or S."
-)
+MINIMAL_V1_USER_INSTRUCTION = "Choose the next action. Return exactly U, D, L, R, or S."
 
 WALL_AVOIDANCE_V1_SYSTEM_PROMPT = (
     "You control Pacman from one screenshot. Pacman is the yellow circle and "
@@ -110,6 +110,61 @@ EDWARD_OBJECTIVE_V1_SYSTEM_PROMPT = (
     "Output no action letter, reasoning, Markdown, or other text."
 )
 
+EDWARD_OPTION_CODE_V1_USER_TEMPLATE = (
+    "Choose one tactical objective. Keys: p=Pac-Man [row,column], f=facing, "
+    "pellets=normal+power pellets remaining, maze=[rows,columns], "
+    "ghosts=[[id,state,position]], edible_ticks=vulnerability time, "
+    "last=previous action, c=candidates. Candidate row: "
+    "[code,id,strategy,target,first_action,distance,commit,safety,exits,entity].\n"
+    "Metrics: distance=route steps, commit=max executed moves, larger "
+    "safety/exits are better, entity=ELIMINATE ghost id.\n"
+    "{decision_state}\nEach row maps code to id. Use only the candidates shown "
+    "for this turn. Structured state overrides the image. Return exactly one "
+    "code from [{option_codes}]; nothing else."
+)
+
+
+def compact_edward_decision_prompt(
+    state_context: Mapping[str, Any], candidates: Sequence[Any], constraint: Any
+) -> str:
+    """Render the actual bounded Edward option-code user message."""
+    candidate_rows = [
+        [
+            constraint.code_for_option(candidate.option_id),
+            candidate.option_id,
+            candidate.strategy,
+            list(candidate.target),
+            candidate.first_action,
+            candidate.route_distance,
+            candidate.commit_moves,
+            candidate.safety_margin,
+            candidate.future_safe_exits,
+            candidate.entity_id,
+        ]
+        for candidate in candidates
+    ]
+    decision_state = {
+        "p": state_context.get("pacman_position"),
+        "f": state_context.get("facing"),
+        "pellets": state_context.get("pellets_remaining"),
+        "maze": state_context.get("maze_size"),
+        "ghosts": [
+            [ghost.get("id"), ghost.get("state"), ghost.get("position")]
+            for ghost in state_context.get("ghosts") or []
+            if isinstance(ghost, Mapping)
+        ],
+        "edible_ticks": state_context.get("edible_ticks"),
+        "last": state_context.get("last_action"),
+        "c": candidate_rows,
+    }
+    return EDWARD_OPTION_CODE_V1_USER_TEMPLATE.format(
+        decision_state=json.dumps(
+            decision_state, separators=(",", ":"), allow_nan=False
+        ),
+        option_codes=",".join(constraint.rendered_choices),
+    )
+
+
 PROMPT_STYLES = (
     "minimal_v1",
     "wall_avoidance_v1",
@@ -173,14 +228,26 @@ def live_state_instruction(context: Mapping[str, Any]) -> str:
     history_text = _action_text(exits)
     preferred_text = _action_text(preferred or open_actions)
     pellets_line = (
-        f" - Remaining pellets: {pellets_remaining}\n"
-        if pellets_remaining >= 0
-        else ""
+        f" - Remaining pellets: {pellets_remaining}\n" if pellets_remaining >= 0 else ""
     )
     reverse_line = (
         f"Do NOT reverse the last move ({last_action}) unless it is "
         "the only remaining preferred OPEN dir.\n"
         if last_action
+        else ""
+    )
+    ghost_line = (
+        " - Ghosts [id,state,position]: "
+        + json.dumps(
+            [
+                [ghost.get("id"), ghost.get("state"), ghost.get("position")]
+                for ghost in context.get("ghosts") or []
+            ],
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        + f"; edible_ticks={int(context.get('edible_ticks', 0))}\n"
+        if "ghosts" in context
         else ""
     )
     return (
@@ -189,6 +256,7 @@ def live_state_instruction(context: Mapping[str, Any]) -> str:
         f" - Grid position: row={row}, col={col}\n"
         f" - Facing: {facing}\n"
         f"{pellets_line}"
+        f"{ghost_line}"
         f" - BLOCKED dirs here: {_action_text(blocked_actions)}\n"
         f" - OPEN dirs here: {_action_text(open_actions)}\n"
         " - Do NOT choose a BLOCKED direction.\n"
@@ -206,6 +274,70 @@ def live_state_instruction(context: Mapping[str, Any]) -> str:
         "a BLOCKED dir.\n\n"
         "Only output one ACTION letter: <one of U/D/L/R> where U=up, D=down, "
         "L=left, R=right"
+    )
+
+
+def text_sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def prompt_user_template(prompt_style: str, *, edward_options: bool) -> str:
+    return (
+        EDWARD_OPTION_CODE_V1_USER_TEMPLATE
+        if edward_options
+        else prompt_text(prompt_style)[1]
+    )
+
+
+def prompt_contract_metadata(
+    prompt_style: str, *, edward_options: bool
+) -> dict[str, str]:
+    """Fingerprint the actual static text AND dynamic rendering implementation.
+
+    This is a template fingerprint, not a claim that per-turn prompts are equal.
+    Trajectories separately fingerprint the exact rendered messages and image.
+    """
+    system, _ = prompt_text(prompt_style)
+    if edward_options:
+        system = EDWARD_OPTION_CODE_V1_SYSTEM_PROMPT
+        renderer = compact_edward_decision_prompt
+        protocol = version = "edward-option-code-v1"
+    else:
+        renderer = (
+            live_state_instruction if prompt_style == "live_state_v3" else prompt_text
+        )
+        protocol = "direct-open-action-token-v1"
+        version = (
+            "live-state-direct-action-v3"
+            if prompt_style == "live_state_v3"
+            else prompt_style
+        )
+    template = prompt_user_template(prompt_style, edward_options=edward_options)
+    fingerprint = {
+        "system": system,
+        "user_template": template,
+        "renderer_source": inspect.getsource(renderer).replace("\r\n", "\n"),
+    }
+    return {
+        "action_protocol": protocol,
+        "prompt_version": version,
+        "prompt_template_sha256": text_sha256(
+            json.dumps(fingerprint, sort_keys=True, allow_nan=False)
+        ),
+        "system_prompt_sha256": text_sha256(system),
+        "user_prompt_template_sha256": text_sha256(template),
+    }
+
+
+def sent_prompt_sha256(system: str, user: str, image_sha256: str) -> str:
+    """Canonical identity of the actual two text messages and attached image."""
+    return text_sha256(
+        json.dumps(
+            {"system": system, "user": user, "observation_png_sha256": image_sha256},
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
     )
 
 
@@ -243,11 +375,7 @@ def crop_pacman_local_view(
 
     # Pacman and pellets are pure yellow. Pacman is the largest connected
     # yellow component; orange ghosts are excluded by the strict green cutoff.
-    yellow = (
-        (image[:, :, 0] > 240)
-        & (image[:, :, 1] > 220)
-        & (image[:, :, 2] < 40)
-    )
+    yellow = (image[:, :, 0] > 240) & (image[:, :, 1] > 220) & (image[:, :, 2] < 40)
     # Ignore the small yellow score/lives glyphs at the very bottom.
     yellow[max(0, image.shape[0] - 20) :, :] = False
     seen = np.zeros(yellow.shape, dtype=bool)

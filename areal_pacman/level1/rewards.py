@@ -37,6 +37,9 @@ class RewardConfig:
     nearest_pellet_skip_on_eat: bool = False
 
     def __post_init__(self) -> None:
+        for name, value in asdict(self).items():
+            if isinstance(value, (int, float)) and not math.isfinite(value):
+                raise ValueError(f"{name} must be finite; infinity is only a reward-clip bound")
         if self.recipe_version != REWARD_RECIPE_VERSION:
             raise ValueError(
                 f"reward recipe must be {REWARD_RECIPE_VERSION!r}"

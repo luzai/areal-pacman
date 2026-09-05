@@ -1,13 +1,13 @@
 # AReaL Pacman RL Recipe 设计
 
-状态：内置源码的 API-v3 合约已与当前代码同步；下文保留注明日期的历史训练与
-评测证据
+状态：新两阶段 source/recipe 集成验证中；最终 C2 推理和通关验收尚未完成。
+下文注明日期的证据是历史记录，不是新方案已通过的 gate。
 环境提供方：本仓库内置的 `maapacman.PygamePacmanEnv` API `3.0`
 环境 ID：`pacman-python-level1-ghostdoor-v3`
 Dataset 合约：`maapacman-level1-dataset-v4`
-生产 dataset 默认上限：`256` 个 action
+正式 C1/C2 dataset 默认上限：`512` 次底层 `env.step`
 支持的 episode 上限：`32`、`256`、`512`、`2000` 个 action
-通用 `PygamePacmanEnvConfig` 默认值：`512` 个 action，不是生产 dataset 默认值
+通用 `PygamePacmanEnvConfig` 默认值：`512` 个 action；实际仍以不可变数据行为准
 远端 Linux backend：SDL dummy
 代码合约同步日期：`2026-09-04`
 历史远端证据最后验证日期：`2026-07-23`
@@ -22,6 +22,49 @@ ${WORKSPACE_ROOT}/AReaL
 ${WORKSPACE_ROOT}/areal-pacman
 ${WORKSPACE_ROOT}/pacman-python
 ```
+
+## 0. 当前两阶段发布合约
+
+| 项目 | C1 | C2 |
+| --- | --- | --- |
+| 初始化 | Qwen3.5-9B | 完整 C1 权重，重置 optimizer/scheduler |
+| 幽灵 / harness | disabled；数据、训练、原生评估均不调用 Edward | normal；Edward options |
+| 输出协议 | 单个合法 U/D/L/R，`direct-open-action-token-v1` | 单个 advertised code，`edward-option-code-v1`，映射 C*/A*/E* |
+| prompt version | `live-state-direct-action-v3` | `edward-option-code-v1` |
+| objective / norm / clip | `step_local_raw_v1` / 无 / `.inf` | `episode_return_group_v1` / group-12 mean/sample std / 20 |
+
+两阶段均为 512 次底层步、80/4 train/validation rows、seeds 28–107/108–111、
+batch 4、每状态 12 局、5 epochs = 100 updates；每 update 48 局。训练 RNG seed=1
+与 dataset seed=28 区分。学习率统一 5e-7，shaping alpha=0.1；保留 reference
+KL=0.01、`ppo_n_minibatches=1`，无 critic/teacher/advantage normalization。
+增加 seeds 不等于增加地图，无幽灵初始状态可能重复。
+
+C1 每个方向只使用自己的 shaped step reward，不广播整局回报、不做 group
+normalization 或跨游戏步 GAE，保留原有 loss reduction；准确说法是无 critic 的
+逐步奖励 PPO-style 更新。C2 按同初始状态 12 局的完整回报先归一化再裁剪，将整局
+任务信号分配给该局模型决策，整局 loss 等权；option_return 只审计、不重复相加。
+使用样本标准差、`mean_leave1out=false`、`std_unbiased=true`、`eps=1e-5`。
+C1 `.inf` 只是裁剪阈值，JSON 写为 `"inf"`；仍拒绝非有限 reward，保留 PPO/梯度裁剪。
+
+当前交付为 source/recipe-only。下载即用还必须提供选定的完整 C2 权重、
+tokenizer/processor、精确 Edward harness/config 和经过实测的推理后端。制品记录
+逐文件 hash、C1 父权重、base revision、run/update、三仓身份及导出参数，不带指向
+训练机的外部 symlink。建议同时提供实际 C1 父权重；optimizer 恢复状态是独立制品。
+
+先按预先声明的 validation-only 规则在实际留存的已训练候选中选模，记录 update
+列表并保留 last，再冻结独立测试集。当前 `keep_last=2` 与按训练 reward 的
+`keep_best_metric` 在评估之前运行；每 update 保存不等于保留全部 100 份，也不能
+宣称保护了全程 validation 最优。验证后保护或全量保留仍需单独实现和磁盘规划。当前建议
+seeds 112–131 × 3 个固定生成 RNG seeds，共 60 局；这不是已完成结果。按 normal
+ghosts + Edward + 512 步测试，记录所有尝试和错误，**报告实测胜率，不设最低门槛**。
+0% 也如实说明；实际观察到通关才给通关录像，加载成功不等于通关。
+完整模型加载、真实截图端到端运行、多局整局报告、交付位置重新下载复验是四个
+独立 gate，均不能省略。
+
+2026-09-04 当前工作树定向 CPU 验证：`test_dataset_stage_contract.py`、
+`test_level1_v3_audits.py`、`test_curriculum_ghost_modes.py` 共 53 passed、2 deselected。
+两项 workflow parse-failure 测试因 Windows 缺 `uvloop` 未纳入通过数。
+该结果不代表 Linux full suite、分布式 GPU、最终权重推理或通关已通过。
 
 ## 1. 职责归属
 
@@ -60,17 +103,17 @@ pacman-python
 
 ```text
 episode row
-  -> PacmanImageOnlyWorkflow
+  -> PacmanNativeVisionWorkflow（训练）/ PacmanImageOnlyWorkflow（独立评估）
   -> PygamePacmanEnv.reset()
   -> 原版 pacman-python 进程和 pygame Surface
   -> RGB observation
   -> AReaL multimodal rollout endpoint
   -> VLM completion
-  -> 标准 U/D/L/R/S parser
-  -> PygamePacmanEnv.step(action)
+  -> C1: 受限 U/D/L/R -> 一次 PygamePacmanEnv.step(action)
+     C2: 受限 option code -> Edward option -> 一次或多次 env.step
   -> 原版 score delta 和状态指标
   -> recipe reward adapter
-  -> completion-token reward
+  -> C1 逐步任务奖励 / C2 整局任务目标
   -> 重复执行，直到 terminated 或 truncated
 ```
 
@@ -101,8 +144,9 @@ AReaL fork checkout 放在 deployable recipe mirror 外，并与 robotics 开发
 
 ```text
 ${AREAL_ROOT}
-  本地分支：areal-main
-  upstream：https://github.com/inclusionAI/AReaL.git main
+  发布分支：release/pacman-v0.1.0
+  固定 revision：a9e45c18094091b36ed4256d34e3e9c79947feca
+  origin：https://github.com/luzai/AReaL.git
 
 ${UNRELATED_AREAL_ROOT}
   本地分支：<unrelated-development-branch>
@@ -117,7 +161,7 @@ AReaL 开发 worktree 不是 Pacman 训练依赖。
 应使用项目专用 Conda prefix，而不是系统 Python 或不相关的既有环境：
 
 ```bash
-OWNER_ROOT="${OWNER_ROOT:-$HOME}"
+OWNER_ROOT="${OWNER_ROOT:?set an owner-controlled project root}"
 CODE_ROOT="${CODE_ROOT:-$OWNER_ROOT/maapacman-stack}"
 AREAL_ROOT="${AREAL_ROOT:-$OWNER_ROOT/AReaL}"
 AREAL_PACMAN_ROOT="${AREAL_PACMAN_ROOT:-$CODE_ROOT/areal-pacman}"
@@ -140,7 +184,7 @@ conda create -y -p "$ENV_ROOT" --clone "$BASE_ENV"
 `pacman-python` mirror 视为只读。每个 worker 的副本、`agent_state.json`、
 pygame 进程和 IPC 都是 `/tmp` 下的可丢弃内容。
 
-H100 验证特意采用 `/tmp + pip --target`，以便在不触碰持久环境的情况下删除。
+历史 H100 验证采用 `/tmp + pip --target`，以便在不触碰持久环境的情况下删除。
 该方法证明了运行时兼容性，但不是生产安装 recipe。
 
 一个不相关的旧 `pacman_gym` Conda 环境曾经过审计但未被修改。它当时使用
@@ -163,16 +207,17 @@ env = PygamePacmanEnv(
     PygamePacmanEnvConfig(
         pacman_python_root=os.environ["MAAPACMAN_PACMAN_PYTHON_ROOT"],
         level=1,
-        max_steps=256,
+        max_steps=512,
+        ghost_mode="normal",  # C2；C1 显式选择 "disabled"。
         video_driver="dummy",
         audio_driver="dummy",
     )
 )
 ```
 
-`256` 是生产 dataset 默认值。通用 `PygamePacmanEnvConfig` 类采用更宽松的
-`512` 默认值，但它不是生产 recipe 默认值。API-v3 数据行只能选择 `32`、`256`、
-`512` 或 `2000`，workflow 必须使用每条不可变数据行中记录的值。
+正式两阶段与数据行生成都默认 512 次底层步。通用/历史 API-v3 数据行仍允许
+`32`、`256`、`512`、`2000`；workflow 采用不可变数据行中的值，正式 recipe 校验
+拒绝不匹配的 horizon。512 不代表 C2 的模型调用或 option 选择次数。
 
 workflow 在 rollout 前进行验证：
 
@@ -195,19 +240,21 @@ if env.config.max_steps not in {32, 256, 512, 2000}:
 
 ```json
 {
-  "id": "level1-seed0-train-0001",
+  "id": "level1-normal-seed28-train-0001",
   "split": "train",
   "dataset_contract_version": "maapacman-level1-dataset-v4",
+  "action_protocol": "edward-option-code-v1",
+  "prompt_version": "edward-option-code-v1",
   "env": {
     "ghost_mode": "normal",
     "name": "pacman-python-level1-ghostdoor-v3",
     "api_version": "3.0",
     "backend": "original-pygame",
-    "pacman_python_revision": "d258122eecf6e0dc0a04d6fb8ff57a9b43f0c1d8",
+    "pacman_python_revision": "cbb97115e407abc86a44adc82a1b8f360b3e8da0",
     "level_revision": "36116c17c6c0805fdb1a07216357ac64c88d2c3108a0e37dce2a01b4ea2a8b97",
     "level": 1,
-    "seed": 0,
-    "max_steps": 256,
+    "seed": 28,
+    "max_steps": 512,
     "observation_mode": "rgb"
   }
 }
@@ -223,8 +270,15 @@ Dataset v4 要求 `env.ghost_mode`。`disabled` 数据不暴露幽灵，`normal`
 暴露四只正常幽灵。该模式属于 ruleset revision，必须与所选训练 recipe、运行时
 状态、audit anchor 和 trajectory evidence 一致。
 
+上例仅作精简说明，不是可直接验收的完整数据行。正式 bundle 还绑定三仓 provenance、
+recipe/prompt/reward metadata 与 hash、真实一步 anchor、JSONL/HF 内容及 manifest
+校验 sidecar。C1 anchor 在当前合法 U/D/L/R 中选第一个方向，不构造 Edward，也
+不声称使用 planner provenance；C2 保留候选及被选 option。anchor 不是模型 rollout
+或训练样本。旧 v4 bundle 缺少新字段也必须重生成，不手补、不覆盖；保持规范路径，
+CLI 的行数/seed/horizon 必须匹配 YAML。
+
 生产 Level 1 dataset 验证只接受 `env.max_steps` 为 `32`、`256`、`512` 或
-`2000`；数据行生成默认采用 `256`。所选上限属于不可变数据行合约，因此不兼容
+`2000`；数据行生成默认采用 `512`。所选上限属于不可变数据行合约，因此不兼容
 horizon 不得混入同一训练/评估 split。若 terminal transition 恰好落在上限，
 `terminated=True` 优先，该成功 action 不得同时报告为 `truncated=True`。
 
@@ -234,10 +288,12 @@ horizon 不得混入同一训练/评估 split。若 terminal transition 恰好�
 
 1. 一条固定 system prompt。
 2. 恰好一张由当前 `(400,336,3)` RGB Surface 编码的 PNG。
-3. 一条要求只返回一个 action 的固定指令。
+3. 对应阶段的 live-state 上下文和单 token 指令；C2 还包含当次 Edward 候选与编码映射。
 
-允许的响应 token 为 `U`、`D`、`L`、`R` 和 `S`。解析失败时不得把任意文本发送
-给环境；recipe 应使用文档规定的 fallback 和 parse penalty。
+C1 只允许当前可通行的 `U/D/L/R`，不输出 S 或 JSON；C2 只允许当次 advertised
+option code，不输出方向或 JSON，由 harness 执行映射的 option。两类 mask 都是
+动态的。保留格式错误 fail-closed 整局目标 -1，不把任意文本发送给环境，也不能用
+自动 planner 替模型选择来掩盖失败。下述环境通用 S 操作不是正式 C1 的模型输出。
 
 一个环境 step 是一笔在原版 pygame 帧边界结束的 action transaction。方向输入
 在已提交的 Level 1 游戏中移动一个网格；在该网格移动完成前，transaction 可能
@@ -312,13 +368,11 @@ MaaPacman 返回原版游戏的 score delta：
 | 普通豆 | `10` |
 | 大力丸 | `100` |
 
-AReaL 可以增加：
-
-- Progress shaping。
-- 撞墙惩罚。
-- 解析失败惩罚。
-- Episode 完成奖励。
-- 其他实验特定项。
+共同 event-reward-v3 使用 `use_base_reward=false`：普通豆/能量豆各 +1、幽灵 +5、
+水果 0、通关 +50、死亡 -100、实际步 -0.05、撞墙 -0.5，加上 alpha=0.1、threshold=1、
+按清豆率缩放、吃豆时跳过的 nearest-pellet shaping。原始分数仍记录审计，不再加入
+训练回报。Edward safety refusal 整局/最后一次决策仅扣一次 100；开局没有模型决策
+就拒绝时不造样本，选择 AVOID 本身不扣分。C1 无幽灵和 Edward，相应事件自然不出现。
 
 每条 step 记录同时保存 `base_reward` 和 `shaped_reward`。
 
@@ -338,6 +392,9 @@ pacman_python_revision
 level_revision
 renderer_revision
 seed and max_steps
+ghost_mode and three-repository provenance
+action_protocol, prompt_version, template and actual prompt hashes
+reward objective, reward clipping/normalization contract
 RGB frame hashes where requested
 action and parse status
 base_reward and shaped_reward
@@ -353,8 +410,8 @@ terminated, truncated and terminal_reason
 生产 workflow 直接构造 `PygamePacmanEnv`，并强制验证
 API `3.0`、环境 ID `pacman-python-level1-ghostdoor-v3` 和 dataset 合约
 `maapacman-level1-dataset-v4`。episode 上限取自已经验证的数据行；数据行生成默认
-采用 `256`，严格支持 `32`、`256`、`512`、`2000`。环境类通用的 `512` 默认值
-不会覆盖数据行合约。
+采用 `512`，通用数据行支持 `32`、`256`、`512`、`2000`。环境类默认值不覆盖
+不可变数据行和所选正式 recipe 合约。
 
 旧的 `107` 项测试、`13` 项 subtest 和 287-action oracle 属于 API-v1 历史证据，
 不是当前 API-v3 验收结果；第 10-12 节仅为历史留档而保留这些实验。
@@ -375,16 +432,17 @@ launcher 显式设置固定的 `MAAPACMAN_PACMAN_PYTHON_ROOT`，将
 <dataset-row-id>--sample-<trajectory-sample-id>.json
 ```
 
-文件用 exclusive create 写入，所以同一 dataset row 的 GRPO group 样本不会互相
+文件用 exclusive create 写入，所以同一 dataset row 的 rollout 样本不会互相
 覆盖。此前 group-12 实验每个 row 只留下最后一个样本，因此旧的两个 validation
 文件不能解释为 24-sample mean。
 
 训练与评测 decoding 完全分开：
 
 ```text
-训练 rollout: sampled，使用配置中的 temperature/top_p，group size 12
-当前每次 update 后 validation: sampled12，temperature 0.7，top_p 0.95
-训练后 validation: 每个 checkpoint 分别报告 greedy1 和 sampled12
+训练 rollout: sampled12，temperature 0.7，top_p 1.0，单 token
+每次 update 后 validation: freq_steps=1，sampled12，temperature 0.7，top_p 1.0
+保存 checkpoint: 独立的 freq_steps=1
+训练后评估: 显式选择 recipe/config，sampled 与 greedy 分别报告
 ```
 
 `PacmanImageOnlyWorkflow` 默认 `enable_thinking=false`，并拒绝
@@ -392,6 +450,17 @@ launcher 显式设置固定的 `MAAPACMAN_PACMAN_PYTHON_ROOT`，将
 `chat_template_kwargs.enable_thinking=false`。trajectory 记录 prompt style、
 decoding 合约、请求 body、模型原始回答和 reasoning 内容。sampled 和 greedy
 两套 validation 都强制关闭 thinking；只要发现 reasoning 内容，报告生成就失败。
+
+评估必须读取所选 recipe 的 ghost/harness/reward/prompt。Base/C1/C2 公平比较要
+固定同一评估协议，不能直接比较不同阶段原生回报。真实通关要求
+`terminal_reason=all_normal_pellets`、普通豆为零与对应 clear event，不能用高奖励
+替代；流程完成与游戏通关分别报告，不设最低胜率门槛。
+
+两份 YAML 均通过 `--smoke-updates 2` 复用；C2 smoke 必须使用真实完整的 C1 smoke
+checkpoint。正式预算仍是每阶段 100 updates。初次 `recover.mode=disabled` 在当前
+AReaL 同时关闭恢复状态保存，中断后改 auto 不能找回未保存的 optimizer；如需完整
+恢复，应从首次运行就启用。最终完整模型加载、GPU evaluation 产物及下载复验仍待
+验证，源码交付不等于完整可直接运行的已训练 agent。
 
 ## 10. 历史修正后的 group-12 证据
 

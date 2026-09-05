@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+import yaml
 from maapacman.env.pygame_environment import ruleset_revision
 
 from areal_pacman.level1 import level1_dataset
@@ -25,7 +26,11 @@ from areal_pacman.level1.trajectories import (
     audit_step_environment_evidence,
     audit_trajectory,
 )
-from scripts.level1.dataset import prepare_level1_dataset, write_level1_manifest
+from scripts.level1.dataset import (
+    prepare_level1_dataset,
+    prepare_level1_v3_audits,
+    write_level1_manifest,
+)
 from scripts.level1.dataset.prepare_level1_v3_audits import (
     AUDIT_CONTRACT_VERSION,
     AUDIT_DATASET_ROLES,
@@ -43,6 +48,7 @@ from scripts.level1.dataset.prepare_level1_dataset import (
     _tree_sha256,
     _write_text_exclusive,
     audit_episode_spec_row,
+    validate_prepared_dataset_manifest,
 )
 
 
@@ -177,12 +183,13 @@ def _planner_record():
             "pacman_python_dirty": True,
             "maapacman_revision": "2" * 40,
             "maapacman_dirty": True,
+            "max_steps": 256,
             "ruleset_revision": ruleset_revision("normal"),
             "pacman_python_source_sha256": "d" * 64,
             "maapacman_env_source_sha256": "e" * 64,
             "maapacman_planner_source_sha256": "9" * 64,
             "level_revision": "f" * 64,
-            "renderer_revision": "8" * 64,
+            "renderer_revision": f"pacman-python:{'1' * 40}",
         },
         "observation_png_sha256": "a" * 64,
         "structured_state_sha256": _canonical_sha256(state),
@@ -352,6 +359,16 @@ def test_serialized_planner_audit_is_self_reconciling():
     with pytest.raises(ValueError, match="must match bundled areal-pacman"):
         audit_planner_record(corrupted)
 
+    corrupted = copy.deepcopy(record)
+    corrupted["env"]["pacman_python_revision"] = "3" * 40
+    with pytest.raises(ValueError, match="pacman-python provenance"):
+        audit_planner_record(corrupted)
+
+    corrupted = copy.deepcopy(record)
+    corrupted["env"]["renderer_revision"] = "pacman-python:" + "3" * 40
+    with pytest.raises(ValueError, match="renderer revision"):
+        audit_planner_record(corrupted)
+
 
 def test_trajectory_rejects_legacy_or_mismatched_maapacman_repository():
     payload = {field: None for field in REQUIRED_ENV_FIELDS}
@@ -361,6 +378,8 @@ def test_trajectory_rejects_legacy_or_mismatched_maapacman_repository():
         backend="original-pygame",
         dataset_contract_version=level1_dataset.DATASET_CONTRACT_VERSION,
         maapacman_revision="2" * 40,
+        pacman_python_revision="1" * 40,
+        renderer_revision=f"pacman-python:{'1' * 40}",
         source_revisions={
             "pacman-python": {"commit": "1" * 40, "dirty": False},
             "areal-pacman": {"commit": "2" * 40, "dirty": True},
@@ -379,6 +398,16 @@ def test_trajectory_rejects_legacy_or_mismatched_maapacman_repository():
     mismatched = copy.deepcopy(payload)
     mismatched["maapacman_revision"] = "4" * 40
     with pytest.raises(ValueError, match="must match bundled areal-pacman"):
+        audit_trajectory(mismatched)
+
+    mismatched = copy.deepcopy(payload)
+    mismatched["pacman_python_revision"] = "4" * 40
+    with pytest.raises(ValueError, match="pacman-python revision"):
+        audit_trajectory(mismatched)
+
+    mismatched = copy.deepcopy(payload)
+    mismatched["renderer_revision"] = "pacman-python:" + "4" * 40
+    with pytest.raises(ValueError, match="renderer revision"):
         audit_trajectory(mismatched)
 
 
@@ -469,7 +498,7 @@ def test_audit_generator_provenance_uses_relative_source_hashes():
     )
 
 
-def test_v3_audit_defaults_to_verified_seed0_step512(tmp_path):
+def test_v3_audit_defaults_to_recipe_horizon(tmp_path):
     with patch(
         "sys.argv",
         [
@@ -482,7 +511,33 @@ def test_v3_audit_defaults_to_verified_seed0_step512(tmp_path):
     ):
         arguments = parse_audit_args()
     assert arguments.seeds == [0]
-    assert arguments.max_steps == 512
+    assert arguments.max_steps is None
+
+
+def test_v3_audit_rejects_horizon_that_differs_from_recipe(tmp_path):
+    arguments = SimpleNamespace(
+        output_root=tmp_path / "output",
+        config=(
+            Path(__file__).parents[1]
+            / "configs"
+            / "level1"
+            / "train"
+            / "curriculum1.yaml"
+        ),
+        seeds=[0],
+        max_steps=256,
+        pacman_python_root=None,
+    )
+    with (
+        patch.object(
+            prepare_level1_v3_audits,
+            "parse_args",
+            return_value=arguments,
+        ),
+        pytest.raises(ValueError, match="planner_audit.max_steps"),
+    ):
+        prepare_level1_v3_audits.main()
+    assert not arguments.output_root.exists()
 
 
 def test_split_main_uses_explicit_non_sibling_pacman_root_without_leaking_env(
@@ -521,7 +576,12 @@ def test_split_main_uses_explicit_non_sibling_pacman_root_without_leaking_env(
         check=True,
     ).stdout.strip()
 
-    original_root = Path(__file__).parents[2] / "pacman-python"
+    original_root = Path(
+        os.environ.get(
+            "MAAPACMAN_PACMAN_ROOT",
+            Path(__file__).parents[2] / "pacman-python",
+        )
+    ).resolve()
     monkeypatch.setenv("MAAPACMAN_PACMAN_ROOT", str(original_root))
     observed: dict[str, object] = {}
 
@@ -588,20 +648,18 @@ def test_tree_digest_is_relative_to_artifact_root(tmp_path):
 
 
 def test_split_generator_writes_relative_immutable_manifest(tmp_path):
+    fixture_config = tmp_path / "fixture.yaml"
+    raw = yaml.safe_load((Path(__file__).parents[1] / "configs/level1/train/curriculum2.yaml").read_text())
+    raw["dataset_generation"].update(train_episodes=2, validation_episodes=1, seed=10)
+    fixture_config.write_text(yaml.safe_dump(raw), encoding="utf-8")
     output_root = tmp_path / "v3-splits"
     arguments = SimpleNamespace(
         output_root=output_root,
-        config=(
-            Path(__file__).parents[1]
-            / "configs"
-            / "level1"
-            / "train"
-            / "curriculum1.yaml"
-        ),
+        config=fixture_config,
         train_episodes=2,
         validation_episodes=1,
         seed=10,
-        max_steps=32,
+        max_steps=512,
         write_hf=False,
         pacman_python_root=None,
     )
@@ -678,11 +736,40 @@ def test_split_generator_writes_relative_immutable_manifest(tmp_path):
         pytest.raises(FileExistsError),
     ):
         prepare_level1_dataset.main()
+    validated = validate_prepared_dataset_manifest(
+        output_root / "manifest.json",
+        expected_environment=manifest["environment"],
+        expected_source_revisions=manifest["source_revisions"],
+        expected_training_config_sha256=hashlib.sha256(
+            arguments.config.read_bytes()
+        ).hexdigest(),
+    )
+    assert validated == manifest
+    checksum = output_root / "manifest.sha256"
+    original_checksum = checksum.read_bytes()
+    checksum.write_bytes(f"{'0' * 64}  manifest.json\n".encode("ascii"))
+    with pytest.raises(ValueError, match="checksum sidecar"):
+        validate_prepared_dataset_manifest(
+            output_root / "manifest.json",
+            expected_environment=manifest["environment"],
+            expected_source_revisions=manifest["source_revisions"],
+            expected_training_config_sha256=manifest["training_config_sha256"],
+        )
+    checksum.write_bytes(original_checksum)
+    train_jsonl = output_root / "train.jsonl"
+    train_jsonl.write_bytes(train_jsonl.read_bytes() + b" ")
+    with pytest.raises(ValueError, match="JSONL digest"):
+        validate_prepared_dataset_manifest(
+            output_root / "manifest.json",
+            expected_environment=manifest["environment"],
+            expected_source_revisions=manifest["source_revisions"],
+            expected_training_config_sha256=manifest["training_config_sha256"],
+        )
 
 
 def test_audit_metadata_carries_complete_environment_and_planner_provenance():
     env = SimpleNamespace(
-        config=SimpleNamespace(ghost_mode="normal"),
+        config=SimpleNamespace(ghost_mode="normal", max_steps=256),
         provenance={
             "pacman_python_commit": "1" * 40,
             "pacman_python_source_sha256": "2" * 64,
@@ -730,6 +817,7 @@ def test_audit_metadata_carries_complete_environment_and_planner_provenance():
         "maapacman_planner_source_sha256": "8" * 64,
         "maapacman_dirty": False,
         "level": 1,
+        "max_steps": 256,
         "level_revision": "5" * 64,
         "renderer_revision": "6" * 64,
         "ruleset_revision": "7" * 64,
@@ -751,6 +839,7 @@ def test_run_manifest_records_three_repositories_and_bundled_revision(
             {
                 "recipe_version": "maapacman-level1-ghostdoor-v3",
                 "reward_recipe_version": REWARD_RECIPE_VERSION,
+                "environment": {"ghost_mode": "normal", "max_steps": 256},
             }
         ),
         encoding="utf-8",
@@ -796,6 +885,10 @@ def test_run_manifest_records_three_repositories_and_bundled_revision(
     with (
         patch.object(write_level1_manifest.sys, "argv", argv),
         patch.object(
+            write_level1_manifest, "model_initialization_identity",
+            return_value={"path": "model-revision", "identity_sha256": "test-model-content", "fixture": True},
+        ),
+        patch.object(
             write_level1_manifest,
             "PygamePacmanEnv",
             return_value=env,
@@ -804,6 +897,16 @@ def test_run_manifest_records_three_repositories_and_bundled_revision(
             write_level1_manifest,
             "repository_revisions",
             return_value=revisions,
+        ),
+        patch.object(
+            write_level1_manifest,
+            "environment_metadata",
+            return_value={"ghost_mode": "normal"},
+        ),
+        patch.object(
+            write_level1_manifest,
+            "validate_prepared_dataset_manifest",
+            return_value=json.loads(dataset_manifest.read_text(encoding="utf-8")),
         ),
     ):
         write_level1_manifest.main()

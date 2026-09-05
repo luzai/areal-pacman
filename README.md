@@ -10,6 +10,8 @@
 
 日常开发和交付统一使用 `release/maapacman-v0.1.0`。`backup/2026-09-04/*` 仅用于保留历史。
 
+当前交付状态是 **source/recipe-only**：新两阶段方案正在集成验证，尚未完成对应的分布式 GPU smoke、完整训练及最终 C2 权重的独立运行验收，不能据此宣称最终 agent 已能通关。
+
 ## 源码边界
 
 | 源码层                                                        | 作用                                       | 当前配方使用的版本                                                         |
@@ -126,25 +128,36 @@ CUDA_VISIBLE_DEVICES='' "$PYTHON" -m pytest -q
 | [curriculum1.yaml](configs/level1/train/curriculum1.yaml) | `Qwen/Qwen3.5-9B`           | 100 次 optimizer update |
 | [curriculum2.yaml](configs/level1/train/curriculum2.yaml) | `${CURRICULUM1_CHECKPOINT}` | 100 次 optimizer update |
 
-两阶段使用相同关卡、画面尺寸与 prompt 字段，但具有明确不同的幽灵模式：
+两阶段使用相同关卡、画面尺寸及共同观察字段，但动作协议、实际 prompt 与训练目标不同：
 
 | 项目                     | Curriculum 1       | Curriculum 2           |
 | ------------------------ | ------------------ | ---------------------- |
 | `environment.ghost_mode` | `disabled`，无幽灵 | `normal`，正常移动幽灵 |
 | 输入中的 `ghosts`        | `[]`               | 正常幽灵状态列表       |
-| 每局步数                 | 32                 | 256                    |
-| 训练 / 验证 seeds        | 0–7 / 8–9          | 100–139 / 140–147      |
-| Epochs                   | 50                 | 10                     |
-| 学习率                   | `1e-6`             | `5e-7`                 |
-| `nearest_pellet_alpha`   | `0.1`              | `0.02`                 |
+| 每局底层 `env.step` 上限 | 512 | 512 |
+| 动作 / harness | 单 token `U/D/L/R`，只允许当前可通行方向；不构造或调用 Edward | 单 token advertised option code，经 Edward 映射并执行 `C*/A*/E*` 候选 |
+| `action_protocol` | `direct-open-action-token-v1` | `edward-option-code-v1` |
+| `prompt_version` | `live-state-direct-action-v3` | `edward-option-code-v1` |
+| `edward_options` | `false` | `true` |
+| `action_token_choice` / `open_action_mask` | `true` / `true` | `false` / `false`，使用有效 option 候选 mask |
+| reward objective | `step_local_raw_v1` | `episode_return_group_v1` |
+| reward normalization / clip | `null` / `.inf` | 同状态 12 局 group mean/sample std / `20.0` |
+| 训练 / 验证行数 | 80 / 4 | 80 / 4 |
+| 训练 / 验证 seeds | 28–107 / 108–111 | 28–107 / 108–111 |
+| Epochs / updates | 5 / 100 | 5 / 100 |
+| 学习率 / `nearest_pellet_alpha` | `5e-7` / `0.1` | `5e-7` / `0.1` |
 
-两者默认均为 8 张 GPU、batch size 4、100 次更新，每个 prompt 采样 12 条轨迹。
-C1 学导航与吃豆，C2 加入避敌、能量豆和通关。地图与初始位置不变，seeds 不是不同地图；这些是发布默认值，不代表已验证最优超参数。
+两者默认均为 8 张 GPU（4 rollout + 4 actor）、train/validation batch size 4，每个初始状态采样 12 局，即每次 update 48 局、每 epoch 20 updates。训练 RNG seed=1，与 dataset seed=28 区分。
+C1 聚焦无幽灵导航与吃豆，C2 学习正常幽灵下的 Edward option 选择；两阶段都保留能量豆和通关规则。地图与初始位置不变，seeds 不是不同地图；这些是发布默认值，不代表已验证最优超参数。
 独立 ghost 开关不关闭水果、不改变奖励事件定义；C1 的能量豆仍得分，但没有幽灵易受攻击计时。
 启动器从 YAML 读取数据规模与步数；环境模式同时写入 dataset、run manifest 和每个原子帧，规则 hash 按模式区分。配置与数据不匹配时拒绝训练。
-当前 dataset、split bundle 与 planner audit 的产物合约均为 v4。旧数据没有 `ghost_mode`，须用当前固定源码重新生成；不要手工补字段或复用旧规则 hash。
+当前 dataset、split bundle 与 audit 的产物合约标识仍为 v4，但正式 bundle 新增必需的 `recipe_contract`、其 hash、逐行 action/prompt protocol 及三仓源码身份。C1 anchor 仅执行真实一步合法方向、没有 Edward；C2 anchor 保留真实候选。anchor 是环境审计证据，不是模型 rollout 或训练样本。旧 bundle 即使标记 v4 也必须重新生成，不要手补字段、复用旧规则 hash 或覆盖旧数据。CLI 的行数、seed、horizon 覆盖值必须与 YAML 一致；训练拒绝不匹配的 manifest、源码 hash、JSONL/HF 内容及非规范 bundle 路径。
 
-动作协议为 Edward option code，使用 `live_state_v3` 输入、`temperature=0.7`、`top_p=1.0` 和 `episode_return_group_v1` 目标。当前 YAML 未启用定期验证 rollout。奖励细节以 [rewards.py](areal_pacman/level1/rewards.py) 和配置为准。
+两阶段都使用 `live_state_v3` 观察、`temperature=0.7`、`top_p=1.0`、单 token、thinking disabled；C1 不输出 `S` 或 JSON，C2 不输出方向或 JSON。`saver.freq_steps=1` 与 `evaluator.freq_steps=1` 分别配置每 update 保存和验证；仍须在 GPU gate 核对真实产物，保存 checkpoint 不等于已评估。
+
+C1 是无 critic、逐步奖励的 PPO-style 更新：每次方向动作使用自己的 shaped reward，不做 group/advantage normalization，不广播整局回报，不跨游戏步做 GAE；保留原有 loss reduction。`.inf` 只是不截断有限的单步任务奖励，NaN/Inf reward 仍拒绝，JSON metadata 使用字符串 `"inf"`。C2 在同一初始状态的 12 局中先做整局回报归一化，再裁剪到 ±20；每局所有策略决策共享该局任务信号，整局 loss 等权，`option_return` 仅记录审计、不重复累加。两者保留 `ppo_n_minibatches=1`、KL=0.01 和 reference model（初始化跟随 actor），`critic/teacher/adv_norm=null`。
+
+Reward v3：普通豆/能量豆各 +1、幽灵 +5、水果 0、通关 +50、死亡 -100、每底层步 -0.05、撞墙 -0.5，另加 alpha=0.1 的 nearest-pellet shaping。`use_base_reward=false`；C2 safety refusal 整局仅扣一次 -100，开局尚无模型决策即拒绝时不造训练样本，选择 AVOID 本身不扣分。保持既有格式错误 fail-closed 整局目标 -1。完整系数和审计规则以 [rewards.py](areal_pacman/level1/rewards.py) 与两份 YAML 为准。
 
 ## 启动训练
 
@@ -170,7 +183,15 @@ CONFIG=configs/level1/train/curriculum1.yaml \
 bash scripts/level1/train/run_level1_training.sh --smoke-updates 2
 ```
 
-确认 smoke 结果后，从 Qwen3.5-9B 开始完整训练：
+取得真实 C1 smoke 的完整可加载权重后，再验证 C2 两次更新：
+
+```bash
+CURRICULUM1_CHECKPOINT=/path/to/complete-c1-smoke-checkpoint \
+CONFIG=configs/level1/train/curriculum2.yaml \
+bash scripts/level1/train/run_level1_training.sh --smoke-updates 2
+```
+
+确认两阶段 smoke 结果后，从 Qwen3.5-9B 开始完整训练：
 
 ```bash
 CONFIG=configs/level1/train/curriculum1.yaml \
@@ -186,7 +207,9 @@ CONFIG=configs/level1/train/curriculum2.yaml \
 bash scripts/level1/train/run_level1_training.sh
 ```
 
-`CURRICULUM1_CHECKPOINT` 必须包含模型权重、配置和所需 tokenizer/processor 文件；不能直接指向训练产物根目录或不完整的恢复目录。启动器会离线加载这些元数据，并核验权重 index 引用的每个分片都存在且非空。需要补齐冻结视觉权重时，参见[完整 VLM checkpoint 工具](scripts/level1/report/build_complete_vlm_checkpoint.py)。
+`CURRICULUM1_CHECKPOINT` 必须包含模型权重、配置和所需 tokenizer/processor 文件；不能直接指向训练产物根目录或不完整的恢复目录。启动器会离线加载这些元数据，并由 config 构建不分配实际权重的 meta 模型，逐项检查所需 tensor 名称和 shape；缺失、重复或不兼容参数会明确失败。[完整 VLM checkpoint 工具](scripts/level1/report/build_complete_vlm_checkpoint.py)支持单文件和分片的完整模型打包，不覆盖原文件。
+
+上述检查只是结构预检，不等于完整模型加载或真实图像推理。当前固定 AReaL 没有已核实的视觉参数冻结证据，因此 exporter 拒绝任何缺失 tensor，包括视觉权重；旧 `--restore-all-missing` 也不能绕过。不得用 base 权重替代丢失的可训练参数，或丢掉 C1 已学参数。先通过 C1 两次更新 smoke，导出并实际验证它的完整 checkpoint，再以该 checkpoint 执行同一 C2 YAML 的 `--smoke-updates 2`；base placeholder 不算 C1→C2 smoke。正式训练仍须分别完成计划内 100 updates，smoke 权重不能冒充最终 agent。
 
 Curriculum 2 继承模型权重并重新初始化 optimizer/scheduler。两份配置首次运行均为 `recover.mode: disabled`。
 注意：在当前 AReaL 中，`disabled` 同时禁止保存恢复状态；中断后才改为 `auto`，无法补回之前未保存的 optimizer/dataloader 状态。
@@ -197,14 +220,29 @@ Smoke 使用同一份 YAML，通过 `total_train_steps=2` 限制更新次数，�
 
 启动器会检查源码导入、模型文件、GPU 空闲状态、AReaL 补丁和 prompt budget，生成不可变数据集并执行配置 dry-run，然后启动训练。默认产物位于 `${OWNER_ROOT}/run_artifacts/maapacman-rl/<recipe>-<timestamp>/`，数据集保存在其中的 `dataset/`。指定自定义输出路径时应使用新目录。
 
-两阶段已新增真实 headless 环境、确定性、能量豆后无幽灵、数据生成与篡改拒绝测试；分布式 GPU smoke 尚待运行，CPU 环境测试不能代替它。
-Windows 可运行这些 CPU 检查；完整 AReaL workflow 的依赖包含 `uvloop`，仍需在 Linux 环境验证。
+2026-09-04 当前集成工作树完成定向 CPU 检查：`test_dataset_stage_contract.py`、`test_level1_v3_audits.py`、`test_curriculum_ghost_modes.py` 共 **53 passed、2 deselected**。覆盖真实 headless 双模式、C1 数据不调用 Edward、JSONL/HF round-trip、run manifest、训练 preflight 与重算 checksum 后的篡改拒绝。两项 parse-failure workflow 测试因 Windows 缺 `uvloop` 未纳入该通过数；Linux full suite、分布式 GPU smoke 和最终真实模型推理仍待验证。此结果不沿用旧实验的 GPU/通关结论。
 
 ## 评估与产物
 
-[评估工具目录](scripts/level1/evaluate/) 提供单模型评估、checkpoint 对比和结果汇总工具。目前旧批量评估脚本仍假设恰好 4 个 checkpoint，参数也需要与当前 Edward options 训练协议对齐，尚不能作为这两份 recipe 已验证的一键评估入口。
+[评估工具目录](scripts/level1/evaluate/) 提供单模型评估、checkpoint 对比和结果汇总工具。`evaluate_level1.py --config` 读取对应 recipe 的 ghost/harness/reward/prompt/decoding；批量入口支持任意非零 checkpoint 数，也可通过 `CHECKPOINT_LIST` 选择子集。具体示例见[脚本说明](scripts/README.md)。这些接口仍待真实推理服务验证，不承诺已具备验证过的一键推理环境。
 
-正式对比 Base、Curriculum 1 和 Curriculum 2 时，应固定环境 revision、seed、episode 步数和解码设置，记录通关率、清豆率和回报。轨迹审计工具与 checkpoint 工具见[脚本说明](scripts/README.md)。
+独立评估默认采用 C2、held-out seeds 112–131、每 seed 3 个生成 seeds；正式执行时应先确认并冻结测试规模。`--purpose validation` 仅接受验证 seeds 108–111，选模不能使用 held-out 报告。每次调用预先保存 manifest，逐次尝试追加保存到 `.attempts.jsonl`，默认对基础设施失败最多重试两次且保留原错误。报告分别给出 `evaluation_completed`、`full_completions`、`win_rate`（包括失败尝试的分母）及 `planned_trial_win_rate`，两种分母不得混淆。
+
+正式对比 Base、C1、C2 时，必须在同一协议内固定环境 revision、ghost/harness、seed、512 步和 decoding；不能直接把 C1/C2 原生训练回报横向比较。每局报告完成状态、terminal reason、通关率、清豆率、回报和失败；评估流程结束不等于观察到通关。
+
+## 最终权重交付与验收
+
+从 base 复现训练可以只交付固定源码、配置、模型 revision 和运行记录；若同事不重训而直接运行最终 agent，则必须另交付**完整 C2 推理 checkpoint + tokenizer/processor + 精确 Edward harness/config**。建议同时提供实际用于 C2 初始化的 C1 checkpoint；optimizer/scheduler 恢复状态是另一类制品，不属于推理必需文件。
+
+完整 C2 权重计划作为独立大文件制品交付，Git 保留模型说明、manifest、逐文件校验和及下载入口。交付位置/访问范围、实测推理后端与硬件仍待确定；不要求读取其他用户目录，也不依赖 MaaPacman 独立仓库。必须记录 C2 run/update、C1 父模型 hash、base revision、三仓身份和导出参数，且无指向训练机的外部 symlink。
+
+发布 checkpoint 不自动等于最后一步：按预先声明的规则，仅用 validation 108–111 在**实际留存的已训练候选**中选模并保留 last，报告候选 update 列表与规则。当前 `keep_last=2`、`keep_best_metric` 使用训练 reward，且 AReaL 先保存后评估；每 update 保存不代表留存全部 100 份，也不能宣称选出全程 validation 最优。默认最后一步在最近两份中；若需保护全程 validation 最优，仍须另实现验证后保护或规划全量保留，不能默增磁盘预算。之后固定独立测试集；目前建议 seeds 112–131 × 3 个固定生成 RNG seeds，共 60 局，具体规模尚待确认，不能用测试集反复调参。
+
+验收依次要求：新位置的结构检查及完整模型加载；normal ghosts + Edward + 512 步的真实图像端到端运行；完整多局表现报告；从同事可访问位置重新下载后的 hash/加载/整局复验。模型加载成功或文件检查通过不能代替后续 gates。
+
+评估记录的 checkpoint manifest 和服务模型别名还不能证明服务实际加载了该权重，当前明确记录 `weight_identity_verified=false`；须补充服务启动/加载日志及真实加载证据，不能凭别名把模型身份 gate 判为通过。
+
+**先报告实际通关率，不设最低门槛。** 通关以真实 `terminal_reason=all_normal_pellets`、普通豆为 0 及对应 `level_cleared` 事件为依据，死亡、截断、安全拒绝或格式错误不算通关。报告全部尝试与基础设施错误，不静默删除失败；有真实通关再提供对应权重/hash/seed 的通关录像，0% 也如实报告“本测试集未观察到通关”，不自行扩大训练预算。当前尚无新方案最终权重的通关或下载复验结果。
 
 ## 运行约定
 

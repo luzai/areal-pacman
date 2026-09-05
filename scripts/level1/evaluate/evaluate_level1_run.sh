@@ -10,17 +10,24 @@ SOURCE_RUN="${SOURCE_RUN:?SOURCE_RUN is required}"
 EVAL_ROOT="${EVAL_ROOT:-${SOURCE_RUN}/corrected_eval}"
 GPU_ID="${GPU_ID:-0}"
 PORT_BASE="${PORT_BASE:-18150}"
-CHECKPOINT_ROOT="${CHECKPOINT_ROOT:?CHECKPOINT_ROOT is required}"
+CHECKPOINT_ROOT="${CHECKPOINT_ROOT:-}"
+CHECKPOINT_LIST="${CHECKPOINT_LIST:-}"
+CONFIG="${CONFIG:-${REPO_ROOT}/configs/level1/train/curriculum2.yaml}"
+EVAL_SEED="${EVAL_SEED:-108}"
+EVAL_EPISODES="${EVAL_EPISODES:-4}"
+EVAL_SAMPLES_PER_SEED="${EVAL_SAMPLES_PER_SEED:-12}"
+EVAL_PURPOSE="${EVAL_PURPOSE:-validation}"
+SAMPLED_ONLY="${SAMPLED_ONLY:-0}"
 
 if [[ ! -x "${PYTHON}" ]]; then
   echo "Python is not executable: ${PYTHON}" >&2
   exit 2
 fi
-if [[ ! -d "${PACMAN_PYTHON_ROOT}/.git" ]]; then
+if ! git -C "${PACMAN_PYTHON_ROOT}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "Pinned pacman-python checkout is missing: ${PACMAN_PYTHON_ROOT}" >&2
   exit 2
 fi
-if [[ ! -d "${CHECKPOINT_ROOT}" ]]; then
+if [[ -z "${CHECKPOINT_LIST}" && ! -d "${CHECKPOINT_ROOT}" ]]; then
   echo "Checkpoint root is missing: ${CHECKPOINT_ROOT}" >&2
   exit 2
 fi
@@ -33,10 +40,10 @@ if [[ ! "${GPU_ID}" =~ ^[0-9]+$ ]]; then
   exit 2
 fi
 
-active="$(
-  nvidia-smi -i "${GPU_ID}" --query-compute-apps=pid \
-    --format=csv,noheader,nounits 2>/dev/null | sed '/^[[:space:]]*$/d' || true
-)"
+active="$(nvidia-smi -i "${GPU_ID}" --query-compute-apps=pid --format=csv,noheader,nounits)" || {
+  echo "Cannot verify GPU availability; refusing to start." >&2
+  exit 3
+}
 if [[ -n "${active}" ]]; then
   echo "GPU ${GPU_ID} is busy; refusing to preempt PIDs: ${active}" >&2
   exit 3
@@ -52,20 +59,28 @@ export USE_TF=0
 export TRANSFORMERS_NO_TF=1
 export TORCH_COMPILE_DISABLE=1
 
-mapfile -t TRAINED_DIRS < <(
-  find "${CHECKPOINT_ROOT}" -mindepth 1 -maxdepth 1 -type d -name 'epoch*' |
-    sort -V
-)
-if [[ "${#TRAINED_DIRS[@]}" -ne 4 ]]; then
-  echo "Expected four update checkpoints, found ${#TRAINED_DIRS[@]}." >&2
+if [[ -n "${CHECKPOINT_LIST}" ]]; then
+  mapfile -t TRAINED_DIRS < "${CHECKPOINT_LIST}"
+else
+  mapfile -t TRAINED_DIRS < <(
+    find "${CHECKPOINT_ROOT}" -mindepth 1 -maxdepth 1 -type d -name 'epoch*' | sort -V
+  )
+fi
+if [[ "${#TRAINED_DIRS[@]}" -eq 0 ]]; then
+  echo "At least one trained checkpoint is required." >&2
   exit 2
 fi
+echo "checkpoints_selected=${#TRAINED_DIRS[@]} (all listed checkpoints will be exported/evaluated; use CHECKPOINT_LIST for a subset)"
 
 mkdir -p "${EVAL_ROOT}/complete_checkpoints" "${EVAL_ROOT}/servers"
 LABELS=(base)
 MODEL_PATHS=("${BASE_MODEL}")
 for index in "${!TRAINED_DIRS[@]}"; do
-  label="$(printf 'update%02d' "$((index + 1))")"
+  label="$(basename "${TRAINED_DIRS[${index}]}")"
+  if [[ ! -d "${TRAINED_DIRS[${index}]}" || ! "${label}" =~ ^[A-Za-z0-9._-]+$ || " ${LABELS[*]} " == *" ${label} "* ]]; then
+    echo "Invalid or duplicate checkpoint directory: ${TRAINED_DIRS[${index}]}" >&2
+    exit 2
+  fi
   output="${EVAL_ROOT}/complete_checkpoints/${label}"
   if [[ ! -f "${output}/merge_manifest.json" ]]; then
     "${PYTHON}" "${REPO_ROOT}/scripts/level1/report/build_complete_vlm_checkpoint.py" \
@@ -73,6 +88,11 @@ for index in "${!TRAINED_DIRS[@]}"; do
       --base-dir "${BASE_MODEL}" \
       --output-dir "${output}"
   fi
+  # An existing manifest is not a validity check: always verify the selected
+  # bundle's architecture, offline metadata and export file hashes before any
+  # model server starts, including freshly exported checkpoints.
+  "${PYTHON}" "${REPO_ROOT}/scripts/level1/train/validate_model_checkpoint.py" \
+    "${output}"
   LABELS+=("${label}")
   MODEL_PATHS+=("${output}")
 done
@@ -108,6 +128,18 @@ start_server() {
   local port="$3"
   local served_model_name="${4:-${label}}"
   local log="${EVAL_ROOT}/servers/${label}.log"
+  local current_pids
+  current_pids="$(nvidia-smi -i "${GPU_ID}" --query-compute-apps=pid --format=csv,noheader,nounits)" || return 3
+  if [[ -n "${current_pids}" ]]; then
+    echo "GPU became busy; refusing to preempt: ${current_pids}" >&2
+    return 3
+  fi
+  "${PYTHON}" -c 'import socket,sys; s=socket.socket(); s.bind(("127.0.0.1",int(sys.argv[1]))); s.close()' "${port}" || {
+    echo "Service port is unavailable; refusing to use an unrelated server." >&2
+    return 3
+  }
+  "${PYTHON}" -c 'import json,sys; print(json.dumps({"model_path":sys.argv[1],"served_model_id":sys.argv[2],"gpu_id":sys.argv[3],"port":int(sys.argv[4])},sort_keys=True))' \
+    "${model}" "${served_model_name}" "${GPU_ID}" "${port}" >"${EVAL_ROOT}/servers/${label}.launch.json"
   CUDA_VISIBLE_DEVICES="${GPU_ID}" setsid "${PYTHON}" \
     -m vllm.entrypoints.openai.api_server \
     --host 127.0.0.1 \
@@ -138,6 +170,7 @@ start_server() {
 }
 
 for index in "${!LABELS[@]}"; do
+  if [[ "${SAMPLED_ONLY}" == 1 ]]; then break; fi
   label="${LABELS[${index}]}"
   port=$((PORT_BASE + index))
   mkdir -p "${EVAL_ROOT}/${label}"
@@ -148,13 +181,14 @@ for index in "${!LABELS[@]}"; do
   start_server "${label}" "${MODEL_PATHS[${index}]}" "${port}"
   "${PYTHON}" "${REPO_ROOT}/scripts/level1/evaluate/evaluate_level1.py" \
     --model "${label}" \
+    --config "${CONFIG}" \
+    --checkpoint-path "${MODEL_PATHS[${index}]}" \
+    --tokenizer-path "${MODEL_PATHS[${index}]}" \
     --base-url "http://127.0.0.1:${port}/v1" \
-    --episodes 1 \
+    --episodes "${EVAL_EPISODES}" --samples-per-seed 1 --seed "${EVAL_SEED}" --purpose "${EVAL_PURPOSE}" \
     --concurrency 1 \
     --temperature 0.0 \
     --top-p 1.0 \
-    --max-completion-tokens 3 \
-    --prompt-style minimal_v1 \
     --pacman-python-root "${PACMAN_PYTHON_ROOT}" \
     --output "${EVAL_ROOT}/${label}/greedy.json" \
     >"${EVAL_ROOT}/${label}/greedy.log" 2>&1
@@ -187,23 +221,24 @@ for sampled_offset in "${!SAMPLED_LABELS[@]}"; do
     "${sampled_label}"
   "${PYTHON}" "${REPO_ROOT}/scripts/level1/evaluate/evaluate_level1.py" \
     --model "${sampled_label}" \
+    --config "${CONFIG}" \
+    --checkpoint-path "${MODEL_PATHS[${sampled_index}]}" \
+    --tokenizer-path "${MODEL_PATHS[${sampled_index}]}" \
     --base-url "http://127.0.0.1:${sampled_port}/v1" \
-    --episodes 12 \
+    --episodes "${EVAL_EPISODES}" --samples-per-seed "${EVAL_SAMPLES_PER_SEED}" --seed "${EVAL_SEED}" --purpose "${EVAL_PURPOSE}" \
     --concurrency 4 \
-    --temperature 0.7 \
-    --top-p 0.95 \
-    --max-completion-tokens 3 \
-    --prompt-style minimal_v1 \
     --pacman-python-root "${PACMAN_PYTHON_ROOT}" \
     --output "${EVAL_ROOT}/${sampled_label}/sampled12.json" \
     >"${EVAL_ROOT}/${sampled_label}/sampled12.log" 2>&1
   stop_server
 done
 
+COMPARE_FLAGS=(--require-complete-dual)
+if [[ "${SAMPLED_ONLY}" == 1 ]]; then COMPARE_FLAGS=(--sampled-only); fi
 "${PYTHON}" "${REPO_ROOT}/scripts/level1/evaluate/compare_level1_run.py" \
   --eval-root "${EVAL_ROOT}" \
   --output "${EVAL_ROOT}/comparison.json" \
-  --require-complete-dual
+  "${COMPARE_FLAGS[@]}"
 BEST_SAMPLED_LABEL="$(
   "${PYTHON}" -c \
     'import json,sys; print(json.load(open(sys.argv[1]))["best_sampled_label"])' \
@@ -215,7 +250,7 @@ BEST_GREEDY_LABEL="$(
     "${EVAL_ROOT}/comparison.json"
 )"
 
-echo "corrected_run_evaluation=ok"
+echo "evaluation_completed=true (process completion is not a win-rate gate; see each summary's full_completions and win_rate)"
 echo "best_sampled_label=${BEST_SAMPLED_LABEL}"
 echo "best_greedy_label=${BEST_GREEDY_LABEL}"
 echo "comparison=${EVAL_ROOT}/comparison.json"

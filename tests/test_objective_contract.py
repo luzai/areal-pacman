@@ -44,6 +44,8 @@ def _episode_reward_norm(*, group_size=12, mean_leave1out=False):
         mean_leave1out=mean_leave1out,
         std_level="group",
         group_size=group_size,
+        std_unbiased=True,
+        eps=1e-5,
     )
 
 

@@ -265,16 +265,24 @@ if [[ "${#GPU_ARRAY[@]}" -ne "${CONFIG_GPU_COUNT}" ]]; then
 fi
 
 declare -A SEEN_GPUS=()
+# A monitoring failure is not evidence of an idle GPU.
+if ! nvidia-smi --query-gpu=index,uuid,name,memory.used,utilization.gpu --format=csv; then
+  echo "Cannot verify live GPU availability; refusing to launch." >&2
+  exit 3
+fi
 for gpu in "${GPU_ARRAY[@]}"; do
   if [[ ! "${gpu}" =~ ^[0-9]+$ ]] || [[ -n "${SEEN_GPUS[${gpu}]:-}" ]]; then
     echo "GPU_IDS must contain unique numeric GPU IDs: ${GPU_IDS}" >&2
     exit 2
   fi
   SEEN_GPUS[${gpu}]=1
-  active_pids="$(
+  if ! active_pids="$(
     nvidia-smi -i "${gpu}" --query-compute-apps=pid \
-      --format=csv,noheader,nounits 2>/dev/null | sed '/^[[:space:]]*$/d' || true
-  )"
+      --format=csv,noheader,nounits | sed '/^[[:space:]]*$/d'
+  )"; then
+    echo "Cannot verify GPU ${gpu}; refusing to launch." >&2
+    exit 3
+  fi
   if [[ -n "${active_pids}" ]]; then
     echo "GPU ${gpu} is busy; refusing to preempt PIDs: ${active_pids}" >&2
     exit 3
@@ -300,15 +308,19 @@ export SDL_AUDIODRIVER=dummy
 export MAAPACMAN_PACMAN_PYTHON_ROOT="${MAAPACMAN_PACMAN_PYTHON_ROOT:-${WORKSPACE_ROOT}/pacman-python}"
 export PACMAN_TRAJECTORY_DIR="${ARTIFACT_ROOT}/training/trajectories"
 
-if grep -q '^edward_options:[[:space:]]*true' "${CONFIG}"; then
+if grep -Eq '^edward_options:[[:space:]]*true|^action_protocol:[[:space:]]*direct-open-action-token-v1' "${CONFIG}"; then
   MAX_MODEL_LEN="$(
     awk '/^[[:space:]]+max_model_len:/ { print $2; exit }' "${CONFIG}"
   )"
   if [[ ! "${MAX_MODEL_LEN}" =~ ^[0-9]+$ ]]; then
-    echo "Edward config must define numeric vllm.max_model_len." >&2
+    echo "Formal image config must define numeric vllm.max_model_len." >&2
     exit 2
   fi
-  "${PYTHON}" scripts/level1/train/check_edward_prompt_budget.py \
+  BUDGET_CHECK=scripts/level1/train/check_edward_prompt_budget.py
+  if grep -q '^action_protocol:[[:space:]]*direct-open-action-token-v1' "${CONFIG}"; then
+    BUDGET_CHECK=scripts/level1/train/check_direct_prompt_budget.py
+  fi
+  "${PYTHON}" "${BUDGET_CHECK}" \
     --model-path "${MODEL_PATH}" \
     --max-input-tokens "${MAX_MODEL_LEN}"
 fi

@@ -1,5 +1,6 @@
 """Real headless engine and immutable-data checks for both published stages."""
 
+import asyncio
 import copy
 import ast
 import hashlib
@@ -23,6 +24,14 @@ from scripts.level1.dataset.prepare_level1_dataset import (
 from scripts.level1.dataset.prepare_level1_v3_audits import audit_planner_record
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _small_recipe(tmp_path, stage, *, train=2, validation=1):
+    raw = yaml.safe_load((ROOT / f"configs/level1/train/curriculum{stage}.yaml").read_text())
+    raw["dataset_generation"].update(train_episodes=train, validation_episodes=validation)
+    path = tmp_path / f"curriculum{stage}-fixture.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    return path
 
 
 def test_ghost_mode_schema_uses_new_dataset_contract() -> None:
@@ -69,21 +78,9 @@ def test_replay_consumers_forward_recorded_mode(relative):
         assert config.ghost_mode == mode
 
 
-def test_prompt_schema_and_instructions_are_identical_between_modes():
-    # Pure prompt renderer: exercise without importing distributed AReaL.
-    tree = ast.parse(
-        (ROOT / "areal_pacman/level1/workflow.py").read_text(encoding="utf-8")
-    )
-    function = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "_compact_edward_decision_prompt"
-    )
-    namespace = {"json": json, "Mapping": dict}
-    code = "from __future__ import annotations\n" + ast.unparse(function)
-    exec(compile(code, "prompt-schema-test", "exec"), namespace)
-    render = namespace[function.name]
+def test_edward_prompt_keeps_common_observation_fields_between_modes():
+    # Exercise the real pure renderer without importing distributed AReaL.
+    from areal_pacman.level1.prompts import compact_edward_decision_prompt as render
     constraint = SimpleNamespace(rendered_choices=("0",))
     prompts = [
         render({"ghosts": ghosts}, (), constraint)
@@ -106,19 +103,23 @@ def test_formal_stages_have_explicit_distinct_settings():
         yaml.safe_load((ROOT / f"configs/level1/train/curriculum{i}.yaml").read_text())
         for i in (1, 2)
     ]
-    assert first["environment"] == {"ghost_mode": "disabled", "max_steps": 32}
-    assert second["environment"] == {"ghost_mode": "normal", "max_steps": 256}
+    assert first["environment"] == {"ghost_mode": "disabled", "max_steps": 512}
+    assert second["environment"] == {"ghost_mode": "normal", "max_steps": 512}
     assert first["actor"]["path"] == "Qwen/Qwen3.5-9B"
     assert second["actor"]["path"] == "${oc.env:CURRICULUM1_CHECKPOINT}"
-    assert first["actor"]["optimizer"]["lr"] == 1e-6
+    assert first["actor"]["optimizer"]["lr"] == 5e-7
     assert second["actor"]["optimizer"]["lr"] == 5e-7
-    assert first["nearest_pellet_alpha"] > second["nearest_pellet_alpha"]
-    assert (
-        first["dataset_generation"]["train_episodes"]
-        < second["dataset_generation"]["train_episodes"]
-    )
+    assert first["nearest_pellet_alpha"] == second["nearest_pellet_alpha"] == 0.1
+    assert first["action_protocol"] == "direct-open-action-token-v1"
+    assert first["edward_options"] is False
+    assert first["reward_objective_contract"] == "step_local_raw_v1"
+    assert second["action_protocol"] == "edward-option-code-v1"
+    assert second["edward_options"] is True
+    assert second["reward_objective_contract"] == "episode_return_group_v1"
     for config in (first, second):
         assert config["recover"]["mode"] == "disabled"
+        assert config["dataset_generation"] == {"train_episodes": 80, "validation_episodes": 4, "seed": 28}
+        assert config["evaluator"]["freq_steps"] == config["saver"]["freq_steps"] == 1
         assert (
             config["dataset_generation"]["train_episodes"]
             // config["train_dataset"]["batch_size"]
@@ -128,7 +129,6 @@ def test_formal_stages_have_explicit_distinct_settings():
     for field in (
         "image_prompt_style",
         "observation_mode",
-        "objective_encoding",
         "gconfig",
     ):
         assert first[field] == second[field]
@@ -210,7 +210,7 @@ def test_dataset_row_mode_is_part_of_identity(mode):
 
 @pytest.mark.parametrize("stage", [1, 2])
 def test_real_dataset_anchors_match_stage_and_reject_tampering(tmp_path, stage):
-    config = ROOT / f"configs/level1/train/curriculum{stage}.yaml"
+    config = _small_recipe(tmp_path, stage)
     environment, generation = load_recipe_settings(config)
     output = tmp_path / "dataset"
     _prepare_dataset(
@@ -259,6 +259,39 @@ def test_disabled_mode_rejects_ghost_events():
         )
 
 
+@pytest.mark.parametrize("mode", ["disabled", "normal"])
+def test_parse_failure_keeps_fail_closed_ghost_evidence(mode):
+    from areal_pacman.level1.trajectories import audit_trajectory
+    from areal_pacman.level1.workflow import PacmanImageOnlyWorkflow
+
+    row = make_episode_row(
+        1,
+        split="train",
+        ghost_mode=mode,
+        max_steps=512,
+    )
+    workflow = PacmanImageOnlyWorkflow()
+    reward = asyncio.run(
+        workflow.run(row, scripted_actions=["Action: R"])
+    )
+    assert reward == -1.0
+    payload = workflow.last_episode
+    assert payload is not None
+    audit_trajectory(payload)
+
+    corrupted = copy.deepcopy(payload)
+    corrupted["trajectory"][-1]["ghosts"] = (
+        [{"id": index} for index in range(4)] if mode == "disabled" else []
+    )
+    with pytest.raises(ValueError, match="ghost count"):
+        audit_trajectory(corrupted)
+    if mode == "disabled":
+        corrupted = copy.deepcopy(payload)
+        corrupted["trajectory"][-1]["edible_ticks"] = 1
+        with pytest.raises(ValueError, match="vulnerability ticks"):
+            audit_trajectory(corrupted)
+
+
 @pytest.mark.parametrize("stage", [1, 2])
 def test_training_preflight_rejects_wrong_stage_data(tmp_path, monkeypatch, stage):
     import train_areal
@@ -272,18 +305,17 @@ def test_training_preflight_rejects_wrong_stage_data(tmp_path, monkeypatch, stag
             __name__="PacmanNativeVisionWorkflow",
         ),
     )
-    config = ROOT / f"configs/level1/train/curriculum{stage}.yaml"
+    config = _small_recipe(tmp_path, stage, train=1, validation=1)
     environment, _ = load_recipe_settings(config)
     args = ["--config", str(config)]
+    output = tmp_path / "dataset"
+    _prepare_dataset(SimpleNamespace(
+        config=config, output_root=output, train_episodes=None,
+        validation_episodes=None, seed=None, max_steps=None,
+        write_hf=True, pacman_python_root=None,
+    ))
     for split, key in (("train", "train_dataset"), ("validation", "valid_dataset")):
-        path = tmp_path / f"{split}.jsonl"
-        row = make_episode_row(
-            1,
-            split=split,
-            ghost_mode=environment.ghost_mode,
-            max_steps=environment.max_steps,
-        )
-        path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+        path = output / f"{split}_hf"
         args.append(f"{key}.path={path}")
     assert train_areal._production_dry_run(config, config_args=args)
     opposite = "normal" if stage == 1 else "disabled"
@@ -301,7 +333,11 @@ def test_training_preflight_rejects_wrong_stage_data(tmp_path, monkeypatch, stag
 @pytest.mark.parametrize("stage", [1, 2])
 def test_new_config_sections_support_omegaconf_structured_loading(stage):
     from omegaconf import OmegaConf
-    from areal_pacman.level1.recipe import EnvironmentConfig, DatasetGenerationConfig
+    from areal_pacman.level1.recipe import (
+        DatasetGenerationConfig,
+        EnvironmentConfig,
+        PlannerAuditConfig,
+    )
 
     raw = yaml.safe_load(
         (ROOT / f"configs/level1/train/curriculum{stage}.yaml").read_text()
@@ -309,6 +345,7 @@ def test_new_config_sections_support_omegaconf_structured_loading(stage):
     for key, schema in (
         ("environment", EnvironmentConfig),
         ("dataset_generation", DatasetGenerationConfig),
+        ("planner_audit", PlannerAuditConfig),
     ):
         value = OmegaConf.merge(OmegaConf.structured(schema), raw[key])
         instance = OmegaConf.to_object(value)
@@ -320,7 +357,12 @@ def test_hf_roundtrip_and_run_manifest_preserve_mode(tmp_path, monkeypatch, stag
     datasets = pytest.importorskip("datasets")
     from scripts.level1.dataset import write_level1_manifest
 
-    config = ROOT / f"configs/level1/train/curriculum{stage}.yaml"
+    monkeypatch.setattr(
+        write_level1_manifest, "model_initialization_identity",
+        lambda path: {"path": str(path), "identity_sha256": "test-model-content", "fixture": True},
+    )
+
+    config = _small_recipe(tmp_path, stage, train=1, validation=1)
     output = tmp_path / "dataset"
     _prepare_dataset(
         SimpleNamespace(

@@ -2,7 +2,7 @@
 
 ## Production Level-1
 
-- `level1/train/`: validated training launchers and the earlier overfit
+- `level1/train/`: the shared two-stage launcher and the historical overfit
   pipeline.
 - `level1/evaluate/`: checkpoint evaluation, prompt A/B, and comparison tools.
 - `level1/dataset/`: deterministic dataset and manifest generation.
@@ -12,7 +12,7 @@
 Primary training entry point:
 
 ```bash
-export OWNER_ROOT="$HOME"
+export OWNER_ROOT=/path/to/writable/owner-root
 export ENV_ROOT="${CONDA_PREFIX:?activate maapacman-rl first}"
 export PYTHON="${ENV_ROOT}/bin/python"
 export AREAL_ROOT=/path/to/AReaL
@@ -40,13 +40,115 @@ For Curriculum 2, select `configs/level1/train/curriculum2.yaml` and export
 Curriculum 1. The launcher loads its config, tokenizer, and processor offline
 and verifies every weight shard named by an index before creating run output.
 
-The launcher reads seed counts and horizon from the selected YAML: C1 has
-disabled ghosts, 32 steps and 8/2 seeds; C2 has normal ghosts, 256 steps and
-40/8 seeds. Mode mismatches are rejected by dataset and trajectory audits.
+The launcher reads seed counts and horizon from YAML. Both stages use 512
+underlying environment steps, 80/4 train/validation rows (seeds 28–107/108–111),
+5 epochs and 100 updates. C1 has no ghosts or Edward: one legal U/D/L/R per
+model decision, raw step-local reward and no reward normalization/clipping of
+finite rewards (`reward_clip: .inf`). C2 uses normal ghosts, one advertised
+Edward option code, full-episode group-12 normalization then clipping to ±20.
+Both use batch 4, 12 samples, learning rate 5e-7, shaping alpha 0.1 and KL 0.01
+with a reference model. Saving and validation are each configured every update;
+their real GPU outputs remain to be checked.
+
+C2 smoke reuses its YAML with `--smoke-updates 2` and a real complete C1 smoke
+checkpoint. The structural checkpoint validator is not a full model load or
+image-inference test. Do not label base placeholders or smoke weights as the
+final trained agent. `recover.mode=disabled` also disables recovery-state saving
+in the pinned AReaL; ordinary model weights do not restore optimizer state.
+
+Data preparation creates a new immutable bundle containing `train.jsonl`,
+`validation.jsonl`, `train_hf/`, `validation_hf/`, `manifest.json` and
+`manifest.sha256`. Keep the bundle together and retain these canonical names.
+V4 manifests now require recipe/protocol hashes and current three-repository
+provenance; stale bundles must be regenerated. Seed/count/horizon CLI overrides
+must match YAML. Validation compares sidecar, source hashes, split seeds,
+canonical paths and HF rows against audited JSONL.
+
+`prepare_level1_dataset.py` records one real initial-state anchor per row:
+C1 executes the first legal U/D/L/R without constructing Edward; C2 records the
+advertised/selected Edward candidate. These anchors are neither model rollout
+nor training samples. `prepare_level1_v3_audits.py` is an Edward-only baseline
+diagnostic and explicitly rejects C1 configurations.
+
+### Recipe-driven evaluation
+
+`evaluate_level1.py --config` reads the actual stage ghost/harness/reward/prompt
+and one-token decoding settings. Conflicting legacy horizon, ghost or prompt
+flags are rejected. Temperature/top-p overrides are explicit, separately
+recorded protocols. Real inference-server verification is still pending.
+
+The following is an evaluator invocation, **not a service startup command**.
+It requires an already running compatible image-capable service that loads the
+same complete checkpoint and advertises the supplied exact model ID at
+`/v1/models`. Replace placeholders, freeze the test plan and use a new output:
+
+```bash
+export C2_CHECKPOINT=/path/to/selected-complete-c2-checkpoint
+export OPENAI_BASE_URL=http://127.0.0.1:8000/v1
+export SERVED_MODEL_ID=exact-model-id-from-service
+export EVAL_OUTPUT=/path/to/new-evaluation/c2-heldout.json
+
+"$PYTHON" scripts/level1/evaluate/evaluate_level1.py \
+  --config configs/level1/train/curriculum2.yaml \
+  --model "$SERVED_MODEL_ID" --checkpoint-path "$C2_CHECKPOINT" \
+  --tokenizer-path "$C2_CHECKPOINT" --base-url "$OPENAI_BASE_URL" \
+  --purpose heldout --seed 112 --episodes 20 --samples-per-seed 3 \
+  --generation-seed-base 0 --output "$EVAL_OUTPUT"
+```
+
+This proposed 20×3 held-out plan has not been executed or proven reproducible
+by a real backend. `--purpose validation` restricts environment seeds to
+108–111; only validation reports may select release checkpoints. Preserve
+held-out seeds for final reporting rather than tuning.
+
+`evaluate_level1_run.sh` defaults to C2 `CONFIG`, `EVAL_SEED=108`,
+`EVAL_EPISODES=4` and `EVAL_SAMPLES_PER_SEED=12`. It accepts any nonzero number
+of checkpoint directories; optional `CHECKPOINT_LIST` is a text file with one
+checkpoint path per line to select a subset. The sampled runner delegates to
+the shared runner. Full backend/resource requirements remain subject to the
+real-service gate, not merely shell syntax or mocked tests.
+
+The current saver retains `keep_last=2` plus checkpoints selected by training
+reward and runs before evaluation. `CHECKPOINT_LIST`/checkpoint discovery can
+only evaluate candidates still present; record their update IDs and select
+the best non-base trained candidate using validation reports. An overall
+comparison may favor base, but base is not a trained release checkpoint.
+Do not claim a validation-best model over all 100 updates unless all relevant
+candidates were actually protected and evaluated.
+
+The evaluator creates a manifest before running and appends every attempt to
+`.attempts.jsonl`; it defaults to two retries per infrastructure-failed episode,
+without erasing earlier errors. Reports distinguish `evaluation_completed`,
+`full_completions`, `attempts`, `error_attempts`, `win_rate` (wins/all attempts)
+and `planned_trial_win_rate` (wins/planned trials). Compare Base/C1/C2 only
+under one fixed ghost/harness/seed/512-step/decoding protocol. A completed
+evaluation is not a successful game; report the measured rate without a
+minimum threshold and keep failure videos if no completion is observed.
+
+`checkpoint.weight_identity_verified=false` is intentional: matching a local
+manifest and an API model alias is not proof of the server's loaded weights.
+Keep server launch/load logs and verify the real model loading gate separately.
+
+For download-and-run delivery, export the selected complete C2 weights with
+tokenizer/processor, matching config/harness, file checksums and C1 parent
+lineage. The exporter currently rejects all missing tensors, including vision:
+the pinned training implementation has no verified frozen-vision evidence.
+Never silently replace trained parameters with base weights. The checkpoint
+validator checks required architecture keys/shapes using a meta model, without
+allocating full weights; this is still not an actual model-loading gate.
+Verify a real image rollout and full games, then download the published
+artifact into a new directory and repeat loading/rollouts. Weight hosting and
+inference hardware are not yet specified; current delivery is source/recipe-only.
+
+The 2026-09-04 targeted CPU run passed 53 tests across
+`test_dataset_stage_contract.py`, `test_level1_v3_audits.py` and
+`test_curriculum_ghost_modes.py`; two parse-failure workflow tests were excluded
+because Windows lacks `uvloop`. This is not Linux full-suite, GPU smoke,
+complete-checkpoint inference or game-completion evidence.
 
 Run this from the repository root after activating the `maapacman-rl` Conda
-environment. Replace the three `/path/to/...` values with the fixed AReaL,
-pacman-python, and local model checkouts described in the root README.
+environment. Replace owner, AReaL, pacman-python and model placeholders with
+your own paths and the fixed revisions described in the root README.
 
 ## Historical synthetic experiments
 
