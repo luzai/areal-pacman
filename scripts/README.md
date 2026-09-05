@@ -186,6 +186,32 @@ the pinned training implementation has no verified frozen-vision evidence.
 Never silently replace trained parameters with base weights. The checkpoint
 validator checks required architecture keys/shapes using a meta model, without
 allocating full weights; this is still not an actual model-loading gate.
+
+The pinned FSDP saver casts floating tensors to the configured compute dtype.
+For a verified BF16 Qwen3.5 run, the original base's FP32 linear-attention
+tensors can therefore be BF16 in the saved checkpoint. Explicitly declare that
+storage policy when packaging; the default remains strict:
+
+```bash
+"${PYTHON}" -m scripts.level1.report.build_complete_vlm_checkpoint \
+  --trained-dir /path/to/verified-trained-checkpoint \
+  --base-dir /path/to/fixed-Qwen3.5-9B \
+  --output-dir /path/to/new-complete-checkpoint \
+  --expected-saved-dtype bfloat16 --config-comparison qwen3_5
+```
+
+The BF16 policy rejects other floating storage types, integer dtype changes,
+and shape changes. The Qwen config policy requires the same Transformers
+version recorded by the trained config, permits only the audited default
+fields and `qwen3_5` → `qwen3_5_vision` serialization alias, and compares the
+complete locally normalized configs. Other raw differences are rejected even
+when Transformers would discard them. No remote model code is trusted.
+Trained shard/config bytes are copied unchanged; the manifest records the
+dtype/config differences and hashes. These flags do not establish finite
+weights, optimizer success, trained-parameter changes, or model/gameplay
+success. In a separate numeric audit, FP32-to-BF16 rounding alone must not
+count as a parameter update.
+
 Verify a real image rollout and full games, then download the published
 artifact into a new directory and repeat loading/rollouts. Weight hosting and
 inference hardware are not yet specified; current delivery is source/recipe-only.

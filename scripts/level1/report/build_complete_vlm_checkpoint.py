@@ -45,6 +45,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--base-revision")
     parser.add_argument("--expected-base-revision")
+    parser.add_argument(
+        "--expected-saved-dtype", choices=("bfloat16",),
+        help=("Explicitly require BF16 saved floating tensors and permit base "
+              "FP32 -> saved BF16 storage differences. Copies bytes unchanged; "
+              "does not prove training updates or model loading."),
+    )
+    parser.add_argument(
+        "--config-comparison", choices=("strict", "qwen3_5"), default="strict",
+        help=("qwen3_5 permits only audited serialization defaults/vision alias "
+              "and requires equal configs after local Transformers normalization."),
+    )
     return parser.parse_args()
 
 
@@ -97,6 +108,105 @@ def weight_layout(root: Path) -> tuple[dict[str, str], dict[str, tuple]]:
     return mapping, shapes
 
 
+def validate_storage_dtypes(trained_shapes: dict, base_shapes: dict,
+                            expected_saved_dtype: str | None) -> list[dict]:
+    """Validate an explicit save policy without casting or reading tensor data."""
+    if expected_saved_dtype not in (None, "bfloat16"):
+        raise ValueError("unsupported expected saved dtype")
+    transitions = []
+    for key in sorted(trained_shapes):
+        shape, dtype = trained_shapes[key]
+        base_shape, base_dtype = base_shapes[key]
+        if shape != base_shape:
+            raise ValueError(f"trained/base tensor shape or dtype mismatch: {key}")
+        floating = dtype.startswith("F") or dtype == "BF16"
+        base_floating = base_dtype.startswith("F") or base_dtype == "BF16"
+        if expected_saved_dtype == "bfloat16" and (floating or base_floating):
+            if dtype != "BF16" or base_dtype not in ("F32", "BF16"):
+                raise ValueError(f"BF16 save policy dtype mismatch: {key}: {base_dtype} -> {dtype}")
+        elif dtype != base_dtype:
+            raise ValueError(f"trained/base tensor shape or dtype mismatch: {key}")
+        if dtype != base_dtype:
+            transitions.append({"key": key, "shape": list(shape),
+                                "base_dtype": base_dtype, "saved_dtype": dtype})
+    return transitions
+
+
+_MISSING = object()
+
+
+def _config_differences(base, trained, path=()):
+    if isinstance(base, dict) and isinstance(trained, dict):
+        for key in sorted(set(base) | set(trained)):
+            yield from _config_differences(
+                base.get(key, _MISSING), trained.get(key, _MISSING), (*path, key),
+            )
+    elif base != trained:
+        yield path, base, trained
+
+
+def validate_config_comparison(base_root: Path, trained_root: Path,
+                               base_config: dict, trained_config: dict | None,
+                               policy: str) -> dict:
+    """Fail closed on raw changes before comparing normalized Qwen configs."""
+    if policy == "strict":
+        if trained_config is not None:
+            for field in ("model_type", "text_config", "vision_config", "hidden_size", "vocab_size", "tie_word_embeddings"):
+                if field in trained_config and field in base_config and trained_config[field] != base_config[field]:
+                    raise ValueError(f"trained/base config mismatch: {field}")
+        return {"policy": "strict"}
+    if policy != "qwen3_5":
+        raise ValueError("unsupported config comparison policy")
+    if trained_config is None:
+        raise ValueError("Qwen config comparison requires the trained config")
+    if any(config.get("model_type") != "qwen3_5" for config in (base_config, trained_config)):
+        raise ValueError("Qwen config comparison requires model_type=qwen3_5")
+    import transformers
+    from transformers import AutoConfig
+
+    # A different library may interpret or drop different fields. Use the same
+    # version that serialized the trained config, not an unverified migration.
+    if trained_config.get("transformers_version") != transformers.__version__:
+        raise ValueError("trained config Transformers version must match the installed version")
+    defaults = {
+        ("text_config", "bos_token_id"): None,
+        ("text_config", "pad_token_id"): None,
+        ("text_config", "partial_rotary_factor"): 0.25,
+        ("text_config", "tie_word_embeddings"): False,
+    }
+    differences = []
+    for path, before, after in _config_differences(base_config, trained_config):
+        permitted = (
+            (path in defaults and before is _MISSING and after == defaults[path])
+            or (path == ("vision_config", "model_type")
+                and before == "qwen3_5" and after == "qwen3_5_vision")
+            or (path == ("transformers_version",)
+                and isinstance(before, str) and after == transformers.__version__)
+        )
+        if not permitted:
+            raise ValueError(f"unapproved raw config difference: {'.'.join(path)}")
+        differences.append({"field": ".".join(path), "base_present": before is not _MISSING,
+                            "base_value": None if before is _MISSING else before,
+                            "trained_value": after})
+    normalized = []
+    for root in (base_root, trained_root):
+        config = AutoConfig.from_pretrained(
+            str(root), local_files_only=True, trust_remote_code=False,
+        ).to_dict()
+        config.pop("_name_or_path", None)  # local source location, not model semantics
+        normalized.append(config)
+    if normalized[0] != normalized[1]:
+        raise ValueError("trained/base normalized Qwen config mismatch")
+    fingerprint = hashlib.sha256(json.dumps(
+        normalized[0], sort_keys=True, allow_nan=False,
+    ).encode("utf-8")).hexdigest()
+    return {"policy": policy, "transformers_version": transformers.__version__,
+            "approved_raw_differences": differences,
+            "normalized_ignored_fields": ["_name_or_path"],
+            "normalized_config_sha256": fingerprint,
+            "actual_model_load_verified": False}
+
+
 def build_checkpoint(args: argparse.Namespace) -> dict:
     args.trained_dir = args.trained_dir.resolve()
     args.base_dir = args.base_dir.resolve()
@@ -107,6 +217,18 @@ def build_checkpoint(args: argparse.Namespace) -> dict:
         raise ValueError("output must be outside both input checkpoints")
     if args.visual_prefix != "model.visual.":
         raise ValueError("only the standard model.visual. prefix is supported")
+    base_config_file = args.base_dir / "config.json"
+    trained_config_file = args.trained_dir / "config.json"
+    base_config_bytes = base_config_file.read_bytes()
+    trained_config_bytes = trained_config_file.read_bytes() if trained_config_file.is_file() else None
+
+    def require_unchanged_configs():
+        for path, captured in ((base_config_file, base_config_bytes),
+                               (trained_config_file, trained_config_bytes)):
+            current = path.read_bytes() if path.is_file() else None
+            if current != captured:
+                raise ValueError(f"source config changed during export: {path}")
+
     trained_map, trained_shapes = weight_layout(args.trained_dir)
     base_weight_map, base_shapes = weight_layout(args.base_dir)
     base_validation = validate_model_checkpoint(args.base_dir, load_transformers_metadata=False)
@@ -115,17 +237,19 @@ def build_checkpoint(args: argparse.Namespace) -> dict:
     unexpected = trained_keys - set(base_weight_map)
     if unexpected:
         raise ValueError(f"unexpected trained tensor: {sorted(unexpected)[0]}")
-    for key in trained_keys:
-        if trained_shapes[key] != base_shapes[key]:
-            raise ValueError(f"trained/base tensor shape or dtype mismatch: {key}")
+    expected_saved_dtype = getattr(args, "expected_saved_dtype", None)
+    dtype_transitions = validate_storage_dtypes(
+        trained_shapes, base_shapes, expected_saved_dtype,
+    )
 
-    base_config_file = args.base_dir / "config.json"
-    base_config = json.loads(base_config_file.read_text(encoding="utf-8"))
-    if (args.trained_dir / "config.json").is_file():
-        trained_config = json.loads((args.trained_dir / "config.json").read_text(encoding="utf-8"))
-        for field in ("model_type", "text_config", "vision_config", "hidden_size", "vocab_size", "tie_word_embeddings"):
-            if field in trained_config and field in base_config and trained_config[field] != base_config[field]:
-                raise ValueError(f"trained/base config mismatch: {field}")
+    base_config = json.loads(base_config_bytes)
+    trained_config = json.loads(trained_config_bytes) if trained_config_bytes is not None else None
+    require_unchanged_configs()
+    config_comparison = validate_config_comparison(
+        args.base_dir, args.trained_dir, base_config, trained_config,
+        getattr(args, "config_comparison", "strict"),
+    )
+    require_unchanged_configs()
     recorded_revision = base_config.get("_commit_hash")
     if args.base_revision and recorded_revision and args.base_revision != recorded_revision:
         raise ValueError("base-model revision mismatch: CLI label conflicts with config")
@@ -192,7 +316,13 @@ def build_checkpoint(args: argparse.Namespace) -> dict:
             for template in templates.glob("*.jinja"):
                 (args.output_dir / "chat_templates").mkdir(exist_ok=True)
                 shutil.copy2(template, args.output_dir / "chat_templates" / template.name)
-    weight_layout(args.output_dir)
+    output_map, output_shapes = weight_layout(args.output_dir)
+    if set(output_map) != trained_keys or output_shapes != trained_shapes:
+        raise ValueError("trained tensor layout changed during export")
+    require_unchanged_configs()
+    expected_config_bytes = trained_config_bytes if trained_config_bytes is not None else base_config_bytes
+    if (args.output_dir / "config.json").read_bytes() != expected_config_bytes:
+        raise ValueError("copied config differs from the validated config bytes")
     file_hashes = {path.relative_to(args.output_dir).as_posix(): sha256_file(path)
                   for path in sorted(args.output_dir.rglob("*")) if path.is_file()}
 
@@ -207,6 +337,15 @@ def build_checkpoint(args: argparse.Namespace) -> dict:
         "base_architecture_validation": base_validation,
         "omitted_base_auxiliary_tensors": sorted(ignored_auxiliary - trained_keys),
         "trained_key_count": len(trained_keys),
+        "expected_saved_dtype": expected_saved_dtype,
+        "trained_storage_dtype_policy": (
+            "explicit_bfloat16_save" if expected_saved_dtype else "strict_base_dtype"
+        ),
+        "trained_dtype_transitions": dtype_transitions,
+        "trained_weight_bytes_modified": False,
+        "config_comparison": config_comparison,
+        "base_config_sha256": hashlib.sha256(base_config_bytes).hexdigest(),
+        "trained_config_sha256": hashlib.sha256(trained_config_bytes).hexdigest() if trained_config_bytes is not None else None,
         "restore_all_missing": args.restore_all_missing,
         "restored_base_key_count": len(missing_keys),
         "restored_visual_key_count": sum(
