@@ -18,6 +18,21 @@ EVAL_EPISODES="${EVAL_EPISODES:-4}"
 EVAL_SAMPLES_PER_SEED="${EVAL_SAMPLES_PER_SEED:-12}"
 EVAL_PURPOSE="${EVAL_PURPOSE:-validation}"
 SAMPLED_ONLY="${SAMPLED_ONLY:-0}"
+EXPORT_EXPECTED_SAVED_DTYPE="${EXPORT_EXPECTED_SAVED_DTYPE:-}"
+EXPORT_CONFIG_COMPARISON="${EXPORT_CONFIG_COMPARISON:-strict}"
+
+case "${EXPORT_EXPECTED_SAVED_DTYPE}" in
+  ""|bfloat16) ;;
+  *) echo "EXPORT_EXPECTED_SAVED_DTYPE must be empty or bfloat16." >&2; exit 2 ;;
+esac
+case "${EXPORT_CONFIG_COMPARISON}" in
+  strict|qwen3_5) ;;
+  *) echo "EXPORT_CONFIG_COMPARISON must be strict or qwen3_5." >&2; exit 2 ;;
+esac
+EXPORT_ARGS=(--config-comparison "${EXPORT_CONFIG_COMPARISON}")
+if [[ -n "${EXPORT_EXPECTED_SAVED_DTYPE}" ]]; then
+  EXPORT_ARGS+=(--expected-saved-dtype "${EXPORT_EXPECTED_SAVED_DTYPE}")
+fi
 
 if [[ ! -x "${PYTHON}" ]]; then
   echo "Python is not executable: ${PYTHON}" >&2
@@ -86,7 +101,8 @@ for index in "${!TRAINED_DIRS[@]}"; do
     "${PYTHON}" "${REPO_ROOT}/scripts/level1/report/build_complete_vlm_checkpoint.py" \
       --trained-dir "${TRAINED_DIRS[${index}]}" \
       --base-dir "${BASE_MODEL}" \
-      --output-dir "${output}"
+      --output-dir "${output}" \
+      "${EXPORT_ARGS[@]}"
   fi
   # An existing manifest is not a validity check: always verify the selected
   # bundle's architecture, offline metadata and export file hashes before any

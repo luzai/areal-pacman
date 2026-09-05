@@ -9,6 +9,13 @@
 - `level1/report/`: trajectory auditing, checkpoint assembly, demo export, and
   report helpers.
 
+`run_level1_overfit_pipeline.sh` is an archived entry point that exits before
+training; its later export commands are unreachable historical code. The old
+`run_level1_ab_demo.sh` uses a legacy 2000-step/open-action protocol and is not
+a recipe-driven C1/C2 release or acceptance entry point. For the new recipe,
+use the shared training/evaluation entry points and export verified trajectories
+separately; adding checkpoint flags alone does not update a legacy protocol.
+
 Primary training entry point:
 
 ```bash
@@ -157,6 +164,25 @@ of checkpoint directories; optional `CHECKPOINT_LIST` is a text file with one
 checkpoint path per line to select a subset. The sampled runner delegates to
 the shared runner. Full backend/resource requirements remain subject to the
 real-service gate, not merely shell syntax or mocked tests.
+
+For newly exported checkpoints from the verified BF16/Qwen3.5 FSDP run, opt in
+to the same packaging policy described below:
+
+```bash
+# Set the required SOURCE_RUN, BASE_MODEL, PACMAN_PYTHON_ROOT and checkpoint
+# selection first; choose a fresh EVAL_ROOT for this evaluation.
+EXPORT_EXPECTED_SAVED_DTYPE=bfloat16 EXPORT_CONFIG_COMPARISON=qwen3_5 \
+  bash scripts/level1/evaluate/evaluate_level1_run.sh
+```
+
+The sampled wrapper inherits these variables. By default the expected saved
+dtype is unset and config comparison is `strict`; the only explicit saved
+dtype is `bfloat16`, and config comparison is `strict` or `qwen3_5`. Invalid
+values are rejected before resource checks or output creation. These options
+apply only to new exports. Existing complete bundles are not re-exported or
+relabelled; they still undergo the runner's checkpoint validation. Choose a
+new evaluation directory when changing packaging policy. This argument path
+does not itself verify tensor values, actual model loading or game completion.
 
 The current saver retains `keep_last=2` plus checkpoints selected by training
 reward and runs before evaluation. `CHECKPOINT_LIST`/checkpoint discovery can

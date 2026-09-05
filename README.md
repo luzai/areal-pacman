@@ -209,6 +209,8 @@ bash scripts/level1/train/run_level1_training.sh
 
 `CURRICULUM1_CHECKPOINT` 必须包含模型权重、配置和所需 tokenizer/processor 文件；不能直接指向训练产物根目录或不完整的恢复目录。启动器会离线加载这些元数据，并由 config 构建不分配实际权重的 meta 模型，逐项检查所需 tensor 名称和 shape；缺失、重复或不兼容参数会明确失败。[完整 VLM checkpoint 工具](scripts/level1/report/build_complete_vlm_checkpoint.py)支持单文件和分片的完整模型打包，不覆盖原文件。
 
+为已验证的 Qwen3.5 BF16/FSDP 保存权重打包时，显式传入 `--expected-saved-dtype bfloat16 --config-comparison qwen3_5`；默认仍严格检查 dtype/config。所用 Transformers 必须与保存配置记录的版本一致，只允许已核对的 BF16 存储及配置序列化差异，不修改训练权重字节。命令与约束见[脚本说明](scripts/README.md)。批量评估入口的新导出可通过 `EXPORT_EXPECTED_SAVED_DTYPE=bfloat16 EXPORT_CONFIG_COMPARISON=qwen3_5` 使用相同政策；不要把这些选项当作省略数值检查、实际模型加载或游戏验证的开关。
+
 上述检查只是结构预检，不等于完整模型加载或真实图像推理。当前固定 AReaL 没有已核实的视觉参数冻结证据，因此 exporter 拒绝任何缺失 tensor，包括视觉权重；旧 `--restore-all-missing` 也不能绕过。不得用 base 权重替代丢失的可训练参数，或丢掉 C1 已学参数。先通过 C1 两次更新 smoke，导出并实际验证它的完整 checkpoint，再以该 checkpoint 执行同一 C2 YAML 的 `--smoke-updates 2`；base placeholder 不算 C1→C2 smoke。正式训练仍须分别完成计划内 100 updates，smoke 权重不能冒充最终 agent。
 
 Curriculum 2 继承模型权重并重新初始化 optimizer/scheduler。两份配置首次运行均为 `recover.mode: disabled`。
