@@ -145,7 +145,7 @@ AReaL fork checkout 放在 deployable recipe mirror 外，并与 robotics 开发
 ```text
 ${AREAL_ROOT}
   发布分支：release/pacman-v0.1.0
-  固定 revision：a9e45c18094091b36ed4256d34e3e9c79947feca
+  固定 revision：a15a66a07e81d541e421c28e1a4e5fc1cc843653
   origin：https://github.com/luzai/AReaL.git
 
 ${UNRELATED_AREAL_ROOT}

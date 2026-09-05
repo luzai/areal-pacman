@@ -17,7 +17,7 @@
 | 源码层                                                        | 作用                                       | 当前配方使用的版本                                                         |
 | ------------------------------------------------------------- | ------------------------------------------ | -------------------------------------------------------------------------- |
 | 本仓库                                                        | `areal_pacman` 配方与内置 `maapacman` 环境 | `release/maapacman-v0.1.0`；运行时记录实际 SHA                             |
-| [luzai/AReaL](https://github.com/luzai/AReaL)                 | 训练、rollout、FSDP 和 checkpoint          | `release/pacman-v0.1.0` @ `a9e45c18094091b36ed4256d34e3e9c79947feca`       |
+| [luzai/AReaL](https://github.com/luzai/AReaL)                 | 训练、rollout、FSDP 和 checkpoint          | `release/pacman-v0.1.0` @ `a15a66a07e81d541e421c28e1a4e5fc1cc843653`       |
 | [luzai/pacman-python](https://github.com/luzai/pacman-python) | 游戏规则、资源和 pygame renderer           | `release/maapacman-v0.1.0` 中的 `cbb97115e407abc86a44adc82a1b8f360b3e8da0` |
 
 复现时以固定 SHA 为准，不能仅依赖会继续更新的分支名。更新依赖 revision 后，需要同步运行 manifest 并重新验证。`areal_pacman.synthetic.*` 保留用于历史合成迷宫实验。
@@ -33,7 +33,7 @@ cd "$WORKSPACE_ROOT"
 
 git clone --branch release/pacman-v0.1.0 --single-branch \
   https://github.com/luzai/AReaL.git
-git -C AReaL checkout a9e45c18094091b36ed4256d34e3e9c79947feca
+git -C AReaL checkout a15a66a07e81d541e421c28e1a4e5fc1cc843653
 
 git clone --branch release/maapacman-v0.1.0 --single-branch \
   https://github.com/luzai/areal-pacman.git

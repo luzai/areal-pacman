@@ -1,5 +1,12 @@
 # AReaL patches
 
+## Required for the two-stage recipe
+
+The pinned AReaL revision includes lossless JSON RPC serialization of non-finite
+float bounds, required to preserve C1 `reward_clip: .inf` instead of converting it
+to `null`. This does not permit non-finite task rewards. The release remains
+source/recipe-only; this runtime fix does not establish a passing GPU smoke test.
+
 ## Required for dynamic open-action-mask training
 
 - `areal_pacman_action_logprobs.patch`
