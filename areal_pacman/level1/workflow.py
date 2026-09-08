@@ -50,6 +50,7 @@ from .prompts import (
     text_sha256,
 )
 from .rewards import RewardConfig, shape_reward
+from .image_transport import native_image_data
 from .trajectories import audit_trajectory, write_trajectory
 from .token_constraints import (
     EDWARD_OPTION_CONSTRAINT,
@@ -1718,7 +1719,6 @@ class PacmanNativeVisionWorkflow(PacmanImageOnlyWorkflow, RolloutWorkflow):
         if engine is None or native_turns is None:
             raise RuntimeError("native inference engine is not attached")
         from areal.api import ModelRequest
-        from areal.utils.image import image2base64
 
         image, chat_messages, processed, input_ids = self._process_messages(
             messages
@@ -1753,7 +1753,7 @@ class PacmanNativeVisionWorkflow(PacmanImageOnlyWorkflow, RolloutWorkflow):
         request = ModelRequest(
             rid=request_id,
             input_ids=input_ids,
-            image_data=image2base64(image),
+            image_data=native_image_data(messages, image),
             vision_msg_vllm=[self._vllm_messages(messages)],
             gconfig=self.gconfig.new(
                 n_samples=1,

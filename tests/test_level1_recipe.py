@@ -7,12 +7,14 @@ import json
 import sys
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
 import torch
+from PIL import Image
 from maapacman.env import (
     Action,
     Position,
@@ -1234,7 +1236,9 @@ class WorkflowContractTests(unittest.TestCase):
         )
         self.assertEqual(result["rollout_episode_group_sizes"].tolist(), [12])
         self.assertEqual(len(result["rollout_episode_ids"].tolist()), 1)
-        self.assertEqual(engine.request.image_data, ["encoded-image"])
+        sent_image = Image.open(BytesIO(base64.b64decode(engine.request.image_data[0])))
+        self.assertEqual(sent_image.mode, "RGB")
+        self.assertEqual(len(engine.request.image_data), 1)
         self.assertEqual(engine.request.input_ids, [10, 11])
         self.assertEqual(
             engine.request.metadata["allowed_token_ids"],
