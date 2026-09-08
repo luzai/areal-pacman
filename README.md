@@ -20,8 +20,8 @@
 
 当前开发 C1/C2 YAML 已启用实验性视觉兼容适配，需要 AReaL
 `pacman/open-action-mask` @ `79698eecf91bf50ede480b94380d962f835bc6d8`，并显式保持
-actor/ref 的 `fsdp.memory_efficient_load=false`。下面的旧发布快照不包含该适配器，
-不能直接搭配当前开发 YAML；使用开发配方时须 checkout 上述 AReaL SHA，并使用
+actor/ref 的 `fsdp.memory_efficient_load=false`。旧 AReaL 发布快照不包含该适配器，
+不能直接搭配当前开发 YAML；下面的获取命令已固定为上述 AReaL SHA，并须使用
 匹配的 Transformers 5.7.0 / vLLM 0.22.1 环境。启动时会记录实际加载的视觉适配信息。
 详见[视觉兼容说明](docs/vision-position-compatibility.md)。语言侧 log-prob mismatch
 仍在排查，代码发布不代表完整两阶段训练或全批概率一致性已经验收。
@@ -33,7 +33,7 @@ actor/ref 的 `fsdp.memory_efficient_load=false`。下面的旧发布快照不�
 | 源码层                                                        | 作用                                       | 当前配方使用的版本                                                         |
 | ------------------------------------------------------------- | ------------------------------------------ | -------------------------------------------------------------------------- |
 | 本仓库                                                        | `areal_pacman` 配方与内置 `maapacman` 环境 | `release/maapacman-v0.1.0`；运行时记录实际 SHA                             |
-| [luzai/AReaL](https://github.com/luzai/AReaL)                 | 训练、rollout、FSDP 和 checkpoint          | `release/pacman-v0.1.0` @ `ee872bae29152f4b553349385aced59abd1651ba`       |
+| [luzai/AReaL](https://github.com/luzai/AReaL)                 | 训练、rollout、FSDP 和 checkpoint          | `pacman/open-action-mask` @ `79698eecf91bf50ede480b94380d962f835bc6d8`       |
 | [luzai/pacman-python](https://github.com/luzai/pacman-python) | 游戏规则、资源和 pygame renderer           | `release/maapacman-v0.1.0` 中的 `cbb97115e407abc86a44adc82a1b8f360b3e8da0` |
 
 复现时以固定 SHA 为准，不能仅依赖会继续更新的分支名。更新依赖 revision 后，需要同步运行 manifest 并重新验证。`areal_pacman.synthetic.*` 保留用于历史合成迷宫实验。
@@ -47,9 +47,9 @@ export WORKSPACE_ROOT=/path/to/pacman-release
 mkdir -p "$WORKSPACE_ROOT"
 cd "$WORKSPACE_ROOT"
 
-git clone --branch release/pacman-v0.1.0 --single-branch \
+git clone --branch pacman/open-action-mask --single-branch \
   https://github.com/luzai/AReaL.git
-git -C AReaL checkout ee872bae29152f4b553349385aced59abd1651ba
+git -C AReaL checkout 79698eecf91bf50ede480b94380d962f835bc6d8
 
 git clone --branch release/maapacman-v0.1.0 --single-branch \
   https://github.com/luzai/areal-pacman.git
