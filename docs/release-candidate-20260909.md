@@ -1,6 +1,43 @@
 # Pacman release candidate: integration and acceptance
 
-Status: **local candidate, not a published or training-accepted release**.
+Status: **source candidate with rollout-only acceptance, not a training-accepted release**.
+
+## Publication gate changed by the user
+
+The user explicitly replaced the two-update/C2 publication gate with completion of
+the first training rollout batch, followed by stopping this smoke and publishing the
+source candidate. The historical acceptance plan below is retained for context; its
+remaining training gates are follow-up work, not prerequisites for this source push.
+
+On H100_2_2, the isolated run `smoke8-c1-9f93d1de` used the exact AReaL candidate,
+recipe `bada3cbb9628a12dcde3f56c6411f4b14c950564` (runtime unchanged from `a54a9d9`),
+and the pinned game. It used the original eight-device topology, BF16, C1 GC OFF,
+and unchanged reward/sampling settings. All four actor ranks logged the explicit
+non-cuDNN SDPA policy; vLLM launched with the vision adapter.
+
+At 2026-09-08 23:02:03 UTC, the task-local watchdog recorded 48 complete training
+trajectories: seeds 89, 83, 72 and 58, with 12 samples each. It interrupted only
+this run's identity-checked processes. Subsequent inspection confirmed the controller
+and watchdog had exited and all eight GPUs had 0 MiB allocated. This was an intentional
+early stop, not an orderly two-update smoke completion.
+
+| First batch metric (before parameter updates) | Result               |
+| --------------------------------------------- | -------------------- |
+| Completed training episodes                   | 48/48                |
+| Completion count                              | 0/48                 |
+| End reason                                    | max_steps for all 48 |
+| Mean environment steps                        | 512                  |
+| Mean normal-pellet clear rate                 | 14.3880%             |
+| Mean all-pellet clear rate                    | 14.3070%             |
+| Mean game score                               | 1515.8333            |
+| Mean shaped return                            | 2.4443               |
+
+Startup to stop trigger took approximately 23 minutes, including initialization.
+This is not a paired throughput benchmark. No PPO-update completion, full-batch
+actor/vLLM probability-audit pass, checkpoint reload, or C2 acceptance is claimed.
+Single-run rollout results do not establish statistical significance or final-agent quality.
+Evidence is retained under the run directory: `first-rollout-stop.json`,
+`stop-watch-v2.log`, `launcher.log`, and the 48 trajectory JSON files under `artifacts/`.
 
 ## Fixed source set
 
@@ -60,9 +97,9 @@ separately if they become necessary for the full smoke.
 | Whole vision embedding comparison                    | Passed: BF16 five real frames plus 5/12/48-image batches, max absolute difference zero |
 | Fresh adapter worker                                 | Passed; correct adapter status, single/5/12/48 requests, exit 0 and orderly shutdown   |
 | Entire real rollout batch actor/vLLM log-prob audit  | Pending                                                                                |
-| Multi-GPU C1 updates and checkpoint reload/rollout   | Blocked by GPU availability                                                            |
+| Multi-GPU C1 updates and checkpoint reload/rollout   | Not accepted; deliberately stopped after first rollout at user request                 |
 | C1 checkpoint to C2 multi-GPU smoke                  | Pending after C1                                                                       |
-| Paired source publication and immutable version pins | Held until required gates pass                                                         |
+| Paired source publication and immutable version pins | Authorized with the reduced rollout-only gate above                                    |
 
 The new test run is under
 `H100_2_2:/home/h100-repro/codex-tests/pacman-release-integration-20260909`. It uses the
@@ -125,7 +162,7 @@ No six-device smoke was started: it would not replace the original eight-device
 acceptance test (actor/reference on four devices, rollout on four). No monitoring
 automation was created in this side conversation.
 
-## Finish publication
+## Original full-training acceptance plan (deferred)
 
 1. Recheck source/remote heads, active jobs and free GPUs. Do not stop existing jobs
    without explicit authorization for the exact processes.

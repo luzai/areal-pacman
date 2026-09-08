@@ -28,8 +28,11 @@ A/B 实验使用固定 AReaL `98028b2bb565896383b5da0f7bf1857165d359ad`
 当前 C1/C2 YAML 已启用实验性视觉兼容适配，配套 AReaL release 候选为 `release/pacman-v0.1.0` @
 `9f93d1deb59c1c99cd7019afbd0e83bb40b62fc0`，并显式保持 actor/ref 的
 `fsdp.memory_efficient_load=false`。该候选在 `98028b2b` 的训练修复上 整合视觉适配，保留 Qwen3.5 逐样本隔离、3D
-position IDs 和 offload 退出修复。 此前推荐的 `79698eec` 缺少这些训练修复，不能作为完整训练依赖。 **候选尚未通过全部发布
-gates，以下获取命令仅在候选推送后可用；现在不要切换正在运行的训练。**
+position IDs 和 offload 退出修复。 此前推荐的 `79698eec` 缺少这些训练修复，不能作为完整训练依赖。
+**本次按用户要求以首批 rollout-only 门槛交付源码候选，不是完整训练验收；不要直接切换正在运行的训练。**
+8 卡（4 actor＋4 rollout）完成首批 48 局后主动停止，全部达到 512 步上限，通关 0/48；
+平均普通豆清除率 14.39%、全部豆清除率 14.31%、游戏得分 1515.83、shaped reward 2.444。
+这些是未更新权重的首批结果；本候选的 PPO 更新、整批概率审计、checkpoint 重载、C2 和性能比较仍未验收。
 验收状态见[release 候选记录](docs/release-candidate-20260909.md)。下面固定源码须使用 匹配的 Transformers 5.7.0
 / vLLM 0.22.1 环境。启动时会记录实际加载的视觉适配信息。
 详见[视觉兼容说明](docs/vision-position-compatibility.md)。语言侧 log-prob mismatch
