@@ -52,3 +52,28 @@ default implementation and adapter with identical settings and inputs. A local
 FP32 whole-model conversion is not included in this switch. Keep the regular
 BF16 training configuration. This adapter is initially validated with eager TP1;
 other parallelism and encoder CUDA-graph modes need explicit acceptance tests.
+
+## Pre-push verification (2026-09-09 UTC)
+
+The submitted implementation at AReaL
+`79698eecf91bf50ede480b94380d962f835bc6d8` was checked on an isolated H800 GPU,
+with PyTorch 2.11.0+cu130, Transformers 5.7.0 and vLLM 0.22.1:
+
+- 16 vision tests passed, including real BF16 FSDP forward/backward with
+  gradient checkpointing on/off and CPU parameter offload on/off.
+- Five real game images and batches of 5/12/48 images matched the GPU-initialized
+  HF vision reference exactly (maximum absolute embedding difference zero).
+- A fresh multiprocess worker reported `Qwen35TorchVisionModel`, FP32 rotary
+  arithmetic, Conv3D patch embedding and TORCH_SDPA. Single requests and
+  5/12/48-request batches completed with image caches cleared between calls.
+- The recipe regression suite passed 562 tests, with one Windows-only unsupported
+  AF_UNIX diagnostic skipped on Linux. This used the pinned compatible game
+  `cbb97115e407abc86a44adc82a1b8f360b3e8da0`, not the legacy source branch.
+- The legacy game source branch separately passed its 19 rule/event tests; it
+  still lacks the recipe's explicit ghost-mode interface.
+
+This verifies the source/config integration and vision path, not a complete
+C1/C2 training rerun or whole-batch language log-prob parity. Language-side
+mismatch remains under investigation. The scoped AReaL commit hooks passed;
+the separate repository-wide pre-commit attempt was not fully green on Windows
+because of unrelated formatting and platform/tooling failures.
