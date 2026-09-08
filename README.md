@@ -12,7 +12,23 @@
 
 当前交付状态是 **source/recipe-only**：新两阶段方案正在集成验证，尚未完成对应的分布式 GPU smoke、完整训练及最终 C2 权重的独立运行验收，不能据此宣称最终 agent 已能通关。
 
+2026-09-08 开发验收补充：C1 GC ON/OFF 各两次更新及 OFF checkpoint 的实际加载验证已完成；C2 和最终两阶段训练验收仍未完成。当前双机 A/B 实验使用固定 AReaL `98028b2bb565896383b5da0f7bf1857165d359ad` 和本仓库已记录文件哈希的开发快照，不能将下方已发布源码快照与此次开发验证混为一谈。正式发布时须同步固定 revision 与运行证据。
+
+原生视觉 rollout 对无附加元数据的 RGB PNG 复用已有 base64 payload，避免发送前再次 PNG 编码；非 RGB 或带元数据的输入保留原 RGB 归一化编码路径。此优化不改变训练 processor、action mask、reward 或训练配置，也不实现跨请求图像缓存。等价性测试见 `tests/test_image_transport.py`；设置 `PACMAN_TEST_PROCESSOR_PATH` 为本地模型目录可额外核对真实 processor 的输入张量。编码耗时改善不代表整体训练同等加速。
+
 ## 源码边界
+
+当前开发 C1/C2 YAML 已启用实验性视觉兼容适配，需要 AReaL
+`pacman/open-action-mask` @ `79698eecf91bf50ede480b94380d962f835bc6d8`，并显式保持
+actor/ref 的 `fsdp.memory_efficient_load=false`。下面的旧发布快照不包含该适配器，
+不能直接搭配当前开发 YAML；使用开发配方时须 checkout 上述 AReaL SHA，并使用
+匹配的 Transformers 5.7.0 / vLLM 0.22.1 环境。启动时会记录实际加载的视觉适配信息。
+详见[视觉兼容说明](docs/vision-position-compatibility.md)。语言侧 log-prob mismatch
+仍在排查，代码发布不代表完整两阶段训练或全批概率一致性已经验收。
+
+游戏依赖仍固定为下面的 `cbb97115e407abc86a44adc82a1b8f360b3e8da0`；
+`local/maapacman-v0.1.0-source` 是单独保存的旧源码分支，缺少显式 ghost-mode
+接口，不能替代该依赖。运行 manifest 会记录实际三仓库 revision 和 dirty 状态。
 
 | 源码层                                                        | 作用                                       | 当前配方使用的版本                                                         |
 | ------------------------------------------------------------- | ------------------------------------------ | -------------------------------------------------------------------------- |
@@ -218,13 +234,39 @@ Curriculum 2 继承模型权重并重新初始化 optimizer/scheduler。两份�
 
 Smoke 使用同一份 YAML，通过 `total_train_steps=2` 限制更新次数，不需要第三份配置。也可以直接向 `train_areal.py --config ...` 传入 `--smoke-updates 2`，但需要先准备对应的数据集和运行环境。
 
+### C1 reward A/B 对照
+
+当前 C1 默认 `actor.gradient_checkpointing=false`，已在匹配的 8×H800、batch 4×12、512 步负载下完成两次更新验收；这不是任意负载都不会 OOM 的保证。C2 仍为 `true`，必须独立验收后再决定是否关闭。phase offload 保持开启，FSDP CPU parameter offload 保持关闭。
+
+| 实验 | nearest-pellet shaping | 更新预算 |
+| --- | --- | --- |
+| A | 固定 alpha=0.1，`nearest_pellet_scale_by_cleared_ratio=false` | 4 |
+| B | alpha=0.1 × 已清除普通豆比例，开关为 `true` | 100；前 4 次与 A 比较后继续 |
+
+A、B 使用独立目录内的 `curriculum1.yaml` 副本，除上述开关外保持相同配置。两者从同一固定 base 独立初始化，不继承对方或 smoke 的模型/optimizer；使用相同 seeds、batch、环境、offload、GC 和 constant LR `5e-7`、zero warmup。YAML 保留完整 100-update 配方结构，A 的停止预算由显式 CLI 记录：
+
+```bash
+# A：该副本仅把 nearest_pellet_scale_by_cleared_ratio 改为 false。
+CONFIG=/path/to/ab/a/curriculum1.yaml \
+ARTIFACT_ROOT=/path/to/new-a-artifacts \
+bash scripts/level1/train/run_level1_training.sh \
+  --reward-ablation fixed-distance --smoke-updates 4
+
+# B：使用默认比例缩放，不传 smoke cap；不要把 A 权重作为初始化。
+CONFIG=/path/to/ab/b/curriculum1.yaml \
+ARTIFACT_ROOT=/path/to/new-b-artifacts \
+bash scripts/level1/train/run_level1_training.sh
+```
+
+两条命令在各自已配置的运行环境执行；若同机运行，必须等待所需 GPU 空闲。`fixed-distance` 只接受 C1、alpha=0.1、比例缩放关闭和 4-update cap，默认正式训练约束不变。每个 update 使用相同 validation seeds 108–111、各 12 次采样，比较普通/全部豆清除率、通关率、游戏分、步数/结束原因，以及 PPO loss、grad norm、KL、entropy、时间和显存。不同定义的 shaped reward 不能直接判优；单次实验不宣称统计显著性。先完成这项 C1 对照，再推进 C2。
+
 启动器会检查源码导入、模型文件、GPU 空闲状态、AReaL 补丁和 prompt budget，生成不可变数据集并执行配置 dry-run，然后启动训练。默认产物位于 `${OWNER_ROOT}/run_artifacts/maapacman-rl/<recipe>-<timestamp>/`，数据集保存在其中的 `dataset/`。指定自定义输出路径时应使用新目录。
 
-2026-09-04 当前集成工作树完成定向 CPU 检查：`test_dataset_stage_contract.py`、`test_level1_v3_audits.py`、`test_curriculum_ghost_modes.py` 共 **53 passed、2 deselected**。覆盖真实 headless 双模式、C1 数据不调用 Edward、JSONL/HF round-trip、run manifest、训练 preflight 与重算 checksum 后的篡改拒绝。两项 parse-failure workflow 测试因 Windows 缺 `uvloop` 未纳入该通过数；Linux full suite、分布式 GPU smoke 和最终真实模型推理仍待验证。此结果不沿用旧实验的 GPU/通关结论。
+2026-09-08 的固定 A/B 开发快照在两台 Linux 服务器完整回归均为 **562 passed、1 skipped**，包括新增 A/B 入口及真实 processor 图像等价性检查；当前 README 文档补充不改变该已测代码。C1 smoke 和实际 checkpoint 加载已有验证，最终 C2 训练、选模及独立测试仍待完成。历史 2026-09-04 的 Windows 定向检查为 53 passed、2 deselected，不替代此次 Linux 结果，也不沿用旧实验的通关结论。
 
 ## 评估与产物
 
-[评估工具目录](scripts/level1/evaluate/) 提供单模型评估、checkpoint 对比和结果汇总工具。`evaluate_level1.py --config` 读取对应 recipe 的 ghost/harness/reward/prompt/decoding；批量入口支持任意非零 checkpoint 数，也可通过 `CHECKPOINT_LIST` 选择子集。具体示例见[脚本说明](scripts/README.md)。这些接口仍待真实推理服务验证，不承诺已具备验证过的一键推理环境。
+[评估工具目录](scripts/level1/evaluate/) 提供单模型评估、checkpoint 对比和结果汇总工具。`evaluate_level1.py --config` 读取对应 recipe 的 ghost/harness/reward/prompt/decoding；批量入口支持任意非零 checkpoint 数，也可通过 `CHECKPOINT_LIST` 选择子集。具体示例见[脚本说明](scripts/README.md)。旧权重录像与 C1 OFF checkpoint 单局已使用实际推理服务验证；这不等于最终 C2 权重及同事下载后的全链路验收。
 
 独立评估默认采用 C2、held-out seeds 112–131、每 seed 3 个生成 seeds；正式执行时应先确认并冻结测试规模。`--purpose validation` 仅接受验证 seeds 108–111，选模不能使用 held-out 报告。每次调用预先保存 manifest，逐次尝试追加保存到 `.attempts.jsonl`，默认对基础设施失败最多重试两次且保留原错误。报告分别给出 `evaluation_completed`、`full_completions`、`win_rate`（包括失败尝试的分母）及 `planned_trial_win_rate`，两种分母不得混淆。
 

@@ -134,7 +134,10 @@ actor:
   fsdp:
     # Keep phase-level offload, but disable FSDP CPU parameter offload.
     offload_params: false
-  gradient_checkpointing: true
+    # Preserve the GPU-initialized vision RoPE parity path.
+    memory_efficient_load: false
+  # C1 GC OFF accepted on the matching 8x H800 smoke; C2 is gated separately.
+  gradient_checkpointing: false
   dtype: bfloat16
   optimizer_dtype: bfloat16
   mb_spec:
@@ -202,12 +205,16 @@ ref:
   offload: true
   fsdp:
     offload_params: false
+    memory_efficient_load: false
   scheduling_strategy:
     type: colocation
     target: actor
   scheduling_spec: ${actor.scheduling_spec}
 
 vllm:
+  # Requires the matching AReaL actor/FSDP and vLLM vision fixes; restart to apply.
+  # Full-batch language log-prob parity remains under validation.
+  worker_extension_cls: areal.engine.vllm_ext.qwen35_torch_vision_worker.Qwen35TorchVisionWorkerExtension
   model: ${actor.path}
   seed: ${seed}
   skip_tokenizer_init: false
