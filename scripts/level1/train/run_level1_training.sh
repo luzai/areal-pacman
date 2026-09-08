@@ -3,8 +3,28 @@ set -euo pipefail
 
 SMOKE_UPDATES=""
 SMOKE_UPDATES_SET=0
+REWARD_ABLATION=""
+REWARD_ABLATION_SET=0
 while (( $# )); do
   case "$1" in
+    --reward-ablation|--reward-ablation=*)
+      if (( REWARD_ABLATION_SET )); then
+        echo "--reward-ablation may be specified only once." >&2
+        exit 2
+      fi
+      REWARD_ABLATION_SET=1
+      if [[ "$1" == --reward-ablation ]]; then
+        if (( $# < 2 )); then
+          echo "--reward-ablation requires fixed-distance." >&2
+          exit 2
+        fi
+        REWARD_ABLATION="$2"
+        shift 2
+      else
+        REWARD_ABLATION="${1#*=}"
+        shift
+      fi
+      ;;
     --smoke-updates)
       if (( SMOKE_UPDATES_SET )); then
         echo "--smoke-updates may be specified only once." >&2
@@ -36,6 +56,18 @@ done
 if (( SMOKE_UPDATES_SET )) && [[ ! "${SMOKE_UPDATES}" =~ ^[1-9][0-9]*$ ]]; then
   echo "--smoke-updates requires a positive integer." >&2
   exit 2
+fi
+REWARD_ABLATION_ARGS=()
+if (( REWARD_ABLATION_SET )); then
+  if [[ "${REWARD_ABLATION}" != fixed-distance ]]; then
+    echo "--reward-ablation supports only fixed-distance." >&2
+    exit 2
+  fi
+  if [[ "${SMOKE_UPDATES}" != 4 ]]; then
+    echo "--reward-ablation fixed-distance requires --smoke-updates 4." >&2
+    exit 2
+  fi
+  REWARD_ABLATION_ARGS=(--reward-ablation fixed-distance)
 fi
 SMOKE_ARGS=()
 if (( SMOKE_UPDATES_SET )); then
@@ -397,6 +429,7 @@ fi
 "${PYTHON}" train_areal.py \
   --config "${CONFIG}" \
   "${SMOKE_ARGS[@]}" \
+  "${REWARD_ABLATION_ARGS[@]}" \
   --dry-run \
   --validate-areal \
   "train_dataset.path=${DATASET_OUTPUT_ROOT}/train_hf" \
@@ -407,7 +440,8 @@ cp "${CONFIG}" "${ARTIFACT_ROOT}/config.yaml"
   --model-revision "${MODEL_PATH}" \
   --dataset-manifest "${DATASET_OUTPUT_ROOT}/manifest.json" \
   --config "${CONFIG}" \
-  "${SMOKE_ARGS[@]}"
+  "${SMOKE_ARGS[@]}" \
+  "${REWARD_ABLATION_ARGS[@]}"
 
 if [[ "${PREFLIGHT_ONLY:-0}" == "1" ]]; then
   echo "preflight=ok"
@@ -431,6 +465,7 @@ echo "  artifacts=${ARTIFACT_ROOT}"
 exec "${PYTHON}" train_areal.py \
   --config "${CONFIG}" \
   "${SMOKE_ARGS[@]}" \
+  "${REWARD_ABLATION_ARGS[@]}" \
   "artifact_root=${ARTIFACT_ROOT}" \
   "cluster.fileroot=${ARTIFACT_ROOT}/training" \
   "cluster.name_resolve.nfs_record_root=${ARTIFACT_ROOT}/name_resolve" \

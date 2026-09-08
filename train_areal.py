@@ -72,6 +72,31 @@ def _apply_smoke_updates(args: list[str]) -> tuple[list[str], int | None]:
     return cleaned, smoke_updates
 
 
+def _parse_reward_ablation(args: list[str]) -> tuple[list[str], str | None]:
+    """Consume explicit experiment intent without adding framework config fields."""
+    cleaned: list[str] = []
+    ablation = None
+    index = 0
+    while index < len(args):
+        argument = args[index]
+        if argument == "--reward-ablation" or argument.startswith("--reward-ablation="):
+            if ablation is not None:
+                raise ValueError("--reward-ablation may be specified only once")
+            if argument == "--reward-ablation":
+                index += 1
+                if index >= len(args):
+                    raise ValueError("--reward-ablation requires fixed-distance")
+                ablation = args[index]
+            else:
+                ablation = argument.split("=", 1)[1]
+            if ablation != "fixed-distance":
+                raise ValueError("--reward-ablation requires fixed-distance")
+        else:
+            cleaned.append(argument)
+        index += 1
+    return cleaned, ablation
+
+
 def _backend_degree(backend: str) -> int:
     match = re.search(r":d(\d+)p\d+t\d+$", backend)
     if match is None:
@@ -197,7 +222,9 @@ def _validate_reward_objective_contract(config) -> None:
         )
 
 
-def _validate_release_stage_contract(config, *, smoke_updates: int | None = None) -> None:
+def _validate_release_stage_contract(
+    config, *, smoke_updates: int | None = None, reward_ablation: str | None = None
+) -> None:
     """Fail closed on drift in either public two-stage training recipe."""
 
     from areal_pacman.level1.recipe import (
@@ -208,6 +235,11 @@ def _validate_release_stage_contract(config, *, smoke_updates: int | None = None
     )
 
     protocol = str(getattr(config, "action_protocol", "legacy"))
+    if reward_ablation is not None:
+        if reward_ablation != "fixed-distance" or smoke_updates != 4:
+            raise ValueError("fixed-distance reward ablation requires --smoke-updates 4")
+        if protocol != DIRECT_ACTION_PROTOCOL:
+            raise ValueError("fixed-distance reward ablation requires the C1 direct action protocol")
     if protocol == "legacy":
         return
     if protocol not in {DIRECT_ACTION_PROTOCOL, EDWARD_OPTION_PROTOCOL}:
@@ -297,7 +329,11 @@ def _validate_release_stage_contract(config, *, smoke_updates: int | None = None
         "nearest_pellet_remaining_ratio_threshold": 1.0,
     }
     require(config.use_base_reward is False, "use_base_reward=false")
-    require(config.nearest_pellet_scale_by_cleared_ratio is True, "scaled nearest-pellet shaping")
+    require(
+        config.nearest_pellet_scale_by_cleared_ratio is (reward_ablation is None),
+        "scaled nearest-pellet shaping" if reward_ablation is None
+        else "fixed-distance ablation nearest_pellet_scale_by_cleared_ratio=false",
+    )
     require(config.nearest_pellet_skip_on_eat is True, "nearest-pellet skip-on-eat")
     for field, expected in expected_reward.items():
         require(
@@ -489,6 +525,7 @@ def _production_dry_run(
     validate_areal: bool = False,
     config_args: list[str] | None = None,
     smoke_updates: int | None = None,
+    reward_ablation: str | None = None,
 ) -> bool:
     text = config_path.read_text(encoding="utf-8")
     recipe_version = _yaml_scalar(text, "recipe_version")
@@ -583,13 +620,15 @@ def _production_dry_run(
     print(f"env_api_version={spec.api_version}")
     print(f"level_revision={spec.level_revision}")
     print(f"action_tokens={','.join(spec.action_tokens)}")
-    if validate_areal:
+    if validate_areal or reward_ablation is not None:
         from areal.api.cli_args import load_expr_config
         from areal_pacman.synthetic.configs import PacmanAgentConfig
 
         config, _ = load_expr_config(effective_args, PacmanAgentConfig)
         _validate_reward_objective_contract(config)
-        _validate_release_stage_contract(config, smoke_updates=smoke_updates)
+        _validate_release_stage_contract(
+            config, smoke_updates=smoke_updates, reward_ablation=reward_ablation
+        )
         gpu_count = config.cluster.n_gpus_per_node
         if gpu_count not in (4, 6, 8):
             raise ValueError(
@@ -752,6 +791,9 @@ def _production_dry_run(
 
 def main(args: list[str]) -> None:
     args, smoke_updates = _apply_smoke_updates(args)
+    args, reward_ablation = _parse_reward_ablation(args)
+    if reward_ablation is not None and smoke_updates != 4:
+        raise ValueError("fixed-distance reward ablation requires --smoke-updates 4")
     dry_run = "--dry-run" in args
     args = [arg for arg in args if arg != "--dry-run"]
     validate_areal = "--validate-areal" in args
@@ -768,9 +810,12 @@ def main(args: list[str]) -> None:
         validate_areal=validate_areal,
         config_args=args,
         smoke_updates=smoke_updates,
+        reward_ablation=reward_ablation,
     ):
         if smoke_updates is not None:
             print(f"smoke_updates={smoke_updates}")
+        if reward_ablation is not None:
+            print(f"reward_ablation={reward_ablation}")
         return
 
     from areal import PPOTrainer
@@ -782,11 +827,15 @@ def main(args: list[str]) -> None:
 
     config, _ = load_expr_config(args, PacmanAgentConfig)
     _validate_reward_objective_contract(config)
-    _validate_release_stage_contract(config, smoke_updates=smoke_updates)
+    _validate_release_stage_contract(
+        config, smoke_updates=smoke_updates, reward_ablation=reward_ablation
+    )
     if config_path is not None:
         _validate_release_dataset_inputs(config_path, config.train_dataset.path, config.valid_dataset.path)
     if smoke_updates is not None:
         print(f"smoke_updates={smoke_updates}")
+    if reward_ablation is not None:
+        print(f"reward_ablation={reward_ablation}")
 
     if dry_run:
         dataset_path = Path(config.train_dataset.path)

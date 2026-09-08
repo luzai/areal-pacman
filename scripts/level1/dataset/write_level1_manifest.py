@@ -286,6 +286,53 @@ def _publish_manifest(artifact_root: Path, payload: dict[str, Any]) -> None:
             temporary.unlink(missing_ok=True)
 
 
+class _Once(argparse.Action):
+    def __call__(self, parser, namespace, value, option_string=None):
+        if getattr(namespace, self.dest, None) is not None:
+            parser.error(f"{option_string} may be specified only once")
+        setattr(namespace, self.dest, value)
+
+
+def reward_ablation_metadata(config, *, reward_ablation=None, smoke_updates=None):
+    """Bind explicit fixed-distance A intent without changing default manifests."""
+    direct = config.get("action_protocol") == "direct-open-action-token-v1"
+    if reward_ablation is None:
+        if direct and config.get("nearest_pellet_scale_by_cleared_ratio") is False:
+            raise ValueError("fixed-distance C1 requires explicit --reward-ablation")
+        return None
+    if reward_ablation != "fixed-distance" or smoke_updates != 4:
+        raise ValueError("--reward-ablation fixed-distance requires --smoke-updates 4")
+    if not (
+        direct
+        and config.get("environment", {}).get("ghost_mode") == "disabled"
+        and config.get("edward_options") is False
+        and config.get("nearest_pellet_alpha") == 0.1
+        and config.get("nearest_pellet_scale_by_cleared_ratio") is False
+        and config.get("total_train_steps") is None
+        and config.get("total_train_epochs") == 5
+        and config.get("dataset_generation", {}).get("train_episodes") == 80
+        and config.get("train_dataset", {}).get("batch_size") == 4
+        and config.get("recover", {}).get("mode") == "disabled"
+    ):
+        raise ValueError("fixed-distance ablation requires fresh C1 alpha=0.1, scale=false and full 100-update recipe")
+    optimizer = config.get("actor", {}).get("optimizer", {})
+    if not (
+        optimizer.get("lr_scheduler_type") == "constant"
+        and optimizer.get("warmup_steps_proportion") == 0
+        and optimizer.get("lr") == 5e-7
+    ):
+        raise ValueError("fixed-distance ablation requires matched constant 5e-7 learning rate and zero warmup")
+    return {
+        "experiment_role": "A",
+        "opt_in": "fixed-distance",
+        "requested_update_cap": 4,
+        "full_recipe_schedule_updates": 100,
+        "nearest_pellet_alpha": 0.1,
+        "nearest_pellet_scale_by_cleared_ratio": False,
+        "optimizer_scheduler_initialization": "fresh",
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Write an auditable level-1 run manifest."
@@ -300,8 +347,14 @@ def main() -> None:
     )
     parser.add_argument("--dataset-manifest", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--smoke-updates", type=int)
+    parser.add_argument("--smoke-updates", type=int, action=_Once)
+    parser.add_argument("--reward-ablation", choices=["fixed-distance"], action=_Once)
     args = parser.parse_args()
+    config_bytes = args.config.read_bytes()
+    config = yaml.safe_load(config_bytes)
+    ablation = reward_ablation_metadata(
+        config, reward_ablation=args.reward_ablation, smoke_updates=args.smoke_updates
+    )
     environment, _ = load_recipe_settings(args.config)
     if args.smoke_updates is not None and args.smoke_updates < 1:
         raise ValueError("smoke updates must be positive")
@@ -315,8 +368,6 @@ def main() -> None:
         environment_provenance = env.provenance
     finally:
         env.close()
-    config_bytes = args.config.read_bytes()
-    config = yaml.safe_load(config_bytes)
     config_sha256 = hashlib.sha256(config_bytes).hexdigest()
     recipe_contract = recipe_contract_metadata(config)
     source_revisions = repository_revisions()
@@ -397,6 +448,8 @@ def main() -> None:
         "config_sha256": config_sha256,
         "launch_command": shlex.join(sys.argv),
     }
+    if ablation is not None:
+        payload["reward_ablation"] = ablation
     _publish_manifest(args.artifact_root, payload)
     print(json.dumps(payload, indent=2, sort_keys=True, allow_nan=False))
 
