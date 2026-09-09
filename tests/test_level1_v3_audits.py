@@ -142,13 +142,23 @@ def _step_evidence():
 
 
 def _extended_death_step(logic_frames: int = 17):
+    death_event = _event("death", score=0)
     step = _step_evidence()
     frames = []
     for index in range(1, logic_frames + 1):
         frame = copy.deepcopy(step["atomic_substeps"][0])
-        frame["frame"] = index
+        # GAME_LOGIC_FRAME advances on the lethal gameplay frame, then stays
+        # frozen throughout the automatic death and READY animations.
+        frame["frame"] = 1
         frame["logic_frame_index"] = index
-        if index > 1:
+        frame["score"] = 0
+        if index == 1:
+            frame["events"] = [death_event]
+            frame["score_delta"] = 0
+            frame["score_components"] = {
+                name: 0 for name in frame["score_components"]
+            }
+        else:
             frame["events"] = []
             frame["score_delta"] = 0
             frame["score_components"] = {
@@ -157,8 +167,13 @@ def _extended_death_step(logic_frames: int = 17):
         frames.append(frame)
     step.update(
         {
+            **_reward(death_event),
             "logic_frames": logic_frames,
             "atomic_substeps": frames,
+            "logic_frame_events": [death_event],
+            "events": ["death"],
+            "score_components": dict(frames[0]["score_components"]),
+            "score": 0,
             "death": True,
             "respawned": True,
         }
@@ -181,8 +196,20 @@ def test_extended_death_animation_requires_original_three_lives():
         previous_logic_frame=0,
         episode_life_mode="original_three_lives",
     )
-    assert score == 10
-    assert logic_frame == 17
+    assert score == 0
+    assert logic_frame == 1
+
+
+def test_extended_death_animation_rejects_source_frame_advance_after_death():
+    step = _extended_death_step()
+    step["atomic_substeps"][1]["frame"] = 2
+    with pytest.raises(ValueError, match="must remain frozen after death event"):
+        audit_step_environment_evidence(
+            step,
+            previous_score=0,
+            previous_logic_frame=0,
+            episode_life_mode="original_three_lives",
+        )
 
 
 def _planner_record():

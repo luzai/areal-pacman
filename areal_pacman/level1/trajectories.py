@@ -258,6 +258,7 @@ def audit_step_environment_evidence(
     flattened_events: list[dict[str, Any]] = []
     score = previous_score
     logic_frame = previous_logic_frame
+    death_source_frame: int | None = None
     for index, raw_substep in enumerate(atomic_substeps, start=1):
         if not isinstance(raw_substep, Mapping):
             raise ValueError("atomic substep must be an object")
@@ -271,7 +272,16 @@ def audit_step_environment_evidence(
         ) != index:
             raise ValueError("logic-frame indexes are not contiguous")
         current_logic_frame = _integer(raw_substep["frame"], "frame")
-        if current_logic_frame != logic_frame + 1:
+        if death_source_frame is not None:
+            # pacman-python advances GAME_LOGIC_FRAME only while mode 1 runs.
+            # The original death and READY animations render inside the same
+            # env.step without executing gameplay, so every post-death atomic
+            # presentation frame must retain the death event's source frame.
+            if current_logic_frame != death_source_frame:
+                raise ValueError(
+                    "source logic frame must remain frozen after death event"
+                )
+        elif current_logic_frame != logic_frame + 1:
             raise ValueError("source logic frames are not globally contiguous")
         logic_frame = current_logic_frame
         validate_ghost_state(raw_substep, ghost_mode)
@@ -368,6 +378,10 @@ def audit_step_environment_evidence(
             event_score += event_delta
             event_components[event_component_by_type[str(event_type)]] += event_delta
             flattened_events.append(dict(raw_event))
+            if event_type == "death":
+                if death_source_frame is not None:
+                    raise ValueError("step contains more than one death event")
+                death_source_frame = logic_frame
         if event_score != frame_delta:
             raise ValueError("atomic events do not reconcile frame score")
         if any(
