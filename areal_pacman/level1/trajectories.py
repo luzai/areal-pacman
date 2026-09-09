@@ -233,6 +233,7 @@ def audit_step_environment_evidence(
     previous_score: int,
     previous_logic_frame: int,
     ghost_mode: str = "normal",
+    episode_life_mode: str = "single_death",
 ) -> tuple[int, int]:
     """Reconcile one recorded action with every API-v3 atomic frame."""
 
@@ -242,8 +243,16 @@ def audit_step_environment_evidence(
         raise ValueError("atomic_substeps must be a list")
     if logic_frames != len(atomic_substeps):
         raise ValueError("atomic_substeps length does not match logic_frames")
-    if not 1 <= logic_frames <= 16:
-        raise ValueError("executed action must contain 1 to 16 logic frames")
+    max_logic_frames = (
+        256
+        if episode_life_mode == "original_three_lives"
+        and bool(step.get("death"))
+        else 16
+    )
+    if not 1 <= logic_frames <= max_logic_frames:
+        raise ValueError(
+            f"executed action must contain 1 to {max_logic_frames} logic frames"
+        )
 
     component_totals = {name: 0 for name in _SCORE_COMPONENT_NAMES}
     flattened_events: list[dict[str, Any]] = []
@@ -780,6 +789,7 @@ def audit_trajectory(payload: Mapping[str, Any]) -> None:
                 previous_score=previous_score,
                 previous_logic_frame=previous_logic_frame,
                 ghost_mode=mode,
+                episode_life_mode=life_mode,
             )
         death = bool(step.get("death"))
         audited_deaths += int(death)

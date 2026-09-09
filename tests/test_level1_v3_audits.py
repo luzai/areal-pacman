@@ -141,6 +141,50 @@ def _step_evidence():
     }
 
 
+def _extended_death_step(logic_frames: int = 17):
+    step = _step_evidence()
+    frames = []
+    for index in range(1, logic_frames + 1):
+        frame = copy.deepcopy(step["atomic_substeps"][0])
+        frame["frame"] = index
+        frame["logic_frame_index"] = index
+        if index > 1:
+            frame["events"] = []
+            frame["score_delta"] = 0
+            frame["score_components"] = {
+                name: 0 for name in frame["score_components"]
+            }
+        frames.append(frame)
+    step.update(
+        {
+            "logic_frames": logic_frames,
+            "atomic_substeps": frames,
+            "death": True,
+            "respawned": True,
+        }
+    )
+    return step
+
+
+def test_extended_death_animation_requires_original_three_lives():
+    step = _extended_death_step()
+    with pytest.raises(ValueError, match="1 to 16 logic frames"):
+        audit_step_environment_evidence(
+            step,
+            previous_score=0,
+            previous_logic_frame=0,
+        )
+
+    score, logic_frame = audit_step_environment_evidence(
+        step,
+        previous_score=0,
+        previous_logic_frame=0,
+        episode_life_mode="original_three_lives",
+    )
+    assert score == 10
+    assert logic_frame == 17
+
+
 def _planner_record():
     evidence = _step_evidence()
     ghost_state = {"ghost_mode": "normal", "ghosts": [{"id": i} for i in range(4)], "edible_ticks": 0}
