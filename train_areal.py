@@ -302,7 +302,12 @@ def _validate_release_stage_contract(
     require(getattr(config, "critic", None) is None, "critic=null")
     require(getattr(config, "teacher", None) is None, "teacher=null")
     require(config.saver.freq_steps == 1, "saver.freq_steps=1")
-    require(config.evaluator.freq_steps == 1, "evaluator.freq_steps=1")
+    require(
+        all(getattr(config.evaluator, field) is None
+            for field in ("freq_steps", "freq_epochs", "freq_secs"))
+        and config.evaluator.eval_before_train is False,
+        "evaluator frequencies=null and eval_before_train=false (validation disabled)",
+    )
     require(str(config.recover.mode) == "disabled", "recover.mode=disabled")
     require(config.gconfig.min_new_tokens == 1, "one-token train decoding")
     require(config.gconfig.max_new_tokens == 1, "one-token train decoding")

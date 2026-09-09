@@ -169,7 +169,7 @@ C1 聚焦无幽灵导航与吃豆，C2 学习正常幽灵下的 Edward option �
 启动器从 YAML 读取数据规模与步数；环境模式同时写入 dataset、run manifest 和每个原子帧，规则 hash 按模式区分。配置与数据不匹配时拒绝训练。
 当前 dataset、split bundle 与 audit 的产物合约标识仍为 v4，但正式 bundle 新增必需的 `recipe_contract`、其 hash、逐行 action/prompt protocol 及三仓源码身份。C1 anchor 仅执行真实一步合法方向、没有 Edward；C2 anchor 保留真实候选。anchor 是环境审计证据，不是模型 rollout 或训练样本。旧 bundle 即使标记 v4 也必须重新生成，不要手补字段、复用旧规则 hash 或覆盖旧数据。CLI 的行数、seed、horizon 覆盖值必须与 YAML 一致；训练拒绝不匹配的 manifest、源码 hash、JSONL/HF 内容及非规范 bundle 路径。
 
-两阶段都使用 `live_state_v3` 观察、`temperature=0.7`、`top_p=1.0`、单 token、thinking disabled；C1 不输出 `S` 或 JSON，C2 不输出方向或 JSON。`saver.freq_steps=1` 与 `evaluator.freq_steps=1` 分别配置每 update 保存和验证；仍须在 GPU gate 核对真实产物，保存 checkpoint 不等于已评估。
+两阶段都使用 `live_state_v3` 观察、`temperature=0.7`、`top_p=1.0`、单 token、thinking disabled；C1 不输出 `S` 或 JSON，C2 不输出方向或 JSON。后续新作业默认关闭训练内 validation：`evaluator.freq_steps/freq_epochs/freq_secs=null`、`eval_before_train=false`；保留 validation 数据及独立权重评估/录像验收。`saver.freq_steps=1` 仍每 update 保存，保存 checkpoint 不等于已评估。此设置不追溯修改正在运行的旧配置；关闭调度不保证框架不初始化 eval worker，也不等于 RAM OOM 已解决。
 
 C1 是无 critic、逐步奖励的 PPO-style 更新：每次方向动作使用自己的 shaped reward，不做 group/advantage normalization，不广播整局回报，不跨游戏步做 GAE；保留原有 loss reduction。`.inf` 只是不截断有限的单步任务奖励，NaN/Inf reward 仍拒绝，JSON metadata 使用字符串 `"inf"`。C2 在同一初始状态的 12 局中先做整局回报归一化，再裁剪到 ±20；每局所有策略决策共享该局任务信号，整局 loss 等权，`option_return` 仅记录审计、不重复累加。两者保留 `ppo_n_minibatches=1`、KL=0.01 和 reference model（初始化跟随 actor），`critic/teacher/adv_norm=null`。
 

@@ -24,7 +24,7 @@ seed: 1
 # - moving ghosts; 80 train rows / batch size 4 = 20 updates per epoch
 # - 5 epochs = 100 total updates
 # - both train and validation dataset rows use 512 environment steps
-# - evaluate the 4 validation rows after every training update
+# - no in-training validation; keep validation rows for separate evaluation
 # - training samples at temperature=0.7, top_p=1.0
 # - explicit +1 normal-pellet, +1 power-pellet, and +50 completion rewards
 # - fixed 0.05 penalty per executed environment step
@@ -276,8 +276,9 @@ evaluator:
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   freq_epochs: null
-  freq_steps: 1
+  freq_steps: null
   freq_secs: null
+  eval_before_train: false
 
 stats_logger:
   experiment_name: ${experiment_name}

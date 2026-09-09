@@ -119,7 +119,10 @@ def test_formal_stages_have_explicit_distinct_settings():
     for config in (first, second):
         assert config["recover"]["mode"] == "disabled"
         assert config["dataset_generation"] == {"train_episodes": 80, "validation_episodes": 4, "seed": 28}
-        assert config["evaluator"]["freq_steps"] == config["saver"]["freq_steps"] == 1
+        assert config["saver"]["freq_steps"] == 1
+        assert all(config["evaluator"][key] is None
+                   for key in ("freq_steps", "freq_epochs", "freq_secs"))
+        assert config["evaluator"]["eval_before_train"] is False
         assert (
             config["dataset_generation"]["train_episodes"]
             // config["train_dataset"]["batch_size"]
