@@ -413,7 +413,9 @@ def _build_workflow_kwargs(
         prompt_version=getattr(config, "prompt_version", "legacy"),
         recipe_contract=recipe_contract_metadata(raw_config),
         ghost_mode=config.environment.ghost_mode,
-        episode_life_mode=config.environment.episode_life_mode,
+        episode_life_mode=getattr(
+            config.environment, "episode_life_mode", "single_death"
+        ),
         environment_max_steps=config.environment.max_steps,
         temperature=generation_config.temperature,
         top_p=generation_config.top_p,
