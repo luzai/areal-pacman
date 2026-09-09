@@ -1,0 +1,245 @@
+# DRAFT: historical source/runtime and boundary export gates must pass before launch.
+# Changes: portable paths, cumulative stopping boundary, explicit validation OFF.
+recipe_version: maapacman-level1-v1
+artifact_root: ${oc.env:C1_REPRO_RUN_ROOT}/stage2-700
+trajectory_dir: ${artifact_root}/trajectories
+experiment_name: pacman-agentic-rl
+trial_name: c1-iter25-stage2-700
+
+seed: 1
+# 700-step episode-cap reward-trend resume branch:
+# - 8 train rows / batch size 4 = 2 updates per epoch
+# - 50 epochs = 100 total updates
+# - both train and validation dataset rows use explicit max_steps=700
+# - no scheduled validation rollouts
+# - training samples at temperature=0.7, top_p=1.0
+# - explicit +1 normal-pellet, +1 power-pellet, and +50 completion rewards
+# - BFS nearest-pellet guidance scaled smoothly by normal-pellet clear ratio
+# - screenshot plus live engine state and bounded navigation history
+# - every generated action is masked to current open movement actions
+# - save every 10 updates to bound checkpoint storage
+# - TMS alternates the colocated actor and reference model: actor is offloaded
+#   during rollout/ref log-prob, then reference is offloaded before actor update
+enable_offload: true
+enable_thinking: false
+validation_contract: sampled12_uniform_shaped
+image_prompt_style: live_state_v3
+total_train_epochs: 50
+total_train_steps: 17
+tokenizer_path: ${actor.path}
+workflow: areal_pacman.workflow.PacmanNativeVisionWorkflow
+reward_objective_contract: step_local_raw_v1
+eval_workflow: ${workflow}
+parse_failure_penalty: -50
+use_base_reward: false
+normal_pellet_reward: 1.0
+power_pellet_reward: 1.0
+completion_reward: 50.0
+step_penalty: 0.05
+wall_penalty: 0.5
+nearest_pellet_alpha: 0.1
+nearest_pellet_remaining_ratio_threshold: 1.0
+nearest_pellet_scale_by_cleared_ratio: true
+nearest_pellet_skip_on_eat: true
+observation_mode: rgb
+action_token_choice: true
+open_action_mask: true
+completion_api: chat
+
+cluster:
+  n_nodes: 1
+  n_gpus_per_node: 8
+  fileroot: ${artifact_root}/training
+  name_resolve:
+    type: nfs
+    nfs_record_root: ${artifact_root}/name_resolve
+
+scheduler:
+  type: local
+
+rollout:
+  backend: "vllm:d4p1t1"
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  admin_api_key: ${oc.env:AREAL_ADMIN_API_KEY}
+  tokenizer_path: ${tokenizer_path}
+  # First memory-control action: reduce concurrency from 4 to 2.
+  max_concurrent_rollouts: 1
+  queue_size: null
+  consumer_batch_size: ${train_dataset.batch_size}
+  max_head_offpolicyness: 0
+  enable_rollout_tracing: false
+  scheduling_spec: ${actor.scheduling_spec}
+  dump_to_file: true
+  agent:
+    mode: inline
+    export_style: individual
+    turn_discount: 1.0
+    admin_api_key: ${oc.env:AREAL_ADMIN_API_KEY}
+
+gconfig:
+  n_samples: 12
+  min_new_tokens: 1
+  max_new_tokens: 3
+  max_tokens: 1024
+  greedy: false
+  temperature: 0.7
+  top_p: 1.0
+
+eval_gconfig:
+  n_samples: 12
+  min_new_tokens: 1
+  max_new_tokens: 3
+  max_tokens: 1024
+  greedy: false
+  temperature: 0.7
+  top_p: 1.0
+
+actor:
+  backend: "fsdp:d4p1t1"
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: ${oc.env:C1_REPRO_ITER16}
+  attn_impl: sdpa
+  init_from_scratch: false
+  disable_dropout: true
+  offload: true
+  gradient_checkpointing: true
+  dtype: bfloat16
+  optimizer_dtype: bfloat16
+  fsdp:
+    # Strict checkpoint staging: HF weights load on CPU before FSDP sharding.
+    memory_efficient_load: true
+  mb_spec:
+    # 640 tokens left too little headroom for NCCL's grad-norm all-reduce.
+    # 512 covers the observed <=493-token samples while preserving the
+    # effective batch, and completed the first PPO update on the 8-GPU run.
+    max_tokens_per_mb: 512
+  optimizer:
+    type: adam_bf16
+    lr: 1.0e-6
+    weight_decay: 0.0
+    beta1: 0.9
+    beta2: 0.999
+    eps: 1.0e-8
+    lr_scheduler_type: constant
+    gradient_clipping: 1.0
+    warmup_steps_proportion: 0.0
+  eps_clip: 0.05
+  temperature: ${gconfig.temperature}
+  reward_scaling: 1.0
+  reward_bias: 0.0
+  kl_ctl: 0.01
+  # Second memory-control action: halve PPO micro-batch size without lowering
+  # the 512-token single-sequence ceiling observed by the original run.
+  ppo_n_minibatches: 8
+  recompute_logprob: true
+  use_decoupled_loss: true
+  rejection_sampling:
+    metric: ratio
+    upper: 5.0
+  reward_norm: null
+  adv_norm: null
+  weight_update_mode: xccl
+  max_new_tokens: ${gconfig.max_new_tokens}
+  scheduling_spec:
+    - task_type: worker
+      port_count: 2
+      gpu: 1
+      cmd: python3 -m areal.infra.rpc.rpc_server
+      env_vars:
+        NCCL_DEBUG: "WARN"
+
+ref:
+  backend: ${actor.backend}
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  # KL reference remains the original base model, never the Iter-16 actor.
+  path: ${oc.env:C1_REPRO_BASE_MODEL}
+  attn_impl: ${actor.attn_impl}
+  init_from_scratch: false
+  disable_dropout: true
+  dtype: ${actor.dtype}
+  optimizer_dtype: bfloat16
+  mb_spec:
+    max_tokens_per_mb: 512
+  optimizer: null
+  offload: true
+  fsdp:
+    offload_params: true
+    memory_efficient_load: true
+  scheduling_strategy:
+    type: colocation
+    target: actor
+  scheduling_spec: ${actor.scheduling_spec}
+
+vllm:
+  model: ${actor.path}
+  seed: ${seed}
+  skip_tokenizer_init: false
+  dtype: ${actor.dtype}
+  max_model_len: 1024
+  gpu_memory_utilization: 0.65
+  enforce_eager: true
+  logprobs_mode: processed_logprobs
+
+train_dataset:
+  batch_size: 4
+  shuffle: true
+  pin_memory: true
+  num_workers: 0
+  path: ${oc.env:C1_REPRO_DATA_ROOT}/stage2-700/train_hf
+  type: rl
+  max_length: 1024
+
+valid_dataset:
+  batch_size: 2
+  shuffle: false
+  pin_memory: true
+  num_workers: 0
+  path: ${oc.env:C1_REPRO_DATA_ROOT}/stage2-700/validation_hf
+  type: rl
+  max_length: 1024
+
+saver:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  # Bound disk usage while preserving the two newest regular checkpoints.
+  # Also save and preserve every newly observed global-best training reward;
+  # the separate recover_checkpoint is never pruned by this policy.
+  keep_last: 2
+  keep_best_metric: ppo_actor/task_reward/avg
+  keep_best_mode: max
+  freq_epochs: null
+  # Save every completed resumed update; keep_last still bounds regular saves.
+  freq_steps: 1
+  freq_secs: null
+
+recover:
+  # Keep one-step recovery checkpoints so an inference-worker failure during
+  # a long 256-step PPO iteration costs at most the current update.
+  mode: auto
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: null
+  freq_steps: 1
+  freq_secs: null
+
+evaluator:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: null
+  freq_steps: null
+  freq_secs: null
+  eval_before_train: false
+
+stats_logger:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  wandb:
+    mode: disabled

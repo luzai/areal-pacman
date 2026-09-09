@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.venv/
+artifacts/
+*.log
+*.safetensors
+*.pt
+*.tar.gz
+.env
