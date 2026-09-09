@@ -28,16 +28,26 @@ Do not substitute historical trained weights for newly produced checkpoints.
 - `legacy/MaaPacman/maapacman/`: the 13-file third-stage environment subset.
 - `configs/repro/`: three draft configurations with portable path placeholders.
 
-**The included trainer is third-stage source, not a universal launcher for all
-three stages. Do not launch these YAMLs yet.** The historical packaging dependency
-on `maapacman` is retained; this draft does not supply a complete install recipe.
+**The included trainer is third-stage source, not a universal runtime for all
+three stages.** The fail-closed orchestrator at
+`scripts/repro/run_c1_iter25_lineage.sh` therefore requires three separately
+verified recipe roots, matching AReaL roots, and per-stage MaaPacman roots. It
+runs 16 + 1 + 8 updates,
+exports the Iter16 HF boundary, shares only the Stage 2/3 recovery namespace,
+checks that the DCP contains optimizer state, and requires Stage 3 to report the
+model+optimizer recovery path. Run `--preflight-only` before allocating GPUs and
+`--smoke` for a one-update-per-stage handoff test.
+
+The historical packaging dependency on `maapacman` is retained; this draft does
+not supply a complete install recipe.
 Do not install an unrelated package of the same name to fill that gap.
 
 ## Remaining gates
 
 1. Establish the exact first-stage MaaPacman identity and per-stage source selection.
 2. Reconstruct fixed data/seeds, runtime versions and startup environment.
-3. Implement and test Iter16 export, Iter17 optimizer transfer and stopping boundaries.
+3. Test the automated Iter16 export, Iter17 optimizer transfer and stopping
+   boundaries against the real Qwen3.5-9B workload.
 4. Integrate the matching AReaL snapshots; no new AReaL runtime is published here.
 5. Complete real-model/GPU training acceptance and disk-retention checks.
 
