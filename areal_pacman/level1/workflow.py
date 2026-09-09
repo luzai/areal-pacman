@@ -134,6 +134,34 @@ def _nearest_reachable_distance_with_diagnostics(
         ) from exc
 
 
+def _normal_pellet_event_position(
+    info: Mapping[str, Any],
+) -> Position | None:
+    events = [
+        event
+        for event in info.get("logic_frame_events", [])
+        if event.get("event_type") == "normal_pellet_eaten"
+    ]
+    if not bool(info.get("pellet_eaten")):
+        if events:
+            raise RuntimeError(
+                "normal-pellet event ledger disagrees with pellet_eaten"
+            )
+        return None
+    if len(events) != 1:
+        raise RuntimeError(
+            "pellet_eaten requires exactly one normal-pellet source event"
+        )
+    position = events[0].get("pacman_position")
+    if (
+        not isinstance(position, list)
+        or len(position) != 2
+        or any(not isinstance(value, int) for value in position)
+    ):
+        raise RuntimeError("normal-pellet source event has invalid position")
+    return Position(position[0], position[1])
+
+
 def install_vllm_allowed_token_ids_adapter() -> None:
     """Forward recipe-scoped chat and token constraints to vLLM."""
     from areal.engine.vllm_remote import VLLMBackend
@@ -1075,12 +1103,13 @@ class PacmanImageOnlyWorkflow:
                 if level is not None and remaining_normal_pellets is not None:
                     after_row, after_col = info["pacman_position"]
                     after_position = Position(int(after_row), int(after_col))
-                    if bool(info["pellet_eaten"]):
-                        if after_position not in remaining_normal_pellets:
+                    eaten_position = _normal_pellet_event_position(info)
+                    if eaten_position is not None:
+                        if eaten_position not in remaining_normal_pellets:
                             raise RuntimeError(
                                 "live game ate a normal pellet outside the tracker"
                             )
-                        remaining_normal_pellets.remove(after_position)
+                        remaining_normal_pellets.remove(eaten_position)
                     if len(remaining_normal_pellets) != int(
                         info["normal_pellets_remaining"]
                     ):

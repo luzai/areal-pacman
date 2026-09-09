@@ -63,6 +63,7 @@ from areal_pacman.trajectories import audit_trajectory, summarize_episodes
 from areal_pacman.level1.token_constraints import ObjectiveTokenConstraint
 from areal_pacman.level1.workflow import (
     _nearest_reachable_distance_with_diagnostics,
+    _normal_pellet_event_position,
 )
 from areal_pacman.workflow import (
     ModelTurn,
@@ -79,6 +80,20 @@ def fake_action_tokenizer() -> SimpleNamespace:
             {"U": 40, "D": 41, "L": 42, "R": 43}[token]
         ]
     )
+
+
+def test_normal_pellet_tracker_uses_source_event_position_after_respawn():
+    info = {
+        "pellet_eaten": True,
+        "pacman_position": [23, 13],
+        "logic_frame_events": [
+            {
+                "event_type": "normal_pellet_eaten",
+                "pacman_position": [8, 11],
+            }
+        ],
+    }
+    assert _normal_pellet_event_position(info) == Position(8, 11)
 
 
 class FakeObjectiveTokenizer:
