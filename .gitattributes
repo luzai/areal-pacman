@@ -1,0 +1,3 @@
+scripts/repro/*.sh text eol=lf
+scripts/repro/*.py text eol=lf
+tests/*.py text eol=lf
