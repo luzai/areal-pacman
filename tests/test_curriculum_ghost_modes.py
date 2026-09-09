@@ -103,10 +103,16 @@ def test_formal_stages_have_explicit_distinct_settings():
         yaml.safe_load((ROOT / f"configs/level1/train/curriculum{i}.yaml").read_text())
         for i in (1, 2)
     ]
-    assert first["environment"] == {"ghost_mode": "disabled", "max_steps": 512}
-    assert second["environment"] == {"ghost_mode": "normal", "max_steps": 512}
+    assert first["environment"] == {
+        "ghost_mode": "disabled", "max_steps": 512,
+        "episode_life_mode": "single_death",
+    }
+    assert second["environment"] == {
+        "ghost_mode": "normal", "max_steps": 512,
+        "episode_life_mode": "original_three_lives",
+    }
     assert first["actor"]["path"] == "Qwen/Qwen3.5-9B"
-    assert second["actor"]["path"] == "${oc.env:CURRICULUM1_CHECKPOINT}"
+    assert second["actor"]["path"] == "Qwen/Qwen3.5-9B"
     assert first["actor"]["optimizer"]["lr"] == 5e-7
     assert second["actor"]["optimizer"]["lr"] == 5e-7
     assert first["nearest_pellet_alpha"] == second["nearest_pellet_alpha"] == 0.1
@@ -123,11 +129,12 @@ def test_formal_stages_have_explicit_distinct_settings():
         assert all(config["evaluator"][key] is None
                    for key in ("freq_steps", "freq_epochs", "freq_secs"))
         assert config["evaluator"]["eval_before_train"] is False
+        expected_updates = 100 if config is first else 20
         assert (
             config["dataset_generation"]["train_episodes"]
             // config["train_dataset"]["batch_size"]
             * config["total_train_epochs"]
-            == 100
+            == expected_updates
         )
     for field in (
         "image_prompt_style",

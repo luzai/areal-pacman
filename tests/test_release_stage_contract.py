@@ -23,7 +23,6 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def stage_config(stage, monkeypatch):
-    monkeypatch.setenv("CURRICULUM1_CHECKPOINT", "/test/complete-c1")
     monkeypatch.setenv("AREAL_ADMIN_API_KEY", "isolated-test-placeholder")
     return OmegaConf.load(ROOT / f"configs/level1/train/curriculum{stage}.yaml")
 
@@ -33,7 +32,8 @@ def test_both_release_stages_validate(stage, monkeypatch):
     config = stage_config(stage, monkeypatch)
     _validate_reward_objective_contract(config)
     _validate_release_stage_contract(config)
-    assert config.total_train_epochs * config.dataset_generation.train_episodes // config.train_dataset.batch_size == 100
+    expected = 100 if stage == 1 else 20
+    assert config.total_train_epochs * config.dataset_generation.train_episodes // config.train_dataset.batch_size == expected
 
 
 @pytest.mark.parametrize("stage", [1, 2])

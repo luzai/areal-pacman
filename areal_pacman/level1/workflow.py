@@ -322,6 +322,9 @@ class PacmanImageOnlyWorkflow:
             level=int(requested["level"]),
             ghost_mode=requested["ghost_mode"],
             max_steps=int(requested["max_steps"]),
+            episode_life_mode=str(
+                options.get("episode_life_mode", "single_death")
+            ),
             video_driver=options.get("video_driver", "dummy"),
             audio_driver=options.get("audio_driver", "dummy"),
             worker_base_dir=options.get("worker_base_dir"),
@@ -899,6 +902,12 @@ class PacmanImageOnlyWorkflow:
                         "fruit_reward": 0.0,
                         "death": False,
                         "death_penalty": 0.0,
+                        "death_count": int(previous_info.get("death_count", 0)),
+                        "lives": int(previous_info.get("lives", 0)),
+                        "lives_after_step": int(
+                            previous_info.get("lives_after_step", 0)
+                        ),
+                        "respawned": False,
                         "level_completed": False,
                         "completion_reward": 0.0,
                         "safety_refusal": False,
@@ -1230,6 +1239,10 @@ class PacmanImageOnlyWorkflow:
                     "logic_frames": int(info.get("logic_frames", 0)),
                     "atomic_substeps": list(info.get("atomic_substeps", [])),
                     "score": int(info["score"]),
+                    "death_count": int(info.get("death_count", 0)),
+                    "lives": int(info.get("lives", 0)),
+                    "lives_after_step": int(info.get("lives_after_step", 0)),
+                    "respawned": bool(info.get("respawned", False)),
                     "pygame_mode": int(info["pygame_mode"]),
                     "wall_collision": bool(info["wall_collision"]),
                     "oscillation_return": oscillation_return,
@@ -1315,6 +1328,7 @@ class PacmanImageOnlyWorkflow:
                 "seed": seed,
                 "max_steps": config.max_steps,
                 "ghost_mode": config.ghost_mode,
+                "episode_life_mode": config.episode_life_mode,
                 "state_prefix_actions": state_prefix_actions,
                 "state_prefix_actions_executed": len(state_prefix_evidence),
                 "state_prefix_evidence": state_prefix_evidence,
@@ -1414,6 +1428,9 @@ class PacmanImageOnlyWorkflow:
                     final_info["power_pellets_remaining"]
                 ),
                 "final_score": int(final_info["score"]),
+                "death_count": int(final_info.get("death_count", 0)),
+                "lives": int(final_info.get("lives", 0)),
+                "lives_after_step": int(final_info.get("lives_after_step", 0)),
                 "pygame_mode": int(final_info["pygame_mode"]),
                 "wall_collisions": sum(
                     bool(step["wall_collision"]) for step in trajectory

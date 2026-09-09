@@ -169,15 +169,7 @@ if [[ -z "${ACTOR_PATH_SPEC}" ]]; then
   echo "Training config has no actor.path: ${CONFIG}" >&2
   exit 2
 fi
-if [[ "${ACTOR_PATH_SPEC}" == '${oc.env:CURRICULUM1_CHECKPOINT}' ]]; then
-  if [[ -z "${CURRICULUM1_CHECKPOINT:-}" ]]; then
-    echo "curriculum2.yaml requires CURRICULUM1_CHECKPOINT." >&2
-    exit 2
-  fi
-  MODEL_PATH="${CURRICULUM1_CHECKPOINT}"
-else
-  MODEL_PATH="${MODEL_PATH:-${OWNER_ROOT}/models/Qwen3.5-9B}"
-fi
+MODEL_PATH="${MODEL_PATH:-${OWNER_ROOT}/models/Qwen3.5-9B}"
 if ! "${PYTHON}" "${REPO_ROOT}/scripts/level1/train/validate_model_checkpoint.py" \
   "${MODEL_PATH}"; then
   echo "Model checkpoint is incomplete: ${MODEL_PATH}" >&2

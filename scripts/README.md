@@ -54,14 +54,15 @@ creates or rewrites a temporary-directory setting. A valid short override lets
 you retain a long `TMPDIR` and long artifact paths. Without an explicit temporary
 path, the existing library default is preserved and only its length is checked.
 
-For Curriculum 2, select `configs/level1/train/curriculum2.yaml` and export
-`CURRICULUM1_CHECKPOINT` as the complete loadable model checkpoint produced by
-Curriculum 1. The launcher loads its config, tokenizer, and processor offline
-and verifies every weight shard named by an index before creating run output.
+For Curriculum 2, select `configs/level1/train/curriculum2.yaml` and point
+`MODEL_PATH` at the same complete local Qwen3.5-9B base checkpoint used for the
+baseline. Curriculum 2 does not read a Curriculum 1 checkpoint. The launcher
+loads config, tokenizer, and processor offline and verifies every indexed
+weight shard before creating run output.
 
 The launcher reads seed counts and horizon from YAML. Both stages use 512
 underlying environment steps, 80/4 train/validation rows (seeds 28–107/108–111),
-5 epochs and 100 updates. C1 has no ghosts or Edward: one legal U/D/L/R per
+5 epochs and 100 updates for C1; C2 runs one epoch and 20 updates. C1 has no ghosts or Edward: one legal U/D/L/R per
 model decision, raw step-local reward and no reward normalization/clipping of
 finite rewards (`reward_clip: .inf`). C2 uses normal ghosts, one advertised
 Edward option code, full-episode group-12 normalization then clipping to ±20.

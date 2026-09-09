@@ -360,7 +360,9 @@ def main() -> None:
         raise ValueError("smoke updates must be positive")
     env = PygamePacmanEnv(
         PygamePacmanEnvConfig(
-            ghost_mode=environment.ghost_mode, max_steps=environment.max_steps
+            ghost_mode=environment.ghost_mode,
+            max_steps=environment.max_steps,
+            episode_life_mode=environment.episode_life_mode,
         )
     )
     try:
@@ -422,6 +424,7 @@ def main() -> None:
         "env_api_version": spec.api_version,
         "env_id": spec.env_id,
         "ghost_mode": environment.ghost_mode,
+        "episode_life_mode": environment.episode_life_mode,
         "max_steps": environment.max_steps,
         "total_train_steps": (
             args.smoke_updates

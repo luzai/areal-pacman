@@ -122,6 +122,15 @@ class PygameWorkerEventTests(unittest.TestCase):
                 [], previous, current, logic_frame_index=1
             )
 
+    def test_original_life_mode_waits_for_respawn_without_model_step(self) -> None:
+        bridge = object.__new__(_PygameBridge)
+        bridge._episode_life_mode = "original_three_lives"
+        request = {"death_seen": True, "logic_frames": 180}
+        self.assertFalse(bridge._step_is_complete(request, {"mode": 2}))
+        self.assertFalse(bridge._step_is_complete(request, {"mode": 4}))
+        self.assertTrue(bridge._step_is_complete(request, {"mode": 1}))
+        self.assertTrue(bridge._step_is_complete(request, {"mode": 3}))
+
 
 @unittest.skipUnless(
     importlib.util.find_spec("pygame") is not None and PACMAN_PYTHON_ROOT.is_dir(),
@@ -183,6 +192,7 @@ class PygamePacmanEnvTests(unittest.TestCase):
                     "maapacman_dirty": info["maapacman_dirty"],
                     "level": 1,
                     "ghost_mode": "normal",
+                    "episode_life_mode": "single_death",
                     "level_revision": EXPECTED_LEVEL_REVISION,
                     "env_id": env.spec.env_id,
                     "api_version": "3.0",
@@ -565,6 +575,39 @@ class PygamePacmanEnvTests(unittest.TestCase):
             self.assertLessEqual(final_info["logic_frames"], 16)
             with self.assertRaises(EpisodeFinishedError):
                 env.step("S")
+        finally:
+            env.close()
+
+    def test_original_three_lives_respawns_then_fourth_death_is_game_over(self) -> None:
+        env = self.make_env(
+            max_steps=512, episode_life_mode="original_three_lives"
+        )
+        try:
+            env.reset(seed=11)
+            death_infos = []
+            terminated = truncated = False
+            for _ in range(512):
+                _, _, terminated, truncated, info = env.step("S")
+                if info["death"]:
+                    death_infos.append(info)
+                if terminated or truncated:
+                    break
+            self.assertTrue(terminated)
+            self.assertFalse(truncated)
+            self.assertEqual(len(death_infos), 4)
+            for index, death_info in enumerate(death_infos[:3], 1):
+                self.assertEqual(death_info["death_count"], index)
+                self.assertTrue(death_info["respawned"])
+                self.assertFalse(death_info["terminated"])
+                self.assertIsNone(death_info["terminal_reason"])
+                self.assertEqual(
+                    death_info["lives_after_step"], death_info["lives"] - 1
+                )
+            final = death_infos[-1]
+            self.assertEqual(final["death_count"], 4)
+            self.assertFalse(final["respawned"])
+            self.assertEqual(final["lives_after_step"], 0)
+            self.assertEqual(final["terminal_reason"], "game_over")
         finally:
             env.close()
 

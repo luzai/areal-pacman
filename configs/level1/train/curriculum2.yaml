@@ -2,11 +2,12 @@ recipe_version: maapacman-level1-ghostdoor-v3
 artifact_root: artifacts/runs/generated/curriculum2-step512-v1
 trajectory_dir: ${artifact_root}/trajectories
 experiment_name: pacman-agentic-rl
-trial_name: curriculum2-from-curriculum1-step512-100update-group12
+trial_name: curriculum2-qwen3p5-base-three-lives-step512-20update
 
 environment:
   ghost_mode: normal
   max_steps: 512
+  episode_life_mode: original_three_lives
 dataset_generation:
   train_episodes: 80
   validation_episodes: 4
@@ -17,12 +18,11 @@ planner_audit:
 
 # Training RNG; dataset_generation.seed separately fixes rows 28-111.
 seed: 1
-# Curriculum 2: the complete follow-up initialized from Curriculum 1.
-# CURRICULUM1_CHECKPOINT must name a complete model checkpoint. This starts a
-# new optimizer/scheduler lineage; recover.mode handles interruption recovery
-# only inside this Curriculum 2 run.
+# Curriculum 2: cold-start directly from the Qwen3.5-9B base model with a fresh
+# optimizer/scheduler lineage. recover.mode handles interruption recovery only
+# inside this run.
 # - moving ghosts; 80 train rows / batch size 4 = 20 updates per epoch
-# - 5 epochs = 100 total updates
+# - 1 epoch = 20 total updates
 # - both train and validation dataset rows use 512 environment steps
 # - no in-training validation; keep validation rows for separate evaluation
 # - training samples at temperature=0.7, top_p=1.0
@@ -42,7 +42,7 @@ reward_objective_contract: episode_return_group_v1
 image_prompt_style: live_state_v3
 prompt_version: edward-option-code-v1
 action_protocol: edward-option-code-v1
-total_train_epochs: 5
+total_train_epochs: 1
 total_train_steps: null
 tokenizer_path: ${actor.path}
 workflow: areal_pacman.workflow.PacmanNativeVisionWorkflow
@@ -126,7 +126,7 @@ actor:
   backend: "fsdp:d4p1t1"
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  path: ${oc.env:CURRICULUM1_CHECKPOINT}
+  path: Qwen/Qwen3.5-9B
   attn_impl: sdpa
   init_from_scratch: false
   disable_dropout: true

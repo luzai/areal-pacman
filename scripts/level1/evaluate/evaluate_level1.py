@@ -139,6 +139,7 @@ def evaluation_settings(args):
         "reward_objective_contract": "evaluation_only_v1",
         "contract_violation_return": raw.get("contract_violation_return", -1.0),
         "ghost_mode": contract["ghost_mode"],
+        "episode_life_mode": contract["episode_life_mode"],
         "environment_max_steps": raw["environment"]["max_steps"],
         "image_prompt_style": raw["image_prompt_style"],
         "prompt_version": raw["prompt_version"],

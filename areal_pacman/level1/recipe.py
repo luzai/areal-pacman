@@ -105,6 +105,9 @@ def recipe_contract_metadata(raw: Mapping[str, Any]) -> dict[str, Any]:
     train_batch = int((raw.get("train_dataset") or {}).get("batch_size", 0))
     return {
         "ghost_mode": environment.get("ghost_mode"),
+        "episode_life_mode": environment.get(
+            "episode_life_mode", "single_death"
+        ),
         "harness": {
             "action_protocol": raw.get("action_protocol", "legacy"),
             "edward_options": bool(raw.get("edward_options", False)),
@@ -169,9 +172,18 @@ def load_recipe_document(path: Path) -> dict[str, Any]:
 class EnvironmentConfig:
     ghost_mode: str = "normal"
     max_steps: int = 256
+    episode_life_mode: str = "single_death"
 
     def __post_init__(self):
         validate_ghost_mode(self.ghost_mode)
+        if self.episode_life_mode not in {
+            "single_death",
+            "original_three_lives",
+        }:
+            raise ValueError(
+                "environment.episode_life_mode must be single_death or "
+                "original_three_lives"
+            )
         if type(self.max_steps) is not int or self.max_steps not in {
             32,
             256,

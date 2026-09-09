@@ -36,7 +36,6 @@ def test_phase_only_requires_all_three_switches(enable, actor, ref):
 
 @pytest.mark.parametrize("stage", [1, 2])
 def test_actual_release_yaml_uses_phase_only_without_smoke_bypass(stage, monkeypatch):
-    monkeypatch.setenv("CURRICULUM1_CHECKPOINT", "/test/complete-c1")
     value = OmegaConf.load(ROOT / f"configs/level1/train/curriculum{stage}.yaml")
     assert not value.actor.fsdp.offload_params
     assert not value.ref.fsdp.offload_params

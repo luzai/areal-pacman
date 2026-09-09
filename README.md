@@ -19,7 +19,7 @@
 ## 源码边界
 
 当前开发 C1/C2 YAML 已启用实验性视觉兼容适配，需要 AReaL
-`pacman/open-action-mask` @ `79698eecf91bf50ede480b94380d962f835bc6d8`，并显式保持
+`release/pacman-v0.1.0` @ `9f93d1deb59c1c99cd7019afbd0e83bb40b62fc0`，并显式保持
 actor/ref 的 `fsdp.memory_efficient_load=false`。旧 AReaL 发布快照不包含该适配器，
 不能直接搭配当前开发 YAML；下面的获取命令已固定为上述 AReaL SHA，并须使用
 匹配的 Transformers 5.7.0 / vLLM 0.22.1 环境。启动时会记录实际加载的视觉适配信息。
@@ -33,7 +33,7 @@ actor/ref 的 `fsdp.memory_efficient_load=false`。旧 AReaL 发布快照不包�
 | 源码层                                                        | 作用                                       | 当前配方使用的版本                                                         |
 | ------------------------------------------------------------- | ------------------------------------------ | -------------------------------------------------------------------------- |
 | 本仓库                                                        | `areal_pacman` 配方与内置 `maapacman` 环境 | `release/maapacman-v0.1.0`；运行时记录实际 SHA                             |
-| [luzai/AReaL](https://github.com/luzai/AReaL)                 | 训练、rollout、FSDP 和 checkpoint          | `pacman/open-action-mask` @ `79698eecf91bf50ede480b94380d962f835bc6d8`       |
+| [luzai/AReaL](https://github.com/luzai/AReaL)                 | 训练、rollout、FSDP 和 checkpoint          | `release/pacman-v0.1.0` @ `9f93d1deb59c1c99cd7019afbd0e83bb40b62fc0`        |
 | [luzai/pacman-python](https://github.com/luzai/pacman-python) | 游戏规则、资源和 pygame renderer           | `release/maapacman-v0.1.0` 中的 `cbb97115e407abc86a44adc82a1b8f360b3e8da0` |
 
 复现时以固定 SHA 为准，不能仅依赖会继续更新的分支名。更新依赖 revision 后，需要同步运行 manifest 并重新验证。`areal_pacman.synthetic.*` 保留用于历史合成迷宫实验。
@@ -47,9 +47,9 @@ export WORKSPACE_ROOT=/path/to/pacman-release
 mkdir -p "$WORKSPACE_ROOT"
 cd "$WORKSPACE_ROOT"
 
-git clone --branch pacman/open-action-mask --single-branch \
+git clone --branch release/pacman-v0.1.0 --single-branch \
   https://github.com/luzai/AReaL.git
-git -C AReaL checkout 79698eecf91bf50ede480b94380d962f835bc6d8
+git -C AReaL checkout 9f93d1deb59c1c99cd7019afbd0e83bb40b62fc0
 
 git clone --branch release/maapacman-v0.1.0 --single-branch \
   https://github.com/luzai/areal-pacman.git
@@ -142,7 +142,7 @@ CUDA_VISIBLE_DEVICES='' "$PYTHON" -m pytest -q
 | 配置                                                      | 初始化模型                  | 默认完整训练            |
 | --------------------------------------------------------- | --------------------------- | ----------------------- |
 | [curriculum1.yaml](configs/level1/train/curriculum1.yaml) | `Qwen/Qwen3.5-9B`           | 100 次 optimizer update |
-| [curriculum2.yaml](configs/level1/train/curriculum2.yaml) | `${CURRICULUM1_CHECKPOINT}` | 100 次 optimizer update |
+| [curriculum2.yaml](configs/level1/train/curriculum2.yaml) | `Qwen/Qwen3.5-9B`           | 20 次 optimizer update  |
 
 两阶段使用相同关卡、画面尺寸及共同观察字段，但动作协议、实际 prompt 与训练目标不同：
 
@@ -199,10 +199,10 @@ CONFIG=configs/level1/train/curriculum1.yaml \
 bash scripts/level1/train/run_level1_training.sh --smoke-updates 2
 ```
 
-取得真实 C1 smoke 的完整可加载权重后，再验证 C2 两次更新：
+从同一个 Qwen base 独立验证 C2 两次更新：
 
 ```bash
-CURRICULUM1_CHECKPOINT=/path/to/complete-c1-smoke-checkpoint \
+MODEL_PATH=/path/to/Qwen3.5-9B \
 CONFIG=configs/level1/train/curriculum2.yaml \
 bash scripts/level1/train/run_level1_training.sh --smoke-updates 2
 ```
@@ -214,20 +214,19 @@ CONFIG=configs/level1/train/curriculum1.yaml \
 bash scripts/level1/train/run_level1_training.sh
 ```
 
-Curriculum 1 完成后，指定其完整模型 checkpoint，启动 Curriculum 2：
+正式 C2 同样从 Qwen base 冷启动，不继承 C1 optimizer 或模型权重：
 
 ```bash
-export CURRICULUM1_CHECKPOINT=/path/to/curriculum1-complete-checkpoint
-
+export MODEL_PATH=/path/to/Qwen3.5-9B
 CONFIG=configs/level1/train/curriculum2.yaml \
 bash scripts/level1/train/run_level1_training.sh
 ```
 
-`CURRICULUM1_CHECKPOINT` 必须包含模型权重、配置和所需 tokenizer/processor 文件；不能直接指向训练产物根目录或不完整的恢复目录。启动器会离线加载这些元数据，并由 config 构建不分配实际权重的 meta 模型，逐项检查所需 tensor 名称和 shape；缺失、重复或不兼容参数会明确失败。[完整 VLM checkpoint 工具](scripts/level1/report/build_complete_vlm_checkpoint.py)支持单文件和分片的完整模型打包，不覆盖原文件。
+`MODEL_PATH` 必须指向完整的 Qwen3.5-9B base checkpoint，包含模型权重、配置和所需 tokenizer/processor 文件；不能直接指向训练产物根目录或不完整的恢复目录。启动器会离线校验这些文件。
 
-上述检查只是结构预检，不等于完整模型加载或真实图像推理。当前固定 AReaL 没有已核实的视觉参数冻结证据，因此 exporter 拒绝任何缺失 tensor，包括视觉权重；旧 `--restore-all-missing` 也不能绕过。不得用 base 权重替代丢失的可训练参数，或丢掉 C1 已学参数。先通过 C1 两次更新 smoke，导出并实际验证它的完整 checkpoint，再以该 checkpoint 执行同一 C2 YAML 的 `--smoke-updates 2`；base placeholder 不算 C1→C2 smoke。正式训练仍须分别完成计划内 100 updates，smoke 权重不能冒充最终 agent。
+上述检查只是结构预检，不等于完整模型加载或真实图像推理。C2 必须先完成从同一 Qwen base 启动的两次更新 smoke，再从未训练的同一 base 新开正式 20-update run；smoke 权重及 optimizer 状态不得继承到正式 run，也不能冒充最终 agent。
 
-Curriculum 2 继承模型权重并重新初始化 optimizer/scheduler。两份配置首次运行均为 `recover.mode: disabled`。
+Curriculum 2 从 Qwen base 独立初始化模型、optimizer 和 scheduler。两份配置首次运行均为 `recover.mode: disabled`。
 注意：在当前 AReaL 中，`disabled` 同时禁止保存恢复状态；中断后才改为 `auto`，无法补回之前未保存的 optimizer/dataloader 状态。
 需要完整中断恢复的任务应在首次启动时就显式启用 `auto`，并保留同一 run 的数据、名称与路径；当前发布启动器面向新 run，不会覆盖或重建旧数据。
 只有确实存在完整恢复状态时，才应使用原始训练命令加 `recover.mode=auto` 恢复；只有模型 checkpoint 时属于权重初始化新 run。

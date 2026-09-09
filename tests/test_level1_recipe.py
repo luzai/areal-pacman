@@ -922,7 +922,7 @@ class RewardAndTrajectoryTests(unittest.TestCase):
             ["curriculum1.yaml", "curriculum2.yaml"],
         )
 
-    def test_curriculum2_initializes_from_curriculum1_checkpoint(self) -> None:
+    def test_curriculum2_cold_starts_from_qwen_base(self) -> None:
         config = (
             Path(__file__).parents[1]
             / "configs"
@@ -931,20 +931,20 @@ class RewardAndTrajectoryTests(unittest.TestCase):
             / "curriculum2.yaml"
         ).read_text(encoding="utf-8")
         for expected in (
-            "trial_name: curriculum2-from-curriculum1-step512-100update-group12",
-            "total_train_epochs: 5",
+            "total_train_epochs: 1",
             "total_train_steps: null",
-            "path: ${oc.env:CURRICULUM1_CHECKPOINT}",
+            "path: Qwen/Qwen3.5-9B",
             "tokenizer_path: ${actor.path}",
             "model: ${actor.path}",
             "reward_objective_contract: episode_return_group_v1",
             "artifacts/datasets/curriculum2-step512-v1/train_hf",
             "artifacts/datasets/curriculum2-step512-v1/validation_hf",
             "ghost_mode: normal",
+            "episode_life_mode: original_three_lives",
             "mode: disabled",
         ):
             self.assertIn(expected, config)
-        self.assertNotIn("path: Qwen/Qwen3.5-9B", config)
+        self.assertNotIn("CURRICULUM1_CHECKPOINT", config)
 
     def test_archived_step512_edward_gate_config_contract(self) -> None:
         config = (
@@ -2585,11 +2585,7 @@ class TrainerGenerationContractTests(unittest.TestCase):
         self.assertIn('DATASET_ARGS=()', launcher)
         self.assertNotIn('DATASET_MAX_STEPS="${DATASET_MAX_STEPS:-256}"', launcher)
         self.assertIn('SMOKE_ARGS=(--smoke-updates "${SMOKE_UPDATES}")', launcher)
-        self.assertIn(
-            "'${oc.env:CURRICULUM1_CHECKPOINT}'",
-            launcher,
-        )
-        self.assertIn('MODEL_PATH="${CURRICULUM1_CHECKPOINT}"', launcher)
+        self.assertNotIn("CURRICULUM1_CHECKPOINT", launcher)
         self.assertIn('validate_model_checkpoint.py', launcher)
         self.assertIn(
             'DATASET_OUTPUT_ROOT="${DATASET_OUTPUT_ROOT:-${ARTIFACT_ROOT}/dataset}"',

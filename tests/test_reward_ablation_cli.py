@@ -9,7 +9,6 @@ import train_areal
 
 
 def config(monkeypatch, stage=1):
-    monkeypatch.setenv("CURRICULUM1_CHECKPOINT", "/test/complete-c1")
     monkeypatch.setenv("AREAL_ADMIN_API_KEY", "isolated-test-placeholder")
     path = Path(__file__).resolve().parents[1] / f"configs/level1/train/curriculum{stage}.yaml"
     result = OmegaConf.load(path)

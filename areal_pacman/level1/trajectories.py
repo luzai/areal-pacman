@@ -414,15 +414,27 @@ def audit_step_environment_evidence(
             raise ValueError(f"step {step_field} does not match final atomic frame")
 
     death = bool(step.get("death"))
-    if death or step.get("terminal_reason") == "death":
+    respawned = bool(step.get("respawned"))
+    terminal_reason = step.get("terminal_reason")
+    if respawned:
         if (
             not death
-            or not step.get("terminated")
+            or step.get("terminated")
             or step.get("truncated")
-            or step.get("terminal_reason") != "death"
+            or terminal_reason is not None
+            or int(step["pygame_mode"]) != 1
+        ):
+            raise ValueError("death respawn state is inconsistent")
+    elif death:
+        if (
+            not step.get("terminated")
+            or step.get("truncated")
+            or terminal_reason not in {"death", "game_over"}
             or int(step["pygame_mode"]) not in {2, 3}
         ):
             raise ValueError("death event and terminal state are inconsistent")
+    elif terminal_reason in {"death", "game_over"}:
+        raise ValueError("death terminal reason requires a death event")
     completed = bool(step.get("level_completed"))
     if completed:
         if (
@@ -670,6 +682,10 @@ def audit_trajectory(payload: Mapping[str, Any]) -> None:
         if not isinstance(digest, str) or len(digest) != 64:
             raise ValueError(f"trajectory has invalid {digest_field}")
     mode = validate_ghost_mode(payload["ghost_mode"])
+    has_life_contract = "episode_life_mode" in payload
+    life_mode = payload.get("episode_life_mode", "single_death")
+    if life_mode not in {"single_death", "original_three_lives"}:
+        raise ValueError("trajectory episode_life_mode is invalid")
     if payload["ruleset_revision"] != ruleset_revision(mode):
         raise ValueError("trajectory ruleset_revision does not match ghost_mode")
     if payload["max_steps"] not in SUPPORTED_MAX_STEPS:
@@ -699,6 +715,7 @@ def audit_trajectory(payload: Mapping[str, Any]) -> None:
     active_option_key: tuple[Any, ...] | None = None
     active_option_step = 0
     audited_parse_failures = 0
+    audited_deaths = 0
     for index, step in enumerate(steps, 1):
         if not isinstance(step, Mapping):
             raise ValueError(f"trajectory step {index} must be an object")
@@ -707,6 +724,15 @@ def audit_trajectory(payload: Mapping[str, Any]) -> None:
             raise ValueError(
                 f"trajectory step {index} missing fields: {sorted(step_missing)}"
             )
+        if has_life_contract:
+            life_missing = {
+                "death_count", "lives", "lives_after_step", "respawned"
+            } - step.keys()
+            if life_missing:
+                raise ValueError(
+                    f"trajectory step {index} missing life fields: "
+                    f"{sorted(life_missing)}"
+                )
         if has_safety_refusal_contract:
             safety_fields = {
                 "safety_refusal",
@@ -755,6 +781,18 @@ def audit_trajectory(payload: Mapping[str, Any]) -> None:
                 previous_logic_frame=previous_logic_frame,
                 ghost_mode=mode,
             )
+        death = bool(step.get("death"))
+        audited_deaths += int(death)
+        if has_life_contract:
+            if int(step["death_count"]) != audited_deaths:
+                raise ValueError("trajectory death_count does not reconcile")
+            lives = int(step["lives"])
+            lives_after = int(step["lives_after_step"])
+            if lives < 0 or lives_after < 0:
+                raise ValueError("trajectory lives cannot be negative")
+            expected_lives_after = max(0, lives - int(death))
+            if lives_after != expected_lives_after:
+                raise ValueError("trajectory lives do not reconcile with death event")
         if payload.get("action_constraint") == EDWARD_OPTION_CONSTRAINT:
             option_missing = {
                 "model_called",
@@ -947,6 +985,8 @@ def audit_trajectory(payload: Mapping[str, Any]) -> None:
         raise ValueError("total_base_reward does not match trajectory steps")
     if audited_parse_failures != int(payload.get("parse_failures", 0)):
         raise ValueError("trajectory parse-failure count does not reconcile")
+    if has_life_contract and audited_deaths != int(payload["death_count"]):
+        raise ValueError("trajectory payload death_count does not reconcile")
     final = steps[-1]
     if int(payload.get("steps", -1)) != len(steps):
         raise ValueError("trajectory payload steps does not match trajectory length")
@@ -980,7 +1020,10 @@ def audit_trajectory(payload: Mapping[str, Any]) -> None:
             not in {"completed", "invalidated", "max_commit"}
         ):
             raise ValueError("trajectory has an invalid Edward safety refusal")
-    for field in ("terminated", "truncated", "terminal_reason", "pygame_mode"):
+    final_fields = ["terminated", "truncated", "terminal_reason", "pygame_mode"]
+    if has_life_contract:
+        final_fields.extend(["death_count", "lives", "lives_after_step"])
+    for field in final_fields:
         if payload[field] != final[field]:
             raise ValueError(f"trajectory payload {field} does not match final step")
     if int(payload["final_score"]) != int(final["score"]):
@@ -1101,6 +1144,14 @@ def summarize_episodes(episodes: list[Mapping[str, Any]]) -> dict[str, Any]:
         / len(episodes),
         "average_power_pellets_remaining": sum(
             int(item["power_pellets_remaining"]) for item in episodes
+        )
+        / len(episodes),
+        "average_death_count": sum(
+            int(item.get("death_count", 0)) for item in episodes
+        )
+        / len(episodes),
+        "max_step_rate": sum(
+            item.get("terminal_reason") == "max_steps" for item in episodes
         )
         / len(episodes),
         "action_counts": action_counts,

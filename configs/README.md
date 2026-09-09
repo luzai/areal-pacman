@@ -7,8 +7,9 @@ environment-step** horizon, not 512 model calls or option selections.
 
 | Setting | `curriculum1.yaml` | `curriculum2.yaml` |
 | --- | --- | --- |
-| Initialization | `Qwen/Qwen3.5-9B` | Complete `CURRICULUM1_CHECKPOINT`; fresh optimizer/scheduler |
+| Initialization | `Qwen/Qwen3.5-9B` | `Qwen/Qwen3.5-9B`; fresh optimizer/scheduler |
 | Ghost mode | `disabled` | `normal` |
+| Episode lives | First death ends episode | Three reserve lives; fourth death is game over |
 | Action protocol | `direct-open-action-token-v1` | `edward-option-code-v1` |
 | Prompt version | `live-state-direct-action-v3` | `edward-option-code-v1` |
 | Output | One legal `U/D/L/R`; no `S`, JSON, or Edward | One advertised option code mapped to `C*/A*/E*`; no direction or JSON |

@@ -264,16 +264,22 @@ def _validate_release_stage_contract(
     require(int(config.cluster.n_gpus_per_node) == 8, "8 GPUs")
     require(config.rollout.backend == "vllm:d4p1t1", "4 rollout GPUs")
     require(config.actor.backend == "fsdp:d4p1t1", "4 actor GPUs")
-    require(int(config.total_train_epochs) == 5, "5 epochs")
+    expected_epochs = 5 if protocol == DIRECT_ACTION_PROTOCOL else 1
+    expected_updates = 100 if protocol == DIRECT_ACTION_PROTOCOL else 20
+    require(
+        int(config.total_train_epochs) == expected_epochs,
+        f"{expected_epochs} formal training epochs",
+    )
     require(
         config.total_train_steps is None if smoke_updates is None
-        else 1 <= smoke_updates <= 100 and config.total_train_steps == smoke_updates,
-        "total_train_steps=null unless explicitly set by --smoke-updates (1-100)",
+        else 1 <= smoke_updates <= expected_updates
+        and config.total_train_steps == smoke_updates,
+        "total_train_steps=null unless explicitly set by --smoke-updates",
     )
     require(
         80 // int(config.train_dataset.batch_size) * int(config.total_train_epochs)
-        == 100,
-        "a 100-update full budget",
+        == expected_updates,
+        f"a {expected_updates}-update full budget",
     )
     require(
         math.isclose(float(config.actor.optimizer.lr), 5.0e-7),
@@ -351,6 +357,10 @@ def _validate_release_stage_contract(
     require(config.actor.adv_norm is None, "actor.adv_norm=null")
     if protocol == DIRECT_ACTION_PROTOCOL:
         require(config.environment.ghost_mode == "disabled", "C1 ghost_mode=disabled")
+        require(
+            config.environment.episode_life_mode == "single_death",
+            "C1 single-death episode mode",
+        )
         # A local, validated copy is required on offline training nodes. Model
         # identity/revision is bound by the launcher checkpoint/run manifest.
         require(bool(str(config.actor.path)), "a non-empty C1 initialization model")
@@ -364,6 +374,10 @@ def _validate_release_stage_contract(
         require(math.isinf(reward_clip) and reward_clip > 0, "C1 actor.reward_clip=.inf")
     else:
         require(config.environment.ghost_mode == "normal", "C2 ghost_mode=normal")
+        require(
+            config.environment.episode_life_mode == "original_three_lives",
+            "C2 original three-lives episode mode",
+        )
         require(config.prompt_version == EDWARD_PROMPT_VERSION, "the C2 prompt version")
         require(config.reward_objective_contract == "episode_return_group_v1", "C2 episode-return group rewards")
         require(config.edward_options is True, "C2 edward_options=true")
@@ -399,6 +413,7 @@ def _build_workflow_kwargs(
         prompt_version=getattr(config, "prompt_version", "legacy"),
         recipe_contract=recipe_contract_metadata(raw_config),
         ghost_mode=config.environment.ghost_mode,
+        episode_life_mode=config.environment.episode_life_mode,
         environment_max_steps=config.environment.max_steps,
         temperature=generation_config.temperature,
         top_p=generation_config.top_p,
@@ -545,8 +560,8 @@ def _production_dry_run(
 
     epochs = int(_yaml_scalar(text, "total_train_epochs"))
     workflow_path = _yaml_scalar(text, "workflow")
-    if epochs < 2:
-        raise ValueError("production level-1 training must run at least two epochs")
+    if epochs < 1:
+        raise ValueError("production level-1 training must run at least one epoch")
     workflow_cls = _load_workflow(workflow_path)
     if workflow_cls.__module__ not in {
         "areal_pacman.workflow",
@@ -585,6 +600,10 @@ def _production_dry_run(
             _config_override(effective_args, "environment.max_steps")
             or environment.max_steps
         ),
+        episode_life_mode=(
+            _config_override(effective_args, "environment.episode_life_mode")
+            or environment.episode_life_mode
+        ),
     )
     _validate_release_dataset_inputs(config_path, *dataset_matches[-2:])
     rows = 0
@@ -610,7 +629,12 @@ def _production_dry_run(
             if row["env"]["max_steps"] != environment.max_steps:
                 raise ValueError("dataset max_steps does not match training config")
             rows += 1
-    env = PygamePacmanEnv(PygamePacmanEnvConfig(ghost_mode=environment.ghost_mode))
+    env = PygamePacmanEnv(
+        PygamePacmanEnvConfig(
+            ghost_mode=environment.ghost_mode,
+            episode_life_mode=environment.episode_life_mode,
+        )
+    )
     try:
         spec = env.spec
     finally:

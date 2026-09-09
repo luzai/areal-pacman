@@ -26,6 +26,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--script", required=True)
     parser.add_argument("--seed", required=True, type=int)
     parser.add_argument("--ghost-mode", required=True, choices=("disabled", "normal"))
+    parser.add_argument(
+        "--episode-life-mode",
+        required=True,
+        choices=("single_death", "original_three_lives"),
+    )
     return parser.parse_args()
 
 
@@ -33,9 +38,14 @@ class _PygameBridge:
     LOGIC_FRAMES_PER_STEP = 16
 
     def __init__(
-        self, pygame: Any, protocol_output: Any, ghost_mode: str = "normal"
+        self,
+        pygame: Any,
+        protocol_output: Any,
+        ghost_mode: str = "normal",
+        episode_life_mode: str = "single_death",
     ) -> None:
         self._ghost_mode = ghost_mode
+        self._episode_life_mode = episode_life_mode
         self._pygame = pygame
         self._protocol_output = protocol_output
         self._commands: queue.Queue[dict[str, Any]] = queue.Queue()
@@ -124,6 +134,8 @@ class _PygameBridge:
                 atomic_state,
                 logic_frame_index=self._pending_request["logic_frames"],
             )
+            if any(event["event_type"] == "death" for event in events):
+                self._pending_request["death_seen"] = True
             atomic_state.update(
                 {
                     "logic_frame_index": self._pending_request["logic_frames"],
@@ -188,6 +200,7 @@ class _PygameBridge:
                 )
                 command["logic_frames"] = 0
                 command["atomic_substeps"] = []
+                command["death_seen"] = False
                 command["previous_atomic_state"] = self._atomic_state(
                     payload["state"]
                 )
@@ -207,8 +220,12 @@ class _PygameBridge:
         self, request: dict[str, Any], state: dict[str, Any]
     ) -> bool:
         mode = int(state["mode"])
-        if mode in {2, 3, 6, 9}:
+        if mode in {3, 6, 9}:
             return True
+        if self._episode_life_mode == "single_death" and mode == 2:
+            return True
+        if request["death_seen"]:
+            return mode == 1
         return request["logic_frames"] >= self.LOGIC_FRAMES_PER_STEP
 
     @staticmethod
@@ -618,7 +635,9 @@ def main() -> int:
 
     pygame.time.Clock = _FastClock
 
-    bridge = _PygameBridge(pygame, protocol_output, args.ghost_mode)
+    bridge = _PygameBridge(
+        pygame, protocol_output, args.ghost_mode, args.episode_life_mode
+    )
     bridge.start()
     try:
         runpy.run_path(str(script), run_name="__main__")

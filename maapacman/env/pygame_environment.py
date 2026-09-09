@@ -145,6 +145,7 @@ class PygamePacmanEnvConfig:
     level: int = 1
     max_steps: int = 512
     ghost_mode: str = "normal"
+    episode_life_mode: str = "single_death"
     timeout_seconds: float = 15.0
     video_driver: str | None = "dummy"
     audio_driver: str | None = "dummy"
@@ -156,6 +157,13 @@ class PygamePacmanEnvConfig:
             validate_ghost_mode(self.ghost_mode)
         except ValueError as exc:
             raise InvalidConfigurationError(str(exc)) from exc
+        if self.episode_life_mode not in {
+            "single_death",
+            "original_three_lives",
+        }:
+            raise InvalidConfigurationError(
+                "episode_life_mode must be single_death or original_three_lives"
+            )
         if self.level != 1:
             raise InvalidConfigurationError(
                 "PygamePacmanEnv currently supports only pacman-python level 1"
@@ -238,6 +246,7 @@ class PygamePacmanEnv:
         self._closed = False
         self._initial_collectibles = 0
         self._last_logic_frames = 0
+        self._death_count = 0
 
     @property
     def spec(self) -> PacmanEnvSpec:
@@ -261,6 +270,7 @@ class PygamePacmanEnv:
             "maapacman_dirty": self._maapacman_revision_dirty,
             "level": self.config.level,
             "ghost_mode": self.config.ghost_mode,
+            "episode_life_mode": self.config.episode_life_mode,
             "level_revision": self._level_revision,
             "env_id": self._spec.env_id,
             "api_version": self._spec.api_version,
@@ -287,6 +297,7 @@ class PygamePacmanEnv:
         self._finished = False
         self._started = True
         self._initial_collectibles = int(self._state["collectibles_remaining"])
+        self._death_count = 0
         return self.render(), self._build_info(score_delta=0, seed=self._seed)
 
     def step(
@@ -307,9 +318,6 @@ class PygamePacmanEnv:
 
         score_delta = int(self._state["score"]) - int(previous["score"])
         mode = int(self._state["mode"])
-        terminated = mode in {2, 3, 6, 9}
-        truncated = self._steps >= self.config.max_steps and not terminated
-        self._finished = terminated or truncated
         atomic_substeps = list(message.get("atomic_substeps", []))
         score_components, logic_frame_events = self._audit_atomic_substeps(
             previous,
@@ -324,7 +332,17 @@ class PygamePacmanEnv:
         fruit_eaten = any(
             event["event_type"] == "fruit_eaten" for event in logic_frame_events
         )
-        death = mode in {2, 3}
+        death = any(
+            event["event_type"] == "death" for event in logic_frame_events
+        )
+        if death:
+            self._death_count += 1
+        game_over = mode == 3
+        terminated = mode in {6, 9} or game_over or (
+            self.config.episode_life_mode == "single_death" and death
+        )
+        truncated = self._steps >= self.config.max_steps and not terminated
+        self._finished = terminated or truncated
         level_cleared = mode in {6, 9}
         events = list(dict.fromkeys(event["event_type"] for event in logic_frame_events))
         info = self._build_info(score_delta=score_delta, seed=self._seed)
@@ -344,6 +362,17 @@ class PygamePacmanEnv:
                 "ghosts_eaten_step": ghost_eaten_count,
                 "fruit_eaten": fruit_eaten,
                 "death": death,
+                "death_count": self._death_count,
+                "respawned": bool(death and not terminated),
+                "lives": max(0, int(previous["lives"])),
+                "lives_after_step": max(
+                    0,
+                    int(self._state["lives"])
+                    - int(
+                        self.config.episode_life_mode == "single_death"
+                        and mode in {2, 3}
+                    ),
+                ),
                 "level_cleared": level_cleared,
                 "option_invalidated": False,
                 "events": events,
@@ -369,8 +398,21 @@ class PygamePacmanEnv:
             raise self._worker_failure(
                 "worker atomic_substeps length does not match logic_frames"
             )
-        if not 1 <= len(atomic_substeps) <= 16:
-            raise self._worker_failure("worker step must contain 1 to 16 logic frames")
+        contains_death = any(
+            event.get("event_type") == "death"
+            for substep in atomic_substeps
+            for event in substep.get("events", [])
+        )
+        max_logic_frames = (
+            256
+            if self.config.episode_life_mode == "original_three_lives"
+            and contains_death
+            else 16
+        )
+        if not 1 <= len(atomic_substeps) <= max_logic_frames:
+            raise self._worker_failure(
+                f"worker step must contain 1 to {max_logic_frames} logic frames"
+            )
 
         component_names = (
             "normal_pellet",
@@ -637,6 +679,8 @@ class PygamePacmanEnv:
                     str(self._seed),
                     "--ghost-mode",
                     self.config.ghost_mode,
+                    "--episode-life-mode",
+                    self.config.episode_life_mode,
                 ],
                 cwd=self._runtime_dir,
                 env=environment,
@@ -794,6 +838,8 @@ class PygamePacmanEnv:
         eaten = self._initial_collectibles - remaining
         mode = int(self._state["mode"])
         terminated = mode in {2, 3, 6, 9}
+        if self.config.episode_life_mode == "original_three_lives" and mode == 2:
+            terminated = False
         truncated = self._steps >= self.config.max_steps and not terminated
         return {
             "env_api_version": self._spec.api_version,
@@ -801,6 +847,7 @@ class PygamePacmanEnv:
             "ruleset_revision": self._spec.ruleset_revision,
             "backend": "original-pygame",
             "ghost_mode": self.config.ghost_mode,
+            "episode_life_mode": self.config.episode_life_mode,
             "video_driver": self.config.video_driver or "platform-default",
             "worker_runtime_id": self._runtime_dir.name,
             "resource_mode": self._resource_mode,
@@ -825,8 +872,14 @@ class PygamePacmanEnv:
             "lives": int(self._state["lives"]),
             "lives_after_step": max(
                 0,
-                int(self._state["lives"]) - int(mode in {2, 3}),
+                int(self._state["lives"])
+                - int(
+                    self.config.episode_life_mode == "single_death"
+                    and mode in {2, 3}
+                ),
             ),
+            "death_count": self._death_count,
+            "respawned": False,
             "score_delta": score_delta,
             "pellets_initial": self._initial_collectibles,
             "pellets_eaten": eaten,
@@ -853,8 +906,10 @@ class PygamePacmanEnv:
             "terminated": terminated,
             "truncated": truncated,
             "terminal_reason": (
-                "death"
-                if mode in {2, 3}
+                "game_over"
+                if mode == 3
+                else "death"
+                if mode == 2
                 else "all_normal_pellets"
                 if mode in {6, 9}
                 else "max_steps"
