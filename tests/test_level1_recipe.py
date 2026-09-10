@@ -69,7 +69,6 @@ from areal_pacman.workflow import (
     ModelTurn,
     PacmanImageOnlyWorkflow,
     PacmanNativeVisionWorkflow,
-    install_vllm_allowed_token_ids_adapter,
 )
 from train_areal import _build_workflow_kwargs
 
@@ -1328,42 +1327,6 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertEqual(sample["rollout_episode_ids"].tolist(), [1234])
         self.assertNotIn("rollout_episode_returns", sample)
         self.assertNotIn("rollout_episode_group_sizes", sample)
-
-    def test_native_vllm_adapter_forwards_no_thinking_and_action_mask(
-        self,
-    ) -> None:
-        class FakeVLLMBackend:
-            def build_generation_request(self, req, with_lora, version):
-                return SimpleNamespace(payload={"temperature": 0.7})
-
-        fake_vllm_remote = SimpleNamespace(VLLMBackend=FakeVLLMBackend)
-        with patch.dict(
-            sys.modules,
-            {
-                "areal": SimpleNamespace(),
-                "areal.engine": SimpleNamespace(),
-                "areal.engine.vllm_remote": fake_vllm_remote,
-            },
-        ):
-            install_vllm_allowed_token_ids_adapter()
-
-        req = SimpleNamespace(
-            metadata={
-                "allowed_token_ids": [40, 43],
-                "chat_template_kwargs": {"enable_thinking": False},
-            }
-        )
-        request = FakeVLLMBackend().build_generation_request(
-            req,
-            with_lora=False,
-            version=0,
-        )
-
-        self.assertEqual(request.payload["allowed_token_ids"], [40, 43])
-        self.assertEqual(
-            request.payload["chat_template_kwargs"],
-            {"enable_thinking": False},
-        )
 
     def test_workflow_defaults_to_thinking_disabled_and_rejects_true(self) -> None:
         captured = {}

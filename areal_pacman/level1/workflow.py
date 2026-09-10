@@ -162,43 +162,6 @@ def _normal_pellet_event_position(
     return Position(position[0], position[1])
 
 
-def install_vllm_allowed_token_ids_adapter() -> None:
-    """Forward recipe-scoped chat and token constraints to vLLM."""
-    from areal.engine.vllm_remote import VLLMBackend
-
-    if getattr(VLLMBackend, "_pacman_allowed_token_ids_adapter", False):
-        return
-    original = VLLMBackend.build_generation_request
-
-    def build_generation_request(
-        self: Any,
-        req: Any,
-        with_lora: bool,
-        version: int,
-    ) -> Any:
-        http_request = original(self, req, with_lora, version)
-        metadata = req.metadata or {}
-        allowed = metadata.get("allowed_token_ids")
-        if allowed:
-            http_request.payload["allowed_token_ids"] = [
-                int(token_id) for token_id in allowed
-            ]
-        structured_outputs = metadata.get("structured_outputs")
-        if structured_outputs is not None:
-            http_request.payload["structured_outputs"] = dict(
-                structured_outputs
-            )
-        chat_template_kwargs = metadata.get("chat_template_kwargs")
-        if chat_template_kwargs is not None:
-            http_request.payload["chat_template_kwargs"] = dict(
-                chat_template_kwargs
-            )
-        return http_request
-
-    VLLMBackend.build_generation_request = build_generation_request
-    VLLMBackend._pacman_allowed_token_ids_adapter = True
-
-
 def preferred_open_actions(
     open_actions: list[str],
     tried_actions: list[str],
@@ -1635,12 +1598,6 @@ class PacmanNativeVisionWorkflow(PacmanImageOnlyWorkflow, RolloutWorkflow):
         self.open_action_mask = bool(
             workflow_kwargs.get("open_action_mask", False)
         )
-        if (
-            self.constrain_action_tokens
-            or self.open_action_mask
-            or self.edward_options
-        ):
-            install_vllm_allowed_token_ids_adapter()
         self._native_engine: ContextVar[Any | None] = ContextVar(
             "pacman_native_engine", default=None
         )
