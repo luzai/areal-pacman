@@ -8,7 +8,6 @@ from .level1.workflow import (
     ModelTurn,
     PacmanImageOnlyWorkflow,
     PacmanNativeVisionWorkflow,
-    install_vllm_allowed_token_ids_adapter,
     preferred_open_actions,
     validate_env_spec,
 )
@@ -21,7 +20,6 @@ __all__ = [
     "ModelTurn",
     "PacmanImageOnlyWorkflow",
     "PacmanNativeVisionWorkflow",
-    "install_vllm_allowed_token_ids_adapter",
     "preferred_open_actions",
     "validate_env_spec",
 ]

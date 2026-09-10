@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from areal.api import RolloutWorkflow
+from areal.infra import workflow_context
+from areal.utils import stats_tracker
 from maapacman.env import (
     Action,
     PacmanEnvSpec,
@@ -270,6 +272,7 @@ class PacmanImageOnlyWorkflow:
 
             tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
             self.objective_tokenizer = tokenizer
+
         if workflow_kwargs.get("open_action_mask"):
             for token in MOVEMENT_ACTIONS:
                 token_ids = tokenizer.encode(
@@ -1444,6 +1447,15 @@ class PacmanImageOnlyWorkflow:
             audit_trajectory(payload)
             self._episode_payload.set(payload)
             self.last_episode = payload
+            # Stream per-episode outcome metrics into AReaL's stats pipeline.
+            # The rollout controller averages one scalar per completed episode,
+            # so the committed value is the true per-update win rate / mean
+            # shaped reward. stat_scope() routes train episodes to "rollout"
+            # and validation episodes to "eval-rollout".
+            stats_tracker.get(workflow_context.stat_scope()).scalar(
+                win_rate=float(payload["won"]),
+                shaped_reward_avg=float(payload["total_shaped_reward"]),
+            )
             trajectory_dir = options.get("trajectory_dir") or os.getenv(
                 "PACMAN_TRAJECTORY_DIR"
             )
