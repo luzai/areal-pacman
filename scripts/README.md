@@ -61,14 +61,14 @@ loads config, tokenizer, and processor offline and verifies every indexed
 weight shard before creating run output.
 
 The launcher reads seed counts and horizon from YAML. Both stages use 512
-underlying environment steps, 80/4 train/validation rows (seeds 28–107/108–111),
-5 epochs and 100 updates for C1; C2 runs one epoch and 20 updates. C1 has no ghosts or Edward: one legal U/D/L/R per
+underlying environment steps. C1 uses 80/4 train/validation rows (seeds 28–107/108–111),
+5 epochs and 100 updates; C2 uses 40/4 rows (seeds 28–67/68–71), 5 epochs and 50 updates. C1 has no ghosts or Edward: one legal U/D/L/R per
 model decision, raw step-local reward and no reward normalization/clipping of
 finite rewards (`reward_clip: .inf`). C2 uses normal ghosts, one advertised
 Edward option code, full-episode group-12 normalization then clipping to ±20.
 Both use batch 4, 12 samples, learning rate 5e-7, shaping alpha 0.1 and KL 0.01
-with a reference model. Saving and validation are each configured every update;
-their real GPU outputs remain to be checked.
+with a reference model. C2 validates once before training and after every epoch;
+its real GPU outputs remain to be checked.
 
 C2 smoke reuses its YAML with `--smoke-updates 2` and a real complete C1 smoke
 checkpoint. The structural checkpoint validator is not a full model load or

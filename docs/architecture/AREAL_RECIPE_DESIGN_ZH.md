@@ -33,9 +33,9 @@ ${WORKSPACE_ROOT}/pacman-python
 | prompt version | `live-state-direct-action-v3` | `edward-option-code-v1` |
 | objective / norm / clip | `step_local_raw_v1` / 无 / `.inf` | `episode_return_group_v1` / group-12 mean/sample std / 20 |
 
-两阶段均为 512 次底层步、80/4 train/validation rows、seeds 28–107/108–111、
-batch 4、每状态 12 局、5 epochs = 100 updates；每 update 48 局。训练 RNG seed=1
-与 dataset seed=28 区分。学习率统一 5e-7，shaping alpha=0.1；保留 reference
+两阶段均为 512 次底层步、batch 4、每状态 12 局。C1 为 80/4 train/validation rows、
+seeds 28–107/108–111、5 epochs = 100 updates；C2 为 40/4 rows、seeds 28–67/68–71、
+5 epochs = 50 updates；每 update 48 局。训练 RNG seed=1 与 dataset seed=28 区分。学习率统一 5e-7，shaping alpha=0.1；保留 reference
 KL=0.01、`ppo_n_minibatches=1`，无 critic/teacher/advantage normalization。
 增加 seeds 不等于增加地图，无幽灵初始状态可能重复。
 

@@ -213,7 +213,13 @@ def validate_prepared_dataset_manifest(
         raise ValueError("dataset contract version does not match")
     if manifest.get("dataset_roles") != list(DATASET_ROLES):
         raise ValueError("dataset roles must be train and validation")
-    if manifest.get("split_seed_contract") != "disjoint_contiguous_seeds":
+    contract = manifest.get("recipe_contract")
+    expected_seed_contract = (
+        "explicit_validation_seed_range"
+        if (contract.get("data") or {}).get("validation_seed_start") is not None
+        else "disjoint_contiguous_seeds"
+    )
+    if manifest.get("split_seed_contract") != expected_seed_contract:
         raise ValueError("dataset split seed contract does not match")
     if manifest.get("source_revisions") != dict(expected_source_revisions):
         raise ValueError("dataset source revisions do not match installed repositories")
@@ -230,7 +236,6 @@ def validate_prepared_dataset_manifest(
         raise ValueError("dataset generator provenance does not match current source")
     if manifest.get("training_config_sha256") != expected_training_config_sha256:
         raise ValueError("dataset was not prepared with this training config")
-    contract = manifest.get("recipe_contract")
     if not isinstance(contract, dict):
         raise ValueError("dataset requires explicit recipe_contract metadata")
     if expected_recipe_contract is not None and contract != dict(expected_recipe_contract):
@@ -355,7 +360,10 @@ def validate_prepared_dataset_manifest(
             if list(load_from_disk(str(hf_path))) != rows:
                 raise ValueError(f"dataset split {split} HF rows do not match audited JSONL")
 
-    if all_seeds != list(range(first_seed, first_seed + len(all_seeds))):
+    if (
+        manifest["split_seed_contract"] == "disjoint_contiguous_seeds"
+        and all_seeds != list(range(first_seed, first_seed + len(all_seeds)))
+    ):
         raise ValueError("dataset split seeds must be disjoint and contiguous")
     return manifest
 
@@ -428,7 +436,12 @@ def _prepare_dataset(args: argparse.Namespace) -> None:
         "generator_provenance": _split_generator_provenance(),
         "seed": args.seed,
         "max_steps": args.max_steps,
-        "split_seed_contract": "disjoint_contiguous_seeds",
+        "split_seed_contract": (
+            "explicit_validation_seed_range"
+            if raw_config.get("dataset_generation", {}).get("validation_seed_start")
+            is not None
+            else "disjoint_contiguous_seeds"
+        ),
         "training_config_sha256": config_sha256,
         "reward_config": asdict(reward_config),
         "recipe_contract": contract,
@@ -436,17 +449,26 @@ def _prepare_dataset(args: argparse.Namespace) -> None:
         "audit_anchor_contract": anchor_contract,
         "splits": {},
     }
-    next_seed = args.seed
+    validation_seed_start = generation.validation_seed_start
     for split, count in (
         ("train", args.train_episodes),
         ("validation", args.validation_episodes),
     ):
+        split_seed_start = (
+            args.seed
+            if split == "train"
+            else (
+                validation_seed_start
+                if validation_seed_start is not None
+                else args.seed + args.train_episodes
+            )
+        )
         rows = [
             next(
                 generate_episode_rows(
                     1,
                     split=split,
-                    seed=next_seed + index,
+                    seed=split_seed_start + index,
                     max_steps=args.max_steps,
                     ghost_mode=environment.ghost_mode,
                     action_protocol=protocol,
@@ -454,7 +476,6 @@ def _prepare_dataset(args: argparse.Namespace) -> None:
             )
             for index in range(count)
         ]
-        next_seed += count
         for row in rows:
             row["recipe_contract_sha256"] = manifest["recipe_contract_sha256"]
             row["audit_anchor"] = collect_initial_audit_anchor(

@@ -142,7 +142,7 @@ CUDA_VISIBLE_DEVICES='' "$PYTHON" -m pytest -q
 | 配置                                                      | 初始化模型                  | 默认完整训练            |
 | --------------------------------------------------------- | --------------------------- | ----------------------- |
 | [curriculum1.yaml](configs/level1/train/curriculum1.yaml) | `Qwen/Qwen3.5-9B`           | 100 次 optimizer update |
-| [curriculum2.yaml](configs/level1/train/curriculum2.yaml) | `Qwen/Qwen3.5-9B`           | 20 次 optimizer update  |
+| [curriculum2.yaml](configs/level1/train/curriculum2.yaml) | `Qwen/Qwen3.5-9B`           | 50 次 optimizer update  |
 
 两阶段使用相同关卡、画面尺寸及共同观察字段，但动作协议、实际 prompt 与训练目标不同：
 
@@ -169,7 +169,7 @@ C1 聚焦无幽灵导航与吃豆，C2 学习正常幽灵下的 Edward option �
 启动器从 YAML 读取数据规模与步数；环境模式同时写入 dataset、run manifest 和每个原子帧，规则 hash 按模式区分。配置与数据不匹配时拒绝训练。
 当前 dataset、split bundle 与 audit 的产物合约标识仍为 v4，但正式 bundle 新增必需的 `recipe_contract`、其 hash、逐行 action/prompt protocol 及三仓源码身份。C1 anchor 仅执行真实一步合法方向、没有 Edward；C2 anchor 保留真实候选。anchor 是环境审计证据，不是模型 rollout 或训练样本。旧 bundle 即使标记 v4 也必须重新生成，不要手补字段、复用旧规则 hash 或覆盖旧数据。CLI 的行数、seed、horizon 覆盖值必须与 YAML 一致；训练拒绝不匹配的 manifest、源码 hash、JSONL/HF 内容及非规范 bundle 路径。
 
-两阶段都使用 `live_state_v3` 观察、`temperature=0.7`、`top_p=1.0`、单 token、thinking disabled；C1 不输出 `S` 或 JSON，C2 不输出方向或 JSON。后续新作业默认关闭训练内 validation：`evaluator.freq_steps/freq_epochs/freq_secs=null`、`eval_before_train=false`；保留 validation 数据及独立权重评估/录像验收。`saver.freq_steps=1` 仍每 update 保存，保存 checkpoint 不等于已评估。此设置不追溯修改正在运行的旧配置；关闭调度不保证框架不初始化 eval worker，也不等于 RAM OOM 已解决。
+两阶段都使用 `live_state_v3` 观察、`temperature=0.7`、`top_p=1.0`、单 token、thinking disabled；C1 不输出 `S` 或 JSON，C2 不输出方向或 JSON。C1 关闭训练内 validation；C2 在训练开始前验证一次，并以 `evaluator.freq_epochs=1` 在每个 epoch 结束后验证一次。`saver.freq_steps=1` 仍每 update 保存，保存 checkpoint 不等于已评估。此设置不追溯修改正在运行的旧配置；启用调度仍不保证框架不初始化 eval worker，也不等于 RAM OOM 已解决。
 
 C1 是无 critic、逐步奖励的 PPO-style 更新：每次方向动作使用自己的 shaped reward，不做 group/advantage normalization，不广播整局回报，不跨游戏步做 GAE；保留原有 loss reduction。`.inf` 只是不截断有限的单步任务奖励，NaN/Inf reward 仍拒绝，JSON metadata 使用字符串 `"inf"`。C2 在同一初始状态的 12 局中先做整局回报归一化，再裁剪到 ±20；每局所有策略决策共享该局任务信号，整局 loss 等权，`option_return` 仅记录审计、不重复累加。两者保留 `ppo_n_minibatches=1`、KL=0.01 和 reference model（初始化跟随 actor），`critic/teacher/adv_norm=null`。
 
@@ -224,7 +224,7 @@ bash scripts/level1/train/run_level1_training.sh
 
 `MODEL_PATH` 必须指向完整的 Qwen3.5-9B base checkpoint，包含模型权重、配置和所需 tokenizer/processor 文件；不能直接指向训练产物根目录或不完整的恢复目录。启动器会离线校验这些文件。
 
-上述检查只是结构预检，不等于完整模型加载或真实图像推理。C2 必须先完成从同一 Qwen base 启动的两次更新 smoke，再从未训练的同一 base 新开正式 20-update run；smoke 权重及 optimizer 状态不得继承到正式 run，也不能冒充最终 agent。
+上述检查只是结构预检，不等于完整模型加载或真实图像推理。C2 必须先完成从同一 Qwen base 启动的两次更新 smoke，再从未训练的同一 base 新开正式 50-update run；smoke 权重及 optimizer 状态不得继承到正式 run，也不能冒充最终 agent。
 
 Curriculum 2 从 Qwen base 独立初始化模型、optimizer 和 scheduler。两份配置首次运行均为 `recover.mode: disabled`。
 注意：在当前 AReaL 中，`disabled` 同时禁止保存恢复状态；中断后才改为 `auto`，无法补回之前未保存的 optimizer/dataloader 状态。

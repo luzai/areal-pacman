@@ -33,6 +33,11 @@ from .config import PacmanEnvSpec
 from .ghost_modes import validate_ghost_mode, validate_ghost_state
 
 
+def normalize_episode_life_mode(mode: str) -> str:
+    """Normalize legacy alias names to canonical episode life modes."""
+    return "original_three_lives" if mode == "three_lives" else mode
+
+
 RULESET_CONTRACT = {
     "action_logic_frames": 16,
     "actor_roles": ["pacman", "ghost", "vulnerable", "eyes"],
@@ -153,6 +158,7 @@ class PygamePacmanEnvConfig:
     worker_base_dir: str | os.PathLike[str] | None = None
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "episode_life_mode", normalize_episode_life_mode(self.episode_life_mode))
         try:
             validate_ghost_mode(self.ghost_mode)
         except ValueError as exc:

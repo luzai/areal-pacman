@@ -29,9 +29,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--episode-life-mode",
         required=True,
-        choices=("single_death", "original_three_lives"),
+        choices=("single_death", "original_three_lives", "three_lives"),
     )
     return parser.parse_args()
+
+
+def _normalize_episode_life_mode(mode: str) -> str:
+    return "original_three_lives" if mode == "three_lives" else mode
 
 
 class _PygameBridge:
@@ -636,7 +640,10 @@ def main() -> int:
     pygame.time.Clock = _FastClock
 
     bridge = _PygameBridge(
-        pygame, protocol_output, args.ghost_mode, args.episode_life_mode
+        pygame,
+        protocol_output,
+        args.ghost_mode,
+        _normalize_episode_life_mode(args.episode_life_mode),
     )
     bridge.start()
     try:

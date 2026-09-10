@@ -34,9 +34,10 @@ ${WORKSPACE_ROOT}/pacman-python
 | Prompt version | `live-state-direct-action-v3` | `edward-option-code-v1` |
 | Objective / normalization / clip | `step_local_raw_v1` / none / `.inf` | `episode_return_group_v1` / group-12 mean/sample std / 20 |
 
-Both stages use 512 underlying steps, 80/4 train/validation rows, seeds
-28–107/108–111, batch 4, 12 samples and 5 epochs = 100 updates. Training RNG
-seed 1 is separate. Learning rate is 5e-7 and shaping alpha is 0.1. Both retain
+Both stages use 512 underlying steps, batch 4, and 12 samples. C1 uses 80/4
+train/validation rows, seeds 28–107/108–111, and 5 epochs = 100 updates; C2 uses
+40/4 rows, seeds 28–67/68–71, and 5 epochs = 50 updates. Training RNG seed 1 is
+separate. Learning rate is 5e-7 and shaping alpha is 0.1. Both retain
 KL 0.01 with a reference model, `ppo_n_minibatches=1`, no critic/teacher, and no
 advantage normalization. Seeds are not new maps or a guarantee of task diversity.
 

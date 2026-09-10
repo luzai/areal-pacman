@@ -1,30 +1,33 @@
 recipe_version: maapacman-level1-ghostdoor-v3
-artifact_root: artifacts/runs/generated/curriculum2-step512-40seed-v1
+artifact_root: artifacts/runs/generated/curriculum2-step512-overfit4seed-v1
 trajectory_dir: ${artifact_root}/trajectories
 experiment_name: pacman-agentic-rl
-trial_name: curriculum2-qwen3p5-base-three-lives-step512-50update
+trial_name: curriculum2-qwen3p5-base-three-lives-step512-overfit4seed-20update
 
 environment:
   ghost_mode: normal
   max_steps: 512
   episode_life_mode: original_three_lives
 dataset_generation:
-  train_episodes: 40
-  validation_episodes: 4
+  train_episodes: 4
+  # Evaluate the four memorized seeds (28-31) together with four held-out
+  # seeds (32-35), so this small run exposes both fit and local generalization.
+  validation_episodes: 8
   seed: 28
+  validation_seed_start: 28
 
 planner_audit:
   max_steps: 512
 
-# Training RNG; dataset_generation.seed separately fixes rows 28-71.
+# Training RNG; training uses seeds 28-31 and validation uses seeds 28-35.
 seed: 1
 # Curriculum 2: cold-start directly from the Qwen3.5-9B base model with a fresh
 # optimizer/scheduler lineage. recover.mode handles interruption recovery only
 # inside this run.
-# - moving ghosts; 40 train rows / batch size 4 = 10 updates per epoch
-# - 5 epochs = 50 total updates
+# - moving ghosts; 4 fixed train rows / batch size 4 = 1 update per epoch
+# - 20 epochs = 20 total updates
 # - both train and validation dataset rows use 512 environment steps
-# - validate once before training and after each completed epoch
+# - validate once before training and after every 5 completed epochs
 # - training samples at temperature=0.7, top_p=1.0
 # - explicit +1 normal-pellet, +1 power-pellet, and +50 completion rewards
 # - fixed 0.05 penalty per executed environment step
@@ -42,7 +45,7 @@ reward_objective_contract: episode_return_group_v1
 image_prompt_style: live_state_v3
 prompt_version: edward-option-code-v1
 action_protocol: edward-option-code-v1
-total_train_epochs: 5
+total_train_epochs: 20
 total_train_steps: null
 tokenizer_path: ${actor.path}
 workflow: areal_pacman.workflow.PacmanNativeVisionWorkflow
@@ -234,7 +237,7 @@ train_dataset:
   shuffle: true
   pin_memory: true
   num_workers: 0
-  path: artifacts/datasets/curriculum2-step512-40seed-v1/train_hf
+  path: artifacts/datasets/curriculum2-step512-overfit4seed-v1/train_hf
   type: rl
   max_length: 1024
 
@@ -243,7 +246,7 @@ valid_dataset:
   shuffle: false
   pin_memory: true
   num_workers: 0
-  path: artifacts/datasets/curriculum2-step512-40seed-v1/validation_hf
+  path: artifacts/datasets/curriculum2-step512-overfit4seed-v1/validation_hf
   type: rl
   max_length: 1024
 
@@ -275,7 +278,7 @@ evaluator:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
-  freq_epochs: 1
+  freq_epochs: 5
   freq_steps: null
   freq_secs: null
   eval_before_train: true

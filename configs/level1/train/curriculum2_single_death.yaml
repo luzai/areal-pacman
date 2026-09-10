@@ -1,13 +1,13 @@
 recipe_version: maapacman-level1-ghostdoor-v3
-artifact_root: artifacts/runs/generated/curriculum2-step512-40seed-v1
+artifact_root: artifacts/runs/generated/curriculum2-single-death-step512-40seed-v1
 trajectory_dir: ${artifact_root}/trajectories
 experiment_name: pacman-agentic-rl
-trial_name: curriculum2-qwen3p5-base-three-lives-step512-50update
+trial_name: curriculum2-qwen3p5-base-single-death-step512-50update
 
 environment:
   ghost_mode: normal
   max_steps: 512
-  episode_life_mode: original_three_lives
+  episode_life_mode: single_death
 dataset_generation:
   train_episodes: 40
   validation_episodes: 4
@@ -234,7 +234,7 @@ train_dataset:
   shuffle: true
   pin_memory: true
   num_workers: 0
-  path: artifacts/datasets/curriculum2-step512-40seed-v1/train_hf
+  path: artifacts/datasets/curriculum2-single-death-step512-40seed-v1/train_hf
   type: rl
   max_length: 1024
 
@@ -243,7 +243,7 @@ valid_dataset:
   shuffle: false
   pin_memory: true
   num_workers: 0
-  path: artifacts/datasets/curriculum2-step512-40seed-v1/validation_hf
+  path: artifacts/datasets/curriculum2-single-death-step512-40seed-v1/validation_hf
   type: rl
   max_length: 1024
 

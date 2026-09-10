@@ -122,14 +122,33 @@ def test_formal_stages_have_explicit_distinct_settings():
     assert second["action_protocol"] == "edward-option-code-v1"
     assert second["edward_options"] is True
     assert second["reward_objective_contract"] == "episode_return_group_v1"
-    for config in (first, second):
+    for config, expected_train_rows, expected_updates in (
+        (first, 80, 100),
+        (second, 40, 50),
+    ):
         assert config["recover"]["mode"] == "disabled"
-        assert config["dataset_generation"] == {"train_episodes": 80, "validation_episodes": 4, "seed": 28}
+        assert config["dataset_generation"] == {
+            "train_episodes": expected_train_rows,
+            "validation_episodes": 4,
+            "seed": 28,
+        }
         assert config["saver"]["freq_steps"] == 1
-        assert all(config["evaluator"][key] is None
-                   for key in ("freq_steps", "freq_epochs", "freq_secs"))
-        assert config["evaluator"]["eval_before_train"] is False
-        expected_updates = 100 if config is first else 20
+        if config is first:
+            assert all(
+                config["evaluator"][key] is None
+                for key in ("freq_steps", "freq_epochs", "freq_secs")
+            )
+            assert config["evaluator"]["eval_before_train"] is False
+        else:
+            assert config["evaluator"] == {
+                "experiment_name": "${experiment_name}",
+                "trial_name": "${trial_name}",
+                "fileroot": "${cluster.fileroot}",
+                "freq_epochs": 1,
+                "freq_steps": None,
+                "freq_secs": None,
+                "eval_before_train": True,
+            }
         assert (
             config["dataset_generation"]["train_episodes"]
             // config["train_dataset"]["batch_size"]

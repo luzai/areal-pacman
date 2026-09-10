@@ -250,10 +250,19 @@ def _validate_release_stage_contract(
             raise ValueError(f"release two-stage recipe requires {message}")
 
     require(int(config.environment.max_steps) == 512, "environment.max_steps=512")
-    require(int(config.dataset_generation.train_episodes) == 80, "80 train rows")
+    is_c2_overfit = (
+        protocol == EDWARD_OPTION_PROTOCOL
+        and int(config.dataset_generation.train_episodes) == 4
+    )
+    expected_train_rows = 80 if protocol == DIRECT_ACTION_PROTOCOL else (4 if is_c2_overfit else 40)
     require(
-        int(config.dataset_generation.validation_episodes) == 4,
-        "4 validation rows",
+        int(config.dataset_generation.train_episodes) == expected_train_rows,
+        f"{expected_train_rows} train rows",
+    )
+    expected_validation_rows = 8 if is_c2_overfit else 4
+    require(
+        int(config.dataset_generation.validation_episodes) == expected_validation_rows,
+        f"{expected_validation_rows} validation rows",
     )
     require(int(config.dataset_generation.seed) == 28, "dataset seed 28")
     require(int(config.train_dataset.batch_size) == 4, "train batch_size=4")
@@ -264,8 +273,8 @@ def _validate_release_stage_contract(
     require(int(config.cluster.n_gpus_per_node) == 8, "8 GPUs")
     require(config.rollout.backend == "vllm:d4p1t1", "4 rollout GPUs")
     require(config.actor.backend == "fsdp:d4p1t1", "4 actor GPUs")
-    expected_epochs = 5 if protocol == DIRECT_ACTION_PROTOCOL else 1
-    expected_updates = 100 if protocol == DIRECT_ACTION_PROTOCOL else 20
+    expected_epochs = 20 if is_c2_overfit else 5
+    expected_updates = 100 if protocol == DIRECT_ACTION_PROTOCOL else (20 if is_c2_overfit else 50)
     require(
         int(config.total_train_epochs) == expected_epochs,
         f"{expected_epochs} formal training epochs",
@@ -277,7 +286,9 @@ def _validate_release_stage_contract(
         "total_train_steps=null unless explicitly set by --smoke-updates",
     )
     require(
-        80 // int(config.train_dataset.batch_size) * int(config.total_train_epochs)
+        expected_train_rows
+        // int(config.train_dataset.batch_size)
+        * int(config.total_train_epochs)
         == expected_updates,
         f"a {expected_updates}-update full budget",
     )
@@ -308,12 +319,28 @@ def _validate_release_stage_contract(
     require(getattr(config, "critic", None) is None, "critic=null")
     require(getattr(config, "teacher", None) is None, "teacher=null")
     require(config.saver.freq_steps == 1, "saver.freq_steps=1")
-    require(
-        all(getattr(config.evaluator, field) is None
-            for field in ("freq_steps", "freq_epochs", "freq_secs"))
-        and config.evaluator.eval_before_train is False,
-        "evaluator frequencies=null and eval_before_train=false (validation disabled)",
-    )
+    if protocol == DIRECT_ACTION_PROTOCOL:
+        require(
+            all(
+                getattr(config.evaluator, field) is None
+                for field in ("freq_steps", "freq_epochs", "freq_secs")
+            )
+            and config.evaluator.eval_before_train is False,
+            "C1 validation disabled",
+        )
+    else:
+        if is_c2_overfit:
+            require(
+                config.dataset_generation.validation_seed_start == 28,
+                "C2 overfit validation_seed_start=28",
+            )
+        require(
+            config.evaluator.freq_epochs == (5 if is_c2_overfit else 1)
+            and config.evaluator.freq_steps is None
+            and config.evaluator.freq_secs is None
+            and config.evaluator.eval_before_train is True,
+            "C2 validation before training and at the configured epoch interval",
+        )
     require(str(config.recover.mode) == "disabled", "recover.mode=disabled")
     require(config.gconfig.min_new_tokens == 1, "one-token train decoding")
     require(config.gconfig.max_new_tokens == 1, "one-token train decoding")
@@ -375,8 +402,9 @@ def _validate_release_stage_contract(
     else:
         require(config.environment.ghost_mode == "normal", "C2 ghost_mode=normal")
         require(
-            config.environment.episode_life_mode == "original_three_lives",
-            "C2 original three-lives episode mode",
+            config.environment.episode_life_mode
+            in {"single_death", "original_three_lives", "three_lives"},
+            "C2 episode_life_mode must be single_death, original_three_lives, or three_lives",
         )
         require(config.prompt_version == EDWARD_PROMPT_VERSION, "the C2 prompt version")
         require(config.reward_objective_contract == "episode_return_group_v1", "C2 episode-return group rewards")

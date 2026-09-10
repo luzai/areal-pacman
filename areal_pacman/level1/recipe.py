@@ -12,6 +12,11 @@ import yaml
 from maapacman.env.ghost_modes import validate_ghost_mode
 
 
+def normalize_episode_life_mode(mode: str) -> str:
+    """Normalize legacy alias names to canonical episode life modes."""
+    return "original_three_lives" if mode == "three_lives" else mode
+
+
 DIRECT_ACTION_PROTOCOL = "direct-open-action-token-v1"
 EDWARD_OPTION_PROTOCOL = "edward-option-code-v1"
 DIRECT_PROMPT_VERSION = "live-state-direct-action-v3"
@@ -102,6 +107,11 @@ def recipe_contract_metadata(raw: Mapping[str, Any]) -> dict[str, Any]:
     dataset_seed = int(generation.get("seed", 0))
     train_rows = int(generation.get("train_episodes", 0))
     validation_rows = int(generation.get("validation_episodes", 0))
+    validation_seed_start = generation.get("validation_seed_start")
+    if validation_seed_start is None:
+        validation_seed_start = dataset_seed + train_rows
+    else:
+        validation_seed_start = int(validation_seed_start)
     train_batch = int((raw.get("train_dataset") or {}).get("batch_size", 0))
     return {
         "ghost_mode": environment.get("ghost_mode"),
@@ -136,14 +146,12 @@ def recipe_contract_metadata(raw: Mapping[str, Any]) -> dict[str, Any]:
         "data": {
             "training_rng_seed": raw.get("seed"),
             "dataset_seed": dataset_seed,
+            "validation_seed_start": generation.get("validation_seed_start"),
             "train_rows": train_rows,
             "validation_rows": validation_rows,
             "train_seeds": list(range(dataset_seed, dataset_seed + train_rows)),
             "validation_seeds": list(
-                range(
-                    dataset_seed + train_rows,
-                    dataset_seed + train_rows + validation_rows,
-                )
+                range(validation_seed_start, validation_seed_start + validation_rows)
             ),
             "environment_steps_per_episode": environment.get("max_steps"),
             "train_batch_size": train_batch,
@@ -175,6 +183,7 @@ class EnvironmentConfig:
     episode_life_mode: str = "single_death"
 
     def __post_init__(self):
+        self.episode_life_mode = normalize_episode_life_mode(self.episode_life_mode)
         validate_ghost_mode(self.ghost_mode)
         if self.episode_life_mode not in {
             "single_death",
@@ -198,6 +207,7 @@ class DatasetGenerationConfig:
     train_episodes: int = 8
     validation_episodes: int = 2
     seed: int = 0
+    validation_seed_start: int | None = None
 
     def __post_init__(self):
         for name in ("train_episodes", "validation_episodes"):
@@ -207,6 +217,16 @@ class DatasetGenerationConfig:
                 )
         if type(self.seed) is not int or self.seed < 0:
             raise ValueError("dataset_generation.seed must be a non-negative integer")
+        if (
+            self.validation_seed_start is not None
+            and (
+                type(self.validation_seed_start) is not int
+                or self.validation_seed_start < 0
+            )
+        ):
+            raise ValueError(
+                "dataset_generation.validation_seed_start must be a non-negative integer or null"
+            )
 
 
 @dataclass

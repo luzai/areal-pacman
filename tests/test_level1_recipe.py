@@ -928,13 +928,13 @@ class RewardAndTrajectoryTests(unittest.TestCase):
         self.assertIn("\n  offload: true", "\n" + ref_section)
         self.assertNotIn("revisit_penalty:", config)
 
-    def test_only_two_formal_curriculum_recipes_are_published(self) -> None:
+    def test_training_recipes_include_the_c2_overfit_recipe(self) -> None:
         train_dir = (
             Path(__file__).parents[1] / "configs" / "level1" / "train"
         )
         self.assertEqual(
             sorted(path.name for path in train_dir.glob("*.yaml")),
-            ["curriculum1.yaml", "curriculum2.yaml"],
+            ["curriculum1.yaml", "curriculum2.yaml", "curriculum2_overfit.yaml"],
         )
 
     def test_curriculum2_cold_starts_from_qwen_base(self) -> None:
@@ -946,14 +946,14 @@ class RewardAndTrajectoryTests(unittest.TestCase):
             / "curriculum2.yaml"
         ).read_text(encoding="utf-8")
         for expected in (
-            "total_train_epochs: 1",
+            "total_train_epochs: 5",
             "total_train_steps: null",
             "path: Qwen/Qwen3.5-9B",
             "tokenizer_path: ${actor.path}",
             "model: ${actor.path}",
             "reward_objective_contract: episode_return_group_v1",
-            "artifacts/datasets/curriculum2-step512-v1/train_hf",
-            "artifacts/datasets/curriculum2-step512-v1/validation_hf",
+            "artifacts/datasets/curriculum2-step512-40seed-v1/train_hf",
+            "artifacts/datasets/curriculum2-step512-40seed-v1/validation_hf",
             "ghost_mode: normal",
             "episode_life_mode: original_three_lives",
             "mode: disabled",
