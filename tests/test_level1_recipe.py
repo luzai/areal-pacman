@@ -60,7 +60,10 @@ from areal_pacman.prompts import (
 )
 from areal_pacman.rewards import RewardConfig, audit_reward, shape_reward
 from areal_pacman.trajectories import audit_trajectory, summarize_episodes
-from areal_pacman.level1.token_constraints import ObjectiveTokenConstraint
+from areal_pacman.level1.token_constraints import (
+    ObjectiveParseError,
+    ObjectiveTokenConstraint,
+)
 from areal_pacman.level1.workflow import (
     _nearest_reachable_distance_with_diagnostics,
     _normal_pellet_event_position,
@@ -1327,6 +1330,174 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertEqual(sample["rollout_episode_ids"].tolist(), [1234])
         self.assertNotIn("rollout_episode_returns", sample)
         self.assertNotIn("rollout_episode_group_sizes", sample)
+
+    @staticmethod
+    def _fake_objective_call_model_fixture():
+        """Shared scaffolding for the mask-leak retry tests below."""
+
+        class FakeTokenizer:
+            def encode(self, token, **kwargs):
+                return [ord(token)]
+
+            def decode(self, token_ids, **kwargs):
+                return "".join(chr(int(item)) for item in token_ids)
+
+        class FakeGConfig:
+            n_samples = 12
+
+            def new(self, **kwargs):
+                self.last_kwargs = kwargs
+                return self
+
+        class FakeModelRequest(SimpleNamespace):
+            pass
+
+        tokenizer = FakeTokenizer()
+        constraint = ObjectiveTokenConstraint.build(tokenizer, ["C0", "A0"])
+        return tokenizer, constraint, FakeGConfig, FakeModelRequest
+
+    def test_call_model_retries_transient_mask_leak_then_succeeds(self) -> None:
+        (
+            tokenizer,
+            constraint,
+            FakeGConfig,
+            FakeModelRequest,
+        ) = self._fake_objective_call_model_fixture()
+        allowed = constraint.allowed_token_ids
+        leaked_token = max(allowed) + 1000
+
+        def make_response(token_id):
+            return SimpleNamespace(
+                input_tokens=[10, 11],
+                output_tokens=[token_id],
+                output_logprobs=[-0.1],
+                output_versions=[1],
+                input_len=2,
+                output_len=1,
+                stop_reason="stop",
+            )
+
+        class FakeEngine:
+            def __init__(self, responses):
+                self.responses = list(responses)
+                self.calls = 0
+
+            async def agenerate(self, request):
+                response = self.responses[self.calls]
+                self.calls += 1
+                return response
+
+        engine = FakeEngine([make_response(leaked_token), make_response(allowed[0])])
+
+        processor = self._fake_native_processor()
+        workflow = PacmanNativeVisionWorkflow(
+            gconfig=FakeGConfig(),
+            tokenizer=tokenizer,
+            processor=processor,
+            env_factory=OneStepEnv,
+            enable_thinking=False,
+            image_prompt_style="minimal_v1",
+        )
+        workflow._native_engine.set(engine)
+        workflow._native_turns.set({})
+
+        fake_areal_api = SimpleNamespace(ModelRequest=FakeModelRequest)
+        fake_areal_image = SimpleNamespace(
+            image2base64=lambda image: ["encoded-image"]
+        )
+        messages = build_image_messages(
+            encode_png(np.zeros((4, 4, 3), dtype=np.uint8))
+        )
+
+        with patch.dict(
+            sys.modules,
+            {
+                "areal.api": fake_areal_api,
+                "areal.utils.image": fake_areal_image,
+            },
+        ), self.assertLogs(
+            "areal_pacman.level1.workflow", level="WARNING"
+        ) as logs:
+            turn = asyncio.run(
+                workflow._call_model(
+                    messages, objective_constraint=constraint
+                )
+            )
+
+        self.assertEqual(engine.calls, 2)
+        self.assertTrue(
+            any("MASK_LEAK_RETRY" in message for message in logs.output)
+        )
+        self.assertEqual(turn.completion, chr(allowed[0]))
+
+    def test_call_model_raises_after_exhausting_mask_leak_retries(self) -> None:
+        (
+            tokenizer,
+            constraint,
+            FakeGConfig,
+            FakeModelRequest,
+        ) = self._fake_objective_call_model_fixture()
+        leaked_token = max(constraint.allowed_token_ids) + 1000
+
+        def make_response(token_id):
+            return SimpleNamespace(
+                input_tokens=[10, 11],
+                output_tokens=[token_id],
+                output_logprobs=[-0.1],
+                output_versions=[1],
+                input_len=2,
+                output_len=1,
+                stop_reason="stop",
+            )
+
+        class FakeEngine:
+            def __init__(self):
+                self.calls = 0
+
+            async def agenerate(self, request):
+                self.calls += 1
+                return make_response(leaked_token)
+
+        engine = FakeEngine()
+
+        processor = self._fake_native_processor()
+        workflow = PacmanNativeVisionWorkflow(
+            gconfig=FakeGConfig(),
+            tokenizer=tokenizer,
+            processor=processor,
+            env_factory=OneStepEnv,
+            enable_thinking=False,
+            image_prompt_style="minimal_v1",
+        )
+        workflow._native_engine.set(engine)
+        workflow._native_turns.set({})
+
+        fake_areal_api = SimpleNamespace(ModelRequest=FakeModelRequest)
+        fake_areal_image = SimpleNamespace(
+            image2base64=lambda image: ["encoded-image"]
+        )
+        messages = build_image_messages(
+            encode_png(np.zeros((4, 4, 3), dtype=np.uint8))
+        )
+
+        with patch.dict(
+            sys.modules,
+            {
+                "areal.api": fake_areal_api,
+                "areal.utils.image": fake_areal_image,
+            },
+        ), self.assertLogs(
+            "areal_pacman.level1.workflow", level="WARNING"
+        ), self.assertRaises(ObjectiveParseError):
+            asyncio.run(
+                workflow._call_model(
+                    messages, objective_constraint=constraint
+                )
+            )
+
+        from areal_pacman.level1.workflow import _MASK_LEAK_RETRY_ATTEMPTS
+
+        self.assertEqual(engine.calls, _MASK_LEAK_RETRY_ATTEMPTS)
 
     def test_workflow_defaults_to_thinking_disabled_and_rejects_true(self) -> None:
         captured = {}

@@ -69,6 +69,18 @@ ACTION_MASK_BIT = {
 OPPOSITE_ACTION = {"U": "D", "D": "U", "L": "R", "R": "L"}
 LOGGER = logging.getLogger(__name__)
 
+# vLLM (observed on 0.22.1) occasionally drops the `allowed_token_ids`
+# sampling mask for a single request under high concurrency + multimodal
+# input, most often when the allowed set contains a byte-fallback BPE token
+# that only decodes to a valid character together with a sibling token
+# (decodes alone to U+FFFD). The request then samples unconstrained and
+# returns a token outside the allowed set, which previously always failed
+# the whole episode as a contract violation. Retrying the same decision with
+# a fresh request id almost always recovers a compliant sample, since the
+# underlying failure is a transient serving-layer glitch, not a policy or
+# prompt problem. 3 = 1 initial attempt + 2 retries.
+_MASK_LEAK_RETRY_ATTEMPTS = 3
+
 
 def _compact_edward_decision_prompt(
     state_context: Mapping[str, Any],
@@ -1738,7 +1750,6 @@ class PacmanNativeVisionWorkflow(PacmanImageOnlyWorkflow, RolloutWorkflow):
         image, chat_messages, processed, input_ids = self._process_messages(
             messages
         )
-        request_id = uuid.uuid4().hex
         objective_constraint = options.get("objective_constraint")
         if objective_constraint is not None and not isinstance(
             objective_constraint, ObjectiveTokenConstraint
@@ -1765,79 +1776,100 @@ class PacmanNativeVisionWorkflow(PacmanImageOnlyWorkflow, RolloutWorkflow):
         else:
             allowed_token_ids = []
             current_open_actions = []
-        request = ModelRequest(
-            rid=request_id,
-            input_ids=input_ids,
-            image_data=native_image_data(messages, image),
-            vision_msg_vllm=[self._vllm_messages(messages)],
-            gconfig=self.gconfig.new(
-                n_samples=1,
-                min_new_tokens=(
-                    1
-                    if (
-                        objective_constraint is not None
-                        or options.get("single_step")
-                        or self.open_action_mask
-                    )
-                    else getattr(self.gconfig, "min_new_tokens", 0)
-                ),
-                max_new_tokens=(
-                    objective_constraint.max_new_tokens
-                    if objective_constraint is not None
-                    else (
+
+        for attempt in range(1, _MASK_LEAK_RETRY_ATTEMPTS + 1):
+            request_id = uuid.uuid4().hex
+            request = ModelRequest(
+                rid=request_id,
+                input_ids=input_ids,
+                image_data=native_image_data(messages, image),
+                vision_msg_vllm=[self._vllm_messages(messages)],
+                gconfig=self.gconfig.new(
+                    n_samples=1,
+                    min_new_tokens=(
                         1
-                        if options.get("single_step") or self.open_action_mask
-                        else getattr(self.gconfig, "max_new_tokens", 3)
-                    )
+                        if (
+                            objective_constraint is not None
+                            or options.get("single_step")
+                            or self.open_action_mask
+                        )
+                        else getattr(self.gconfig, "min_new_tokens", 0)
+                    ),
+                    max_new_tokens=(
+                        objective_constraint.max_new_tokens
+                        if objective_constraint is not None
+                        else (
+                            1
+                            if options.get("single_step") or self.open_action_mask
+                            else getattr(self.gconfig, "max_new_tokens", 3)
+                        )
+                    ),
                 ),
-            ),
-            tokenizer=self.tokenizer,
-            processor=self.processor,
-            metadata={
-                "chat_template_kwargs": {"enable_thinking": False},
-                **(
-                    {"allowed_token_ids": allowed_token_ids}
-                    if allowed_token_ids
-                    else {}
-                ),
-            },
-        )
-        self._validate_native_token_budget(input_ids, request.gconfig)
-        response = await engine.agenerate(request)
-        if response.input_tokens != input_ids:
-            raise RuntimeError(
-                "rollout input tokens differ from processor input_ids"
+                tokenizer=self.tokenizer,
+                processor=self.processor,
+                metadata={
+                    "chat_template_kwargs": {"enable_thinking": False},
+                    **(
+                        {"allowed_token_ids": allowed_token_ids}
+                        if allowed_token_ids
+                        else {}
+                    ),
+                },
             )
-        if (
-            len(response.output_tokens)
-            != len(response.output_logprobs)
-            or len(response.output_tokens) != len(response.output_versions)
-        ):
-            raise RuntimeError("incomplete native rollout token metadata")
-        option_token_ledger: list[list[int]] = []
-        if objective_constraint is not None:
-            token_option = objective_constraint.option_for_tokens(
-                response.output_tokens
-            )
-            decoded_option = objective_constraint.option_for_completion(
-                self.tokenizer.decode(
-                    response.output_tokens, skip_special_tokens=True
-                )
-            )
-            if token_option != decoded_option:
+            self._validate_native_token_budget(input_ids, request.gconfig)
+            response = await engine.agenerate(request)
+            if response.input_tokens != input_ids:
                 raise RuntimeError(
-                    "objective token sequence and decoded option code disagree"
+                    "rollout input tokens differ from processor input_ids"
                 )
-            option_token_ledger = objective_constraint.support_ledger(
-                response.output_tokens
-            )
-        elif allowed_token_ids and (
-            len(response.output_tokens) != 1
-            or response.output_tokens[0] not in allowed_token_ids
-        ):
-            raise RuntimeError(
-                "native action token is absent from the exact rollout support"
-            )
+            if (
+                len(response.output_tokens)
+                != len(response.output_logprobs)
+                or len(response.output_tokens) != len(response.output_versions)
+            ):
+                raise RuntimeError("incomplete native rollout token metadata")
+            option_token_ledger: list[list[int]] = []
+            try:
+                if objective_constraint is not None:
+                    token_option = objective_constraint.option_for_tokens(
+                        response.output_tokens
+                    )
+                    decoded_option = objective_constraint.option_for_completion(
+                        self.tokenizer.decode(
+                            response.output_tokens, skip_special_tokens=True
+                        )
+                    )
+                    if token_option != decoded_option:
+                        raise RuntimeError(
+                            "objective token sequence and decoded option code disagree"
+                        )
+                    option_token_ledger = objective_constraint.support_ledger(
+                        response.output_tokens
+                    )
+                elif allowed_token_ids and (
+                    len(response.output_tokens) != 1
+                    or response.output_tokens[0] not in allowed_token_ids
+                ):
+                    raise RuntimeError(
+                        "native action token is absent from the exact rollout support"
+                    )
+            except (ObjectiveParseError, RuntimeError) as exc:
+                if attempt >= _MASK_LEAK_RETRY_ATTEMPTS:
+                    raise
+                LOGGER.warning(
+                    "MASK_LEAK_RETRY attempt=%d/%d request_id=%s "
+                    "output_tokens=%s allowed_token_ids=%s: %s "
+                    "(suspected vLLM allowed_token_ids mask drop; resampling "
+                    "this decision with a fresh request id)",
+                    attempt,
+                    _MASK_LEAK_RETRY_ATTEMPTS,
+                    request_id,
+                    response.output_tokens,
+                    allowed_token_ids,
+                    exc,
+                )
+                continue
+            break
         native_turns[request_id] = (
             processed,
             response,
