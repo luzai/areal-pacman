@@ -1,0 +1,40 @@
+--- a/vllm/v1/worker/gpu_input_batch.py	2026-09-13 01:14:04.102417514 +0800
++++ b/vllm/v1/worker/gpu_input_batch.py	2026-09-13 01:14:04.134417512 +0800
+@@ -667,13 +667,19 @@
+         swap_dict_values(self.bad_words_token_ids, i1, i2)
+ 
+         if self.allowed_token_ids_mask_cpu_tensor is not None:
+-            (
+-                self.allowed_token_ids_mask_cpu_tensor[i1],
+-                self.allowed_token_ids_mask_cpu_tensor[i2],
+-            ) = (
+-                self.allowed_token_ids_mask_cpu_tensor[i2],
+-                self.allowed_token_ids_mask_cpu_tensor[i1],
++            # `t[i]` on a 2-D tensor is a VIEW, not a scalar copy, so the
++            # tuple-swap idiom used for the 1-D numpy arrays above silently
++            # fails here: the first assignment overwrites row i1, then the
++            # second assignment reads that already-overwritten row back, so
++            # both rows end up holding row i2's mask and row i1's mask is
++            # lost. A request whose row was i1 then samples with the wrong
++            # constraint (or, when i2 was unconstrained, with no constraint
++            # at all) and can emit tokens outside its allowed_token_ids.
++            i1_mask = self.allowed_token_ids_mask_cpu_tensor[i1].clone()
++            self.allowed_token_ids_mask_cpu_tensor[i1].copy_(
++                self.allowed_token_ids_mask_cpu_tensor[i2]
+             )
++            self.allowed_token_ids_mask_cpu_tensor[i2].copy_(i1_mask)
+ 
+     def _get_active_token_count(self, req_index: int) -> int:
+         return int(self.num_tokens_no_spec[req_index]) + len(
+@@ -795,6 +801,11 @@
+                 self.allowed_token_ids_mask_cpu_tensor[empty_index] = (
+                     self.allowed_token_ids_mask_cpu_tensor[last_req_index]
+                 )
++                # Clear the vacated row. add_request() only writes this mask
++                # for requests that actually set allowed_token_ids, so a
++                # later unconstrained request landing on this index would
++                # otherwise inherit this stale mask and be wrongly restricted.
++                self.allowed_token_ids_mask_cpu_tensor[last_req_index].fill_(False)
+ 
+             bad_words_token_ids = self.bad_words_token_ids.pop(last_req_index, None)
+             if bad_words_token_ids is not None:
