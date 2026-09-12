@@ -2483,6 +2483,76 @@ class TrainerGenerationContractTests(unittest.TestCase):
             trajectory_dir="run_artifacts/trajectories",
         )
 
+    def test_dynamic_filter_is_an_rpc_safe_import_path(self) -> None:
+        """AReaL ships dynamic_filter_fn to rollout workers over JSON RPC.
+
+        A function object is not JSON serializable, so passing a closure makes
+        every rollout submit fail with "Object of type function is not JSON
+        serializable" and the run never completes a single rollout. Only the
+        import-path form survives the hop.
+        """
+        from train_areal import _build_group_reward_degeneracy_filter
+
+        config = self._config()
+        config.gconfig = SimpleNamespace(n_samples=12)
+
+        spec = _build_group_reward_degeneracy_filter(config)
+
+        self.assertIsInstance(
+            spec, str, "dynamic_filter_fn must be an import path, not a callable"
+        )
+        json.dumps(spec)  # must survive the RPC hop
+
+        # The rollout worker resolves it with exactly this helper
+        # (areal/infra/remote_inf_engine.py::_resolve_should_accept_fn).
+        from areal.utils.dynamic_import import import_from_string
+
+        resolved = import_from_string(spec)
+        self.assertTrue(callable(resolved))
+
+    def test_dynamic_filter_disabled_outside_episode_group_contract(self) -> None:
+        from train_areal import _build_group_reward_degeneracy_filter
+
+        config = self._config()
+        config.gconfig = SimpleNamespace(n_samples=12)
+        config.reward_objective_contract = "option_return_raw_v1"
+        self.assertIsNone(_build_group_reward_degeneracy_filter(config))
+
+        config.reward_objective_contract = "episode_return_group_v1"
+        config.gconfig = SimpleNamespace(n_samples=1)
+        self.assertIsNone(_build_group_reward_degeneracy_filter(config))
+
+    def test_degenerate_reward_group_is_rejected(self) -> None:
+        from areal_pacman.level1.dynamic_filter import (
+            accept_non_degenerate_reward_group,
+        )
+
+        # 12 episodes with differing decision-row counts, all the same return,
+        # concatenated the way GroupedRolloutWorkflow does.
+        degenerate = torch.cat(
+            [
+                torch.full((5,), 293.9859375),
+                torch.full((3,), 293.9859375),
+                torch.full((7,), 293.9859375),
+            ]
+        )
+        self.assertFalse(accept_non_degenerate_reward_group({"rewards": degenerate}))
+
+        mixed = torch.cat(
+            [
+                torch.full((5,), 293.9859375),
+                torch.full((3,), 80.358),
+                torch.full((7,), 212.085),
+            ]
+        )
+        self.assertTrue(accept_non_degenerate_reward_group({"rewards": mixed}))
+
+        # Fail open when the field is absent or too small to judge.
+        self.assertTrue(accept_non_degenerate_reward_group({}))
+        self.assertTrue(
+            accept_non_degenerate_reward_group({"rewards": torch.tensor([42.0])})
+        )
+
     def test_train_and_eval_generation_kwargs_are_independent(self) -> None:
         config = self._config()
         train_generation = SimpleNamespace(
