@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import logging
 import math
 import os
 import re
@@ -848,6 +849,58 @@ def _production_dry_run(
     return True
 
 
+_DEGENERATE_GROUP_REWARD_RANGE_EPS = 1e-4
+
+
+def _build_group_reward_degeneracy_filter(config):
+    """Reject a rollout group whose members share one identical episode return.
+
+    Under ``reward_objective_contract=episode_return_group_v1`` the actor's
+    ``reward_norm`` (mean_level=group, std_level=group) already zeroes the
+    advantage of a group whose 12 episodes all return the same
+    ``total_shaped_reward`` (entropy-collapse groups sampling the same
+    trajectory 12/12 times are the common cause). That group still costs a
+    full rollout + logprob-recompute pass for zero gradient signal. Returning
+    False here makes ``prepare_batch`` treat the group as rejected, so it
+    pulls a replacement dataset row (a different seed) from the dataloader
+    instead of training on it.
+
+    Returns None when the contract doesn't use whole-episode group rewards,
+    so the caller can skip passing a filter at all.
+    """
+
+    if getattr(config, "reward_objective_contract", None) != "episode_return_group_v1":
+        return None
+    if int(getattr(config.gconfig, "n_samples", 1)) < 2:
+        return None
+
+    logger = logging.getLogger(__name__)
+
+    def _accept(trajectory: dict) -> bool:
+        import torch
+
+        rewards = trajectory.get("rewards")
+        if not isinstance(rewards, torch.Tensor) or rewards.numel() < 2:
+            return True
+        # max-min range avoids the E[x^2]-E[x]^2 cancellation noise that
+        # torch.std() exhibits even for exactly-identical float32 values
+        # (observed ~3e-5 "std" on a truly constant vector in this reward
+        # scale) — range is exactly 0.0 for identical values in practice.
+        reward_range = float((rewards.max() - rewards.min()).item())
+        degenerate = bool(reward_range <= _DEGENERATE_GROUP_REWARD_RANGE_EPS)
+        if degenerate:
+            logger.warning(
+                "Rejecting degenerate rollout group: all %d option-decision "
+                "rows share total_shaped_reward=%.6f (zero group-relative "
+                "advantage); resampling a replacement dataset row.",
+                int(rewards.numel()),
+                float(rewards[0].item()),
+            )
+        return not degenerate
+
+    return _accept
+
+
 def main(args: list[str]) -> None:
     args, smoke_updates = _apply_smoke_updates(args)
     args, reward_ablation = _parse_reward_ablation(args)
@@ -930,12 +983,15 @@ def main(args: list[str]) -> None:
         config, config.eval_gconfig, training=False
     )
 
+    dynamic_filter_fn = _build_group_reward_degeneracy_filter(config)
+
     with PPOTrainer(config, train_dataset=train_dataset, valid_dataset=valid_dataset) as trainer:
         trainer.train(
             workflow=config.workflow,
             eval_workflow=config.eval_workflow,
             workflow_kwargs=workflow_kwargs,
             eval_workflow_kwargs=eval_workflow_kwargs,
+            dynamic_filter_fn=dynamic_filter_fn,
         )
 
 
