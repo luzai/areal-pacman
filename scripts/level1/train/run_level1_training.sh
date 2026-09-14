@@ -337,6 +337,36 @@ if "edward_options: true" in config_text:
 print("areal_pacman_action_logprobs_patch=ok")
 PY
 fi
+if grep -Eq '^(open_action_mask|edward_options|action_token_choice):[[:space:]]*true' "${CONFIG}"; then
+  # Constrained sampling relies on vLLM's allowed_token_ids mask. vLLM 0.22.1
+  # (and upstream main) swaps that mask between batch slots with the Python
+  # tuple-swap idiom, which is a no-op on 2-D tensor rows, so a reordered
+  # request silently samples with another request's constraint. The failure is
+  # silent -- shapes and dtypes stay valid and vLLM raises nothing -- so a
+  # rebuilt venv that loses the patch would quietly corrupt rollouts instead of
+  # failing. Refuse to launch rather than produce such a run.
+  "${PYTHON}" - <<'PY'
+import inspect
+
+from vllm.v1.worker.gpu_input_batch import InputBatch
+
+swap_source = inspect.getsource(InputBatch.swap_states)
+if "i1_mask" not in swap_source:
+    raise SystemExit(
+        "vLLM is missing patches/vllm_allowed_token_ids_mask_swap.patch: "
+        "InputBatch.swap_states would assign the wrong allowed_token_ids mask "
+        "to a reordered request, silently sampling outside its allowed set"
+    )
+condense_source = inspect.getsource(InputBatch.condense)
+if "allowed_token_ids_mask_cpu_tensor[last_req_index].fill_" not in condense_source:
+    raise SystemExit(
+        "vLLM is missing the condense() half of "
+        "patches/vllm_allowed_token_ids_mask_swap.patch: a vacated batch slot "
+        "keeps a stale mask that a later unconstrained request would inherit"
+    )
+print("vllm_allowed_token_ids_mask_patch=ok")
+PY
+fi
 if [[ -z "${GPU_IDS:-}" ]]; then
   GPU_IDS="$(seq -s, 0 $((CONFIG_GPU_COUNT - 1)))"
 fi
