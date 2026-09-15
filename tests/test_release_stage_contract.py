@@ -32,8 +32,17 @@ def test_both_release_stages_validate(stage, monkeypatch):
     config = stage_config(stage, monkeypatch)
     _validate_reward_objective_contract(config)
     _validate_release_stage_contract(config)
-    expected = 100 if stage == 1 else 20
+    # C1: 80 rows / batch 4 * 5 epochs. C2: 40 rows / batch 4 * 5 epochs.
+    expected = 100 if stage == 1 else 50
     assert config.total_train_epochs * config.dataset_generation.train_episodes // config.train_dataset.batch_size == expected
+
+
+# C2 pins evaluator.freq_epochs=1 and eval_before_train=True, which are exactly
+# the values the C1 drift table uses, so reuse would assert nothing there.
+C2_EVALUATOR_DRIFT = {
+    "evaluator.freq_epochs": 2,
+    "evaluator.eval_before_train": False,
+}
 
 
 @pytest.mark.parametrize("stage", [1, 2])
@@ -58,6 +67,9 @@ def test_both_release_stages_validate(stage, monkeypatch):
 ])
 def test_release_drift_is_rejected(stage, field, value, monkeypatch):
     config = stage_config(stage, monkeypatch)
+    # C1 disables evaluation entirely while C2 evaluates once per epoch, so the
+    # same literal is drift on one stage and the pinned value on the other.
+    value = C2_EVALUATOR_DRIFT.get(field, value) if stage == 2 else value
     OmegaConf.update(config, field, value)
     with pytest.raises(ValueError):
         _validate_release_stage_contract(config)
@@ -101,8 +113,12 @@ def test_manifest_contract_is_strict_json(stage):
     raw = load_recipe_document(path)
     metadata = recipe_contract_metadata(raw)
     json.dumps(metadata, allow_nan=False)
-    assert metadata["data"]["train_seeds"] == list(range(28, 108))
-    assert metadata["data"]["validation_seeds"] == [108, 109, 110, 111]
+    train_rows = 80 if stage == 1 else 40
+    first_validation_seed = 28 + train_rows
+    assert metadata["data"]["train_seeds"] == list(range(28, first_validation_seed))
+    assert metadata["data"]["validation_seeds"] == list(
+        range(first_validation_seed, first_validation_seed + 4)
+    )
     assert metadata["reward"]["clip"] == ("inf" if stage == 1 else 20.0)
     assert metadata["prompt"]["version"] == raw["prompt_version"]
     assert load_planner_audit_settings(path).max_steps == 512
