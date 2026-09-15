@@ -112,3 +112,58 @@ def test_json_safe_config_bounds_are_not_nan():
     assert json_safe_value({"clip": [float("inf")]}) == {"clip": ["inf"]}
     with pytest.raises(ValueError, match="NaN"):
         json_safe_value({"clip": float("nan")})
+
+
+BINARY_OVERFIT = ROOT / "configs/level1/train/curriculum2_binary_overfit.yaml"
+
+
+def binary_overfit_config(monkeypatch):
+    monkeypatch.setenv("AREAL_ADMIN_API_KEY", "isolated-test-placeholder")
+    return OmegaConf.load(BINARY_OVERFIT)
+
+
+def test_binary_overfit_recipe_validates_only_with_its_opt_in(monkeypatch):
+    config = binary_overfit_config(monkeypatch)
+    _validate_reward_objective_contract(config)
+    _validate_release_stage_contract(config, reward_ablation="binary-outcome")
+    # 4 train rows / batch 4 * 20 epochs = 20 updates, the same budget as the
+    # shaped C2 overfit probe, so the two runs stay directly comparable.
+    assert (
+        config.total_train_epochs
+        * config.dataset_generation.train_episodes
+        // config.train_dataset.batch_size
+        == 20
+    )
+    assert config.environment.episode_life_mode == "single_death"
+    with pytest.raises(ValueError, match="nearest_pellet_alpha=0.1"):
+        _validate_release_stage_contract(config)
+
+
+def test_binary_overfit_opt_in_does_not_license_arbitrary_rewards(monkeypatch):
+    for field, value in (
+        ("ghost_reward", 5.0),
+        ("death_penalty", 100.0),
+        ("step_penalty", 0.05),
+        ("safety_refusal_penalty", 100.0),
+        ("nearest_pellet_alpha", 0.1),
+    ):
+        config = binary_overfit_config(monkeypatch)
+        OmegaConf.update(config, field, value)
+        with pytest.raises(ValueError):
+            _validate_release_stage_contract(config, reward_ablation="binary-outcome")
+    config = binary_overfit_config(monkeypatch)
+    config.completion_reward = 0.0
+    with pytest.raises(ValueError, match="completion_reward"):
+        _validate_release_stage_contract(config, reward_ablation="binary-outcome")
+
+
+def test_binary_outcome_is_rejected_on_the_c1_direct_action_stage(monkeypatch):
+    config = stage_config(1, monkeypatch)
+    with pytest.raises(ValueError, match="Edward option protocol"):
+        _validate_release_stage_contract(config, reward_ablation="binary-outcome")
+
+
+def test_shaped_c2_recipes_still_reject_the_binary_opt_in(monkeypatch):
+    config = stage_config(2, monkeypatch)
+    with pytest.raises(ValueError, match="nearest_pellet_scale_by_cleared_ratio"):
+        _validate_release_stage_contract(config, reward_ablation="binary-outcome")

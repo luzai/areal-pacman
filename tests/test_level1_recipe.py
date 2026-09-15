@@ -936,7 +936,14 @@ class RewardAndTrajectoryTests(unittest.TestCase):
         )
         self.assertEqual(
             sorted(path.name for path in train_dir.glob("*.yaml")),
-            ["curriculum1.yaml", "curriculum2.yaml", "curriculum2_overfit.yaml"],
+            [
+                "curriculum1.yaml",
+                "curriculum2.yaml",
+                "curriculum2_binary_overfit.yaml",
+                "curriculum2_overfit.yaml",
+                "curriculum2_single_death.yaml",
+                "curriculum2_three_lives.yaml",
+            ],
         )
 
     def test_curriculum2_cold_starts_from_qwen_base(self) -> None:

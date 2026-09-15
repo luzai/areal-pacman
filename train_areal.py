@@ -72,11 +72,15 @@ def _apply_smoke_updates(args: list[str]) -> tuple[list[str], int | None]:
     return cleaned, smoke_updates
 
 
+REWARD_ABLATIONS = ("fixed-distance", "binary-outcome")
+
+
 def _parse_reward_ablation(args: list[str]) -> tuple[list[str], str | None]:
     """Consume explicit experiment intent without adding framework config fields."""
     cleaned: list[str] = []
     ablation = None
     index = 0
+    choices = " or ".join(REWARD_ABLATIONS)
     while index < len(args):
         argument = args[index]
         if argument == "--reward-ablation" or argument.startswith("--reward-ablation="):
@@ -85,12 +89,12 @@ def _parse_reward_ablation(args: list[str]) -> tuple[list[str], str | None]:
             if argument == "--reward-ablation":
                 index += 1
                 if index >= len(args):
-                    raise ValueError("--reward-ablation requires fixed-distance")
+                    raise ValueError(f"--reward-ablation requires {choices}")
                 ablation = args[index]
             else:
                 ablation = argument.split("=", 1)[1]
-            if ablation != "fixed-distance":
-                raise ValueError("--reward-ablation requires fixed-distance")
+            if ablation not in REWARD_ABLATIONS:
+                raise ValueError(f"--reward-ablation requires {choices}")
         else:
             cleaned.append(argument)
         index += 1
@@ -236,9 +240,16 @@ def _validate_release_stage_contract(
 
     protocol = str(getattr(config, "action_protocol", "legacy"))
     if reward_ablation is not None:
-        if reward_ablation != "fixed-distance" or smoke_updates != 4:
+        if reward_ablation == "binary-outcome":
+            # The terminal win signal only exists on the Edward option protocol,
+            # and it needs a full-length run to show whether the win rate moves.
+            if protocol != EDWARD_OPTION_PROTOCOL:
+                raise ValueError(
+                    "binary-outcome reward ablation requires the C2 Edward option protocol"
+                )
+        elif reward_ablation != "fixed-distance" or smoke_updates != 4:
             raise ValueError("fixed-distance reward ablation requires --smoke-updates 4")
-        if protocol != DIRECT_ACTION_PROTOCOL:
+        elif protocol != DIRECT_ACTION_PROTOCOL:
             raise ValueError("fixed-distance reward ablation requires the C1 direct action protocol")
     if protocol == "legacy":
         return
@@ -248,6 +259,11 @@ def _validate_release_stage_contract(
     def require(condition: bool, message: str) -> None:
         if not condition:
             raise ValueError(f"release two-stage recipe requires {message}")
+
+    # binary-outcome deliberately replaces the shaped objective with the terminal
+    # win signal, so every shaping coefficient must be free to move. It is checked
+    # against its own pinned values further below, not against the release ones.
+    binary_outcome = reward_ablation == "binary-outcome"
 
     require(int(config.environment.max_steps) == 512, "environment.max_steps=512")
     is_c2_overfit = (
@@ -296,10 +312,13 @@ def _validate_release_stage_contract(
         math.isclose(float(config.actor.optimizer.lr), 5.0e-7),
         "actor learning rate 5e-7",
     )
-    require(
-        math.isclose(float(config.nearest_pellet_alpha), 0.1),
-        "nearest_pellet_alpha=0.1",
-    )
+    if not binary_outcome:
+        # binary-outcome pins nearest_pellet_alpha to 0.0 in expected_reward above;
+        # the release recipe keeps the BFS guidance term at 0.1.
+        require(
+            math.isclose(float(config.nearest_pellet_alpha), 0.1),
+            "nearest_pellet_alpha=0.1",
+        )
     require(config.validation_contract == "sampled12_uniform_shaped", "matched sampled validation")
     require(config.image_prompt_style == "live_state_v3", "image_prompt_style=live_state_v3")
     require(config.enable_thinking is False, "enable_thinking=false")
@@ -350,27 +369,49 @@ def _validate_release_stage_contract(
     require(math.isclose(float(config.eval_gconfig.temperature), 0.7), "evaluation temperature=0.7")
     require(math.isclose(float(config.gconfig.top_p), 1.0), "top_p=1.0")
     require(math.isclose(float(config.eval_gconfig.top_p), 1.0), "evaluation top_p=1.0")
-    require(math.isclose(float(config.death_penalty), 100.0), "death_penalty=100")
-    require(
-        math.isclose(float(config.safety_refusal_penalty), 100.0),
-        "safety_refusal_penalty=100",
-    )
-    expected_reward = {
-        "normal_pellet_reward": 1.0,
-        "power_pellet_reward": 1.0,
-        "ghost_reward": 5.0,
-        "fruit_reward": 0.0,
-        "completion_reward": 50.0,
-        "step_penalty": 0.05,
-        "step_penalty_cleared_ratio_scale": 0.0,
-        "wall_penalty": 0.5,
-        "nearest_pellet_remaining_ratio_threshold": 1.0,
-    }
+    # Pin the shaping coefficients to zero rather than leaving them unchecked:
+    # the opt-in names one specific experiment, it is not a licence to set
+    # arbitrary rewards.
+    if binary_outcome:
+        expected_reward = {
+            "normal_pellet_reward": 0.0,
+            "power_pellet_reward": 0.0,
+            "ghost_reward": 0.0,
+            "fruit_reward": 0.0,
+            "step_penalty": 0.0,
+            "step_penalty_cleared_ratio_scale": 0.0,
+            "wall_penalty": 0.0,
+            "death_penalty": 0.0,
+            "safety_refusal_penalty": 0.0,
+            "nearest_pellet_alpha": 0.0,
+            "nearest_pellet_remaining_ratio_threshold": 1.0,
+        }
+        require(
+            float(config.completion_reward) > 0.0,
+            "binary-outcome ablation completion_reward>0 as the only reward",
+        )
+    else:
+        require(math.isclose(float(config.death_penalty), 100.0), "death_penalty=100")
+        require(
+            math.isclose(float(config.safety_refusal_penalty), 100.0),
+            "safety_refusal_penalty=100",
+        )
+        expected_reward = {
+            "normal_pellet_reward": 1.0,
+            "power_pellet_reward": 1.0,
+            "ghost_reward": 5.0,
+            "fruit_reward": 0.0,
+            "completion_reward": 50.0,
+            "step_penalty": 0.05,
+            "step_penalty_cleared_ratio_scale": 0.0,
+            "wall_penalty": 0.5,
+            "nearest_pellet_remaining_ratio_threshold": 1.0,
+        }
     require(config.use_base_reward is False, "use_base_reward=false")
     require(
         config.nearest_pellet_scale_by_cleared_ratio is (reward_ablation is None),
         "scaled nearest-pellet shaping" if reward_ablation is None
-        else "fixed-distance ablation nearest_pellet_scale_by_cleared_ratio=false",
+        else f"{reward_ablation} ablation nearest_pellet_scale_by_cleared_ratio=false",
     )
     require(config.nearest_pellet_skip_on_eat is True, "nearest-pellet skip-on-eat")
     for field, expected in expected_reward.items():
@@ -875,7 +916,10 @@ def _build_group_reward_degeneracy_filter(config) -> str | None:
 def main(args: list[str]) -> None:
     args, smoke_updates = _apply_smoke_updates(args)
     args, reward_ablation = _parse_reward_ablation(args)
-    if reward_ablation is not None and smoke_updates != 4:
+    # fixed-distance is a 4-update smoke probe. binary-outcome replaces the whole
+    # shaped objective with the terminal win signal, so it needs a full-length run
+    # to show whether the win rate moves at all.
+    if reward_ablation == "fixed-distance" and smoke_updates != 4:
         raise ValueError("fixed-distance reward ablation requires --smoke-updates 4")
     dry_run = "--dry-run" in args
     args = [arg for arg in args if arg != "--dry-run"]

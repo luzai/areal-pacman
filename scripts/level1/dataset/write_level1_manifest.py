@@ -294,12 +294,43 @@ class _Once(argparse.Action):
 
 
 def reward_ablation_metadata(config, *, reward_ablation=None, smoke_updates=None):
-    """Bind explicit fixed-distance A intent without changing default manifests."""
+    """Bind explicit ablation intent without changing default manifests."""
     direct = config.get("action_protocol") == "direct-open-action-token-v1"
     if reward_ablation is None:
         if direct and config.get("nearest_pellet_scale_by_cleared_ratio") is False:
             raise ValueError("fixed-distance C1 requires explicit --reward-ablation")
         return None
+    if reward_ablation == "binary-outcome":
+        # Terminal win signal only: every shaping coefficient must be zero, so a
+        # manifest carrying this opt-in cannot be confused with the shaped recipe.
+        zeroed = (
+            "normal_pellet_reward",
+            "power_pellet_reward",
+            "ghost_reward",
+            "fruit_reward",
+            "step_penalty",
+            "wall_penalty",
+            "death_penalty",
+            "safety_refusal_penalty",
+            "nearest_pellet_alpha",
+        )
+        nonzero = [f for f in zeroed if float(config.get(f, 0.0)) != 0.0]
+        if nonzero:
+            raise ValueError(
+                "binary-outcome ablation requires zero shaping coefficients, "
+                f"got non-zero {nonzero}"
+            )
+        if float(config.get("completion_reward", 0.0)) <= 0.0:
+            raise ValueError(
+                "binary-outcome ablation requires completion_reward>0 as the only reward"
+            )
+        return {
+            "experiment_role": "B",
+            "opt_in": "binary-outcome",
+            "completion_reward": float(config.get("completion_reward")),
+            "shaping_coefficients": "zeroed",
+            "episode_life_mode": config.get("environment", {}).get("episode_life_mode"),
+        }
     if reward_ablation != "fixed-distance" or smoke_updates != 4:
         raise ValueError("--reward-ablation fixed-distance requires --smoke-updates 4")
     if not (
@@ -348,7 +379,11 @@ def main() -> None:
     parser.add_argument("--dataset-manifest", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--smoke-updates", type=int, action=_Once)
-    parser.add_argument("--reward-ablation", choices=["fixed-distance"], action=_Once)
+    parser.add_argument(
+        "--reward-ablation",
+        choices=["fixed-distance", "binary-outcome"],
+        action=_Once,
+    )
     args = parser.parse_args()
     config_bytes = args.config.read_bytes()
     config = yaml.safe_load(config_bytes)

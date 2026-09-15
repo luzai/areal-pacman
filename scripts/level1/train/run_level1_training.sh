@@ -15,7 +15,7 @@ while (( $# )); do
       REWARD_ABLATION_SET=1
       if [[ "$1" == --reward-ablation ]]; then
         if (( $# < 2 )); then
-          echo "--reward-ablation requires fixed-distance." >&2
+          echo "--reward-ablation requires fixed-distance or binary-outcome." >&2
           exit 2
         fi
         REWARD_ABLATION="$2"
@@ -59,15 +59,23 @@ if (( SMOKE_UPDATES_SET )) && [[ ! "${SMOKE_UPDATES}" =~ ^[1-9][0-9]*$ ]]; then
 fi
 REWARD_ABLATION_ARGS=()
 if (( REWARD_ABLATION_SET )); then
-  if [[ "${REWARD_ABLATION}" != fixed-distance ]]; then
-    echo "--reward-ablation supports only fixed-distance." >&2
-    exit 2
-  fi
-  if [[ "${SMOKE_UPDATES}" != 4 ]]; then
-    echo "--reward-ablation fixed-distance requires --smoke-updates 4." >&2
-    exit 2
-  fi
-  REWARD_ABLATION_ARGS=(--reward-ablation fixed-distance)
+  case "${REWARD_ABLATION}" in
+    fixed-distance)
+      if [[ "${SMOKE_UPDATES}" != 4 ]]; then
+        echo "--reward-ablation fixed-distance requires --smoke-updates 4." >&2
+        exit 2
+      fi
+      ;;
+    binary-outcome)
+      # Terminal win signal only. The recipe fixes the run length, so this
+      # ablation deliberately does not force a smoke budget.
+      ;;
+    *)
+      echo "--reward-ablation supports only fixed-distance or binary-outcome." >&2
+      exit 2
+      ;;
+  esac
+  REWARD_ABLATION_ARGS=(--reward-ablation "${REWARD_ABLATION}")
 fi
 SMOKE_ARGS=()
 if (( SMOKE_UPDATES_SET )); then
