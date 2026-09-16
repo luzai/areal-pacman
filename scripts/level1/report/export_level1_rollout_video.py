@@ -68,13 +68,18 @@ def main() -> None:
         audio_driver="dummy",
     )
 
+    title = (
+        f"{episode['id']} | {episode['terminal_reason']} | "
+        f"score {episode['final_score']} | "
+        f"pellets left {episode['normal_pellets_remaining']}"
+    )
     frames: list[Image.Image] = []
     with PygamePacmanEnv(config) as env:
         image, info = env.reset(seed=int(episode["seed"]))
         frames.append(
             compose_frame(
                 image,
-                title=f"Initial rollout: {episode['id']} | final score {episode['final_score']}",
+                title=title,
                 step=0,
                 total_steps=len(trajectory),
                 action="",
@@ -89,7 +94,7 @@ def main() -> None:
             frames.append(
                 compose_frame(
                     image,
-                    title=f"Initial rollout: {episode['id']} | final score {episode['final_score']}",
+                    title=title,
                     step=index,
                     total_steps=len(trajectory),
                     action=recorded["action"],
@@ -97,9 +102,23 @@ def main() -> None:
                     open_actions=list(env.snapshot().get("open") or []),
                 )
             )
-            if bool(terminated or truncated) != bool(
+            # A safety refusal ends the episode above the environment: the
+            # planner declines to act while the env itself is still live, so
+            # the recorded final step carries truncated=True and the replayed
+            # env reports neither flag. Every other step stays strict.
+            terminal_matches = bool(terminated or truncated) == bool(
                 recorded["terminated"] or recorded["truncated"]
-            ):
+            )
+            if recorded.get("safety_refusal"):
+                terminal_matches = (
+                    index == len(trajectory)
+                    and episode["terminal_reason"] == "safety_refusal"
+                    and recorded.get("terminal_reason") == "safety_refusal"
+                    and not recorded["terminated"]
+                    and bool(recorded["truncated"])
+                    and not (terminated or truncated)
+                )
+            if not terminal_matches:
                 raise RuntimeError(f"replay terminal-state mismatch at step {index}")
 
     hold_frames = max(1, round(args.fps * args.hold_seconds))

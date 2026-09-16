@@ -9,6 +9,12 @@
 - `level1/report/`: trajectory auditing, checkpoint assembly, demo export, and
   report helpers.
 
+`level1/report/export_level1_rollout_video.py` labels videos with the recorded
+terminal reason, final score, and remaining pellets. Replay accepts a final
+planner `safety_refusal` truncation only while the game environment remains
+live; inconsistent refusal flags and other terminal-state mismatches fail
+before video encoding.
+
 Primary training entry point:
 
 ```bash
