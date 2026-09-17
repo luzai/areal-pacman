@@ -214,6 +214,8 @@ def validate_prepared_dataset_manifest(
     if manifest.get("dataset_roles") != list(DATASET_ROLES):
         raise ValueError("dataset roles must be train and validation")
     contract = manifest.get("recipe_contract")
+    if not isinstance(contract, dict):
+        raise ValueError("dataset requires explicit recipe_contract metadata")
     expected_seed_contract = (
         "explicit_validation_seed_range"
         if (contract.get("data") or {}).get("validation_seed_start") is not None
@@ -236,8 +238,6 @@ def validate_prepared_dataset_manifest(
         raise ValueError("dataset generator provenance does not match current source")
     if manifest.get("training_config_sha256") != expected_training_config_sha256:
         raise ValueError("dataset was not prepared with this training config")
-    if not isinstance(contract, dict):
-        raise ValueError("dataset requires explicit recipe_contract metadata")
     if expected_recipe_contract is not None and contract != dict(expected_recipe_contract):
         raise ValueError("dataset recipe_contract does not match config")
     protocol = (contract.get("harness") or {}).get("action_protocol")

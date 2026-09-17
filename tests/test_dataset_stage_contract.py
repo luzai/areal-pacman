@@ -126,6 +126,9 @@ def test_real_stage_bundle_protocol_reward_horizon_and_seeds(stage_bundles, stag
     ("path", "canonical name"),
     ("recipe", "recipe_contract does not match config"),
     ("legacy", "explicit recipe_contract"),
+    ("null", "explicit recipe_contract"),
+    ("list", "explicit recipe_contract"),
+    ("string", "explicit recipe_contract"),
 ])
 def test_recomputed_sidecar_does_not_hide_tampered_contract(
     tmp_path, stage_bundles, tamper, message
@@ -142,8 +145,10 @@ def test_recomputed_sidecar_does_not_hide_tampered_contract(
         manifest["splits"]["train"]["jsonl"] = "replacement.jsonl"
     elif tamper == "recipe":
         manifest["recipe_contract"]["reward"]["clip"] = 20.0
-    else:
+    elif tamper == "legacy":
         del manifest["recipe_contract"]
+    else:
+        manifest["recipe_contract"] = {"null": None, "list": [], "string": "invalid"}[tamper]
     _rewrite_manifest(output, manifest)
     with pytest.raises(ValueError, match=message):
         _validate(output, config)
