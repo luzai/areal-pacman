@@ -438,12 +438,14 @@ if grep -Eq '^edward_options:[[:space:]]*true|^action_protocol:[[:space:]]*direc
     exit 2
   fi
   BUDGET_CHECK=scripts/level1/train/check_edward_prompt_budget.py
+  BUDGET_ARGS=(--config "${CONFIG}")
   if grep -q '^action_protocol:[[:space:]]*direct-open-action-token-v1' "${CONFIG}"; then
     BUDGET_CHECK=scripts/level1/train/check_direct_prompt_budget.py
+    BUDGET_ARGS=()
   fi
   "${PYTHON}" "${BUDGET_CHECK}" \
     --model-path "${MODEL_PATH}" \
-    --max-input-tokens "${MAX_MODEL_LEN}"
+    --max-input-tokens "${MAX_MODEL_LEN}" "${BUDGET_ARGS[@]}"
 fi
 
 if [[ "$(command -v python3)" != "$(dirname "${PYTHON}")/python3" ]]; then

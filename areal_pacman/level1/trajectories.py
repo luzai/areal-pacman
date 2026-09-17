@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any, Mapping
 from maapacman.env.ghost_modes import validate_ghost_mode, validate_ghost_state
 from maapacman.env.pygame_environment import ruleset_revision
+from maapacman.planner import validate_fallback_mode
 
 from .level1_dataset import (
     DATASET_CONTRACT_VERSION,
@@ -19,9 +20,9 @@ from .level1_dataset import (
 )
 from .rewards import REWARD_RECIPE_VERSION, audit_reward
 from .prompts import (
-    EDWARD_OPTION_CODE_V1_SYSTEM_PROMPT, compact_edward_decision_prompt,
     live_state_instruction, prompt_contract_metadata, prompt_text,
     sent_prompt_sha256, text_sha256,
+    edward_system_prompt, render_edward_decision_prompt,
 )
 from .token_constraints import EDWARD_OPTION_CONSTRAINT, OPTION_CODE_BY_ID
 
@@ -555,6 +556,52 @@ def _audit_parse_failure_evidence(
         raise ValueError("parse-failure step has invalid fail-closed contract evidence")
 
 
+def _audit_risk_fallback_step(payload: Mapping[str, Any], step: Mapping[str, Any]) -> None:
+    context = step.get("observation_context") or {}
+    candidates = context.get("planner_candidates") or []
+    risky = [candidate for candidate in candidates if candidate.get("strategy") == "RISK_FALLBACK"]
+    selected_risk = step.get("option_strategy") == "RISK_FALLBACK"
+    if not risky and not selected_risk:
+        return
+    mode = (payload.get("decoding") or {}).get("edward_fallback_mode", "refuse")
+    if mode != "risk_ranked" or not payload.get("prompt_template_sha256"):
+        raise ValueError("risk fallback requires opt-in mode and prompt evidence")
+    if (
+        len(risky) != len(candidates) or not 1 <= len(risky) <= 4
+        or not selected_risk or not step.get("model_called")
+        or step.get("option_step") != 1 or not step.get("option_end")
+        or step.get("option_status") not in {"max_commit", "terminal"}
+    ):
+        raise ValueError("risk fallback must be an unmixed single-step model decision")
+    actions = [candidate.get("first_action") for candidate in risky]
+    if len(set(actions)) != len(actions) or set(actions) != set(step.get("open_action_mask") or []):
+        raise ValueError("risk fallback must advertise every open direction exactly once")
+    for rank, candidate in enumerate(risky, 1):
+        risk = candidate.get("risk")
+        if (
+            candidate.get("option_id") != f"A{rank - 1}"
+            or candidate.get("commit_moves") != 1 or candidate.get("route_distance") != 1
+            or candidate.get("safety_margin") is not None
+            or candidate.get("future_safe_exits") is not None
+            or not isinstance(risk, Mapping) or risk.get("rank") != rank
+            or not {"rank", "motion", "ghost_clearance", "route_margin",
+                    "safe_next_cells", "dead_end", "reverse"}.issubset(risk)
+            or risk.get("motion") not in {"clear_estimate", "unknown", "collision_predicted"}
+            or type(risk.get("safe_next_cells")) is not int
+            or not 0 <= risk["safe_next_cells"] <= 4
+            or type(risk.get("dead_end")) is not bool
+            or type(risk.get("reverse")) is not bool
+            or any(risk.get(key) is not None and type(risk[key]) is not int
+                   for key in ("ghost_clearance", "route_margin"))
+        ):
+            raise ValueError("invalid risk fallback candidate evidence")
+        if candidate["option_id"] == step.get("option_id") and (
+            candidate["first_action"] != step.get("action")
+            or list(candidate["target"]) != list(step.get("option_target") or [])
+        ):
+            raise ValueError("risk fallback executed action/target differs from candidate")
+
+
 def _audit_prompt_evidence(payload: Mapping[str, Any]) -> None:
     # Older archived payloads did not record prompt fingerprints.
     if "prompt_template_sha256" not in payload:
@@ -562,12 +609,17 @@ def _audit_prompt_evidence(payload: Mapping[str, Any]) -> None:
     decoding = payload.get("decoding") or {}
     edward = bool(decoding.get("edward_options"))
     style = payload["image_prompt_style"]
-    expected = prompt_contract_metadata(style, edward_options=edward)
+    fallback_mode = validate_fallback_mode(
+        decoding.get("edward_fallback_mode", "refuse"), edward_options=edward
+    )
+    expected = prompt_contract_metadata(
+        style, edward_options=edward, fallback_mode=fallback_mode
+    )
     if not edward and not decoding.get("open_action_mask"):
         expected["action_protocol"] = "direct-action-token-v1"
     if any(payload.get(key) != value for key, value in expected.items()):
         raise ValueError("trajectory prompt template does not match actual harness")
-    system = EDWARD_OPTION_CODE_V1_SYSTEM_PROMPT if edward else prompt_text(style)[0]
+    system = edward_system_prompt(fallback_mode) if edward else prompt_text(style)[0]
     if payload.get("system_prompt") != system:
         raise ValueError("trajectory system prompt does not match harness")
     for step in payload.get("trajectory", []):
@@ -599,6 +651,8 @@ def _audit_prompt_evidence(payload: Mapping[str, Any]) -> None:
                 payload["ghost_mode"],
             )
         if edward:
+            if context.get("edward_fallback_mode", "refuse") != fallback_mode:
+                raise ValueError("trajectory fallback mode disagrees with observation context")
             code_map = context.get("option_code_map") or {}
             inverse = {option: code for code, option in code_map.items()}
             candidates = [
@@ -611,7 +665,9 @@ def _audit_prompt_evidence(payload: Mapping[str, Any]) -> None:
                     inverse[candidate.option_id] for candidate in candidates
                 ),
             )
-            actual = compact_edward_decision_prompt(context, candidates, constraint)
+            actual = render_edward_decision_prompt(
+                context, candidates, constraint, fallback_mode=fallback_mode
+            )
         else:
             actual = (
                 live_state_instruction(context)
@@ -927,6 +983,8 @@ def audit_trajectory(payload: Mapping[str, Any]) -> None:
                             f"trajectory step {index} option-code map does not "
                             "match planner candidates"
                         )
+            if not parse_failed:
+                _audit_risk_fallback_step(payload, step)
             if bool(step.get("option_invalidated")) != (
                 step.get("option_status") == "invalidated"
             ):

@@ -10,6 +10,7 @@ from io import BytesIO
 from typing import Any, Mapping, Sequence
 
 import numpy as np
+from maapacman.planner import validate_fallback_mode
 
 
 MINIMAL_V1_SYSTEM_PROMPT = (
@@ -165,6 +166,64 @@ def compact_edward_decision_prompt(
     )
 
 
+EDWARD_RISK_NOTICE = (
+    " RISK_FALLBACK is not safety-approved. Only when normal C/A/E options are "
+    "absent, choose from ALL open directions ranked A0..A3 by increasing estimated "
+    "risk. Execute one move, then replan. Unknown motion does not prove safety."
+)
+EDWARD_RISK_USER_SUFFIX = EDWARD_RISK_NOTICE + (
+    "\nFallback risk by code: {risk_state}\n"
+    "Risk row=[rank,motion,ghost_clearance,route_margin,safe_next_cells,dead_end,reverse]. "
+    "motion=clear_estimate/unknown/collision_predicted for 16 frames, ignoring "
+    "power-pellet effects. Estimates, not probabilities. Larger clearance/margin "
+    "are better; safe_next_cells counts adjacent tiles, not guaranteed escapes. "
+    "Rank 1 is lowest estimated risk. Return one advertised code."
+)
+
+
+def edward_system_prompt(fallback_mode: str = "refuse") -> str:
+    """Keep normal requests unchanged; risk instructions appear only on fallback."""
+    validate_fallback_mode(fallback_mode)
+    return EDWARD_OPTION_CODE_V1_SYSTEM_PROMPT
+
+
+def risk_ranked_edward_decision_prompt(
+    state_context: Mapping[str, Any], candidates: Sequence[Any], constraint: Any
+) -> str:
+    """Separate renderer keeps archived v1 source fingerprints unchanged."""
+    risk_fields = (
+        "rank", "motion", "ghost_clearance", "route_margin", "safe_next_cells",
+        "dead_end", "reverse",
+    )
+    risks = {
+        constraint.code_for_option(candidate.option_id): [
+            candidate.risk[field] for field in risk_fields
+        ]
+        for candidate in candidates
+        if candidate.strategy == "RISK_FALLBACK"
+    }
+    base = compact_edward_decision_prompt(state_context, candidates, constraint)
+    if not risks:
+        return base
+    return base + (
+        EDWARD_RISK_USER_SUFFIX.format(
+            risk_state=json.dumps(risks, separators=(",", ":"), allow_nan=False)
+        )
+    )
+
+
+def render_edward_decision_prompt(
+    state_context: Mapping[str, Any], candidates: Sequence[Any], constraint: Any,
+    *, fallback_mode: str = "refuse",
+) -> str:
+    validate_fallback_mode(fallback_mode)
+    renderer = (
+        risk_ranked_edward_decision_prompt if fallback_mode == "risk_ranked"
+        else compact_edward_decision_prompt
+    )
+    return renderer(state_context, candidates, constraint)
+
+
 PROMPT_STYLES = (
     "minimal_v1",
     "wall_avoidance_v1",
@@ -281,16 +340,21 @@ def text_sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def prompt_user_template(prompt_style: str, *, edward_options: bool) -> str:
+def prompt_user_template(
+    prompt_style: str, *, edward_options: bool, fallback_mode: str = "refuse"
+) -> str:
+    validate_fallback_mode(fallback_mode, edward_options=edward_options)
     return (
-        EDWARD_OPTION_CODE_V1_USER_TEMPLATE
+        EDWARD_OPTION_CODE_V1_USER_TEMPLATE + (
+            EDWARD_RISK_USER_SUFFIX if fallback_mode == "risk_ranked" else ""
+        )
         if edward_options
         else prompt_text(prompt_style)[1]
     )
 
 
 def prompt_contract_metadata(
-    prompt_style: str, *, edward_options: bool
+    prompt_style: str, *, edward_options: bool, fallback_mode: str = "refuse"
 ) -> dict[str, str]:
     """Fingerprint the actual static text AND dynamic rendering implementation.
 
@@ -299,8 +363,11 @@ def prompt_contract_metadata(
     """
     system, _ = prompt_text(prompt_style)
     if edward_options:
-        system = EDWARD_OPTION_CODE_V1_SYSTEM_PROMPT
-        renderer = compact_edward_decision_prompt
+        system = edward_system_prompt(fallback_mode)
+        renderer = (
+            risk_ranked_edward_decision_prompt if fallback_mode == "risk_ranked"
+            else compact_edward_decision_prompt
+        )
         protocol = version = "edward-option-code-v1"
     else:
         renderer = (
@@ -312,12 +379,18 @@ def prompt_contract_metadata(
             if prompt_style == "live_state_v3"
             else prompt_style
         )
-    template = prompt_user_template(prompt_style, edward_options=edward_options)
+    template = prompt_user_template(
+        prompt_style, edward_options=edward_options, fallback_mode=fallback_mode
+    )
     fingerprint = {
         "system": system,
         "user_template": template,
         "renderer_source": inspect.getsource(renderer).replace("\r\n", "\n"),
     }
+    if fallback_mode == "risk_ranked":
+        fingerprint["base_renderer_source"] = inspect.getsource(
+            compact_edward_decision_prompt
+        ).replace("\r\n", "\n")
     return {
         "action_protocol": protocol,
         "prompt_version": version,

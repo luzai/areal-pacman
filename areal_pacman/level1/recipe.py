@@ -63,7 +63,10 @@ def prompt_contract(raw: Mapping[str, Any]) -> dict[str, Any]:
 
     prompt_style = str(raw.get("image_prompt_style", "minimal_v1"))
     edward_options = bool(raw.get("edward_options", False))
-    actual = prompt_contract_metadata(prompt_style, edward_options=edward_options)
+    actual = prompt_contract_metadata(
+        prompt_style, edward_options=edward_options,
+        fallback_mode=raw.get("edward_fallback_mode", "refuse"),
+    )
     version = str(raw.get("prompt_version", "legacy"))
     if version != "legacy" and version != actual["prompt_version"]:
         raise ValueError("prompt_version does not match the actual prompt renderer")
@@ -121,6 +124,8 @@ def recipe_contract_metadata(raw: Mapping[str, Any]) -> dict[str, Any]:
         "harness": {
             "action_protocol": raw.get("action_protocol", "legacy"),
             "edward_options": bool(raw.get("edward_options", False)),
+            **({"edward_fallback_mode": raw["edward_fallback_mode"]}
+               if raw.get("edward_fallback_mode", "refuse") != "refuse" else {}),
             "action_token_choice": bool(raw.get("action_token_choice", False)),
             "open_action_mask": bool(raw.get("open_action_mask", False)),
             "objective_encoding": raw.get("objective_encoding", "legacy"),

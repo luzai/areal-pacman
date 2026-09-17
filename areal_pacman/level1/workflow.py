@@ -33,14 +33,15 @@ from maapacman.planner import (
     EdwardPlanner,
     EdwardSafetyRefusal,
     PlannerCandidate,
+    validate_fallback_mode,
 )
 
 from ..actions import ActionParseError, parse_action
 from .level1_dataset import SUPPORTED_MAX_STEPS, validate_episode_row
 from .prompts import (
-    EDWARD_OPTION_CODE_V1_SYSTEM_PROMPT,
     build_image_messages,
-    compact_edward_decision_prompt,
+    edward_system_prompt,
+    render_edward_decision_prompt,
     crop_pacman_local_view,
     encode_png,
     image_count,
@@ -88,7 +89,10 @@ def _compact_edward_decision_prompt(
     constraint: ObjectiveTokenConstraint,
 ) -> str:
     """Render the exemplar's decision facts without its free-form reason."""
-    return compact_edward_decision_prompt(state_context, candidates, constraint)
+    return render_edward_decision_prompt(
+        state_context, candidates, constraint,
+        fallback_mode=state_context.get("edward_fallback_mode", "refuse"),
+    )
 
 
 def _nearest_reachable_distance_with_diagnostics(
@@ -397,6 +401,9 @@ class PacmanImageOnlyWorkflow:
         scripted_objectives = list(options.get("scripted_objectives") or [])
         scripted_ids = list(options.get("scripted_completion_ids") or [])
         edward_options = bool(options.get("edward_options", False))
+        fallback_mode = validate_fallback_mode(
+            options.get("edward_fallback_mode", "refuse"), edward_options=edward_options
+        )
         if edward_options:
             if (
                 options.get("objective_encoding", EDWARD_OPTION_CONSTRAINT)
@@ -406,7 +413,7 @@ class PacmanImageOnlyWorkflow:
                     "Edward options require objective_encoding="
                     f"{EDWARD_OPTION_CONSTRAINT}"
                 )
-            system_prompt = EDWARD_OPTION_CODE_V1_SYSTEM_PROMPT
+            system_prompt = edward_system_prompt(fallback_mode)
         if edward_options and scripted:
             raise ValueError(
                 "edward_options uses scripted_objectives, not scripted_actions"
@@ -416,7 +423,7 @@ class PacmanImageOnlyWorkflow:
                 "edward objective constraints replace the legacy action mask"
             )
         prompt_metadata = prompt_contract_metadata(
-            image_prompt_style, edward_options=edward_options
+            image_prompt_style, edward_options=edward_options, fallback_mode=fallback_mode
         )
         if not edward_options and not options.get("open_action_mask"):
             prompt_metadata["action_protocol"] = "direct-action-token-v1"
@@ -429,6 +436,10 @@ class PacmanImageOnlyWorkflow:
                     raise ValueError(f"dataset {field} does not match actual harness")
         recipe_contract = options.get("recipe_contract")
         if recipe_contract is not None:
+            if (recipe_contract.get("harness") or {}).get(
+                "edward_fallback_mode", "refuse"
+            ) != fallback_mode:
+                raise ValueError("recipe_contract edward_fallback_mode differs from runtime")
             # Config bounds are strings (e.g. "inf"); rewards remain finite.
             json.dumps(recipe_contract, allow_nan=False)
             if recipe_contract.get("ghost_mode", config.ghost_mode) != config.ghost_mode:
@@ -437,7 +448,7 @@ class PacmanImageOnlyWorkflow:
             if any(value != getattr(reward_config, name, None) for name, value in coefficients.items()):
                 raise ValueError("recipe_contract reward coefficients differ from runtime")
         user_instruction = prompt_user_template(
-            image_prompt_style, edward_options=edward_options
+            image_prompt_style, edward_options=edward_options, fallback_mode=fallback_mode
         )
         trajectory: list[dict[str, Any]] = []
         rewards_by_completion: dict[str, float] = {}
@@ -466,7 +477,11 @@ class PacmanImageOnlyWorkflow:
         remaining_normal_pellets = (
             set(level.pellets) if level is not None else None
         )
-        planner = EdwardPlanner() if edward_options else None
+        planner = (
+            (EdwardPlanner(fallback_mode=fallback_mode) if fallback_mode != "refuse"
+             else EdwardPlanner())
+            if edward_options else None
+        )
         active_option: PlannerCandidate | None = None
         active_objective_constraint: ObjectiveTokenConstraint | None = None
         active_turn: ModelTurn | None = None
@@ -700,6 +715,8 @@ class PacmanImageOnlyWorkflow:
                 if edward_options:
                     if state_context is None:
                         state_context = {}
+                    if fallback_mode != "refuse":
+                        state_context["edward_fallback_mode"] = fallback_mode
                     state_context.update(
                         {
                             "ghosts": list(live_snapshot.get("ghosts") or []),
@@ -1147,6 +1164,8 @@ class PacmanImageOnlyWorkflow:
                     active_remaining -= 1
                     if terminated or truncated:
                         option_status = "terminal"
+                    elif record_option.strategy == "RISK_FALLBACK":
+                        option_status = "max_commit"
                     else:
                         next_action, option_status = planner.continue_option(
                             record_option,
@@ -1375,6 +1394,8 @@ class PacmanImageOnlyWorkflow:
                         options.get("open_action_mask", False)
                     ),
                     "edward_options": edward_options,
+                    **({"edward_fallback_mode": fallback_mode}
+                       if fallback_mode != "refuse" else {}),
                 },
                 "reward_objective_contract": str(
                     options.get("reward_objective_contract", "legacy")

@@ -14,6 +14,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import asdict, dataclass
 from functools import lru_cache
+import math
 from typing import Any, Iterable, Mapping
 
 from .actions import Action
@@ -30,6 +31,14 @@ _SAFETY_MARGIN = 1
 _MAX_ESCAPE_SEARCH = 10
 
 
+def validate_fallback_mode(mode: str, *, edward_options: bool = True) -> str:
+    if mode not in ("refuse", "risk_ranked"):
+        raise ValueError("edward_fallback_mode must be refuse or risk_ranked")
+    if mode != "refuse" and not edward_options:
+        raise ValueError("edward_fallback_mode=risk_ranked requires edward_options=true")
+    return mode
+
+
 class EdwardSafetyRefusal(RuntimeError):
     """The planner cannot prove that any currently legal action is ghost-safe."""
 
@@ -44,7 +53,7 @@ class GhostETA:
 
 @dataclass(frozen=True)
 class PlannerCandidate:
-    """One planner-approved high-level option."""
+    """A normal tactical option or an explicitly unproven one-step fallback."""
 
     option_id: str
     strategy: str
@@ -58,9 +67,13 @@ class PlannerCandidate:
     lethal_ghost_etas: tuple[GhostETA, ...] = ()
     choke_points: tuple[tuple[int, int], ...] = ()
     safe_return_distance: int | None = None
+    risk: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        result = asdict(self)
+        if self.risk is None:
+            del result["risk"]  # Keep archived normal-option evidence unchanged.
+        return result
 
 
 @dataclass(frozen=True)
@@ -364,6 +377,39 @@ def _one_step_pixel_safe(
     return True
 
 
+def _fallback_motion_risk(
+    level: LevelDefinition, state: Mapping[str, Any], target: Position
+) -> str:
+    """Reuse the 16-frame ghost estimate, without treating absent data as danger.
+
+    This ignores effects such as eating a power pellet. Even a clear estimate
+    is therefore advisory, not a guarantee of the environment's next outcome.
+    """
+    unknown = False
+    for ghost in state.get("ghosts") or ():
+        if not isinstance(ghost, Mapping) or ghost.get("state") not in _LETHAL_STATES:
+            continue
+        pixel = ghost.get("pixel_position")
+        path = ghost.get("path_remaining")
+        complete = (
+            isinstance(pixel, (list, tuple)) and len(pixel) == 2
+            and ghost.get("direction") in _ACTION_BY_TOKEN
+            and isinstance(path, str) and all(token in _ACTION_BY_TOKEN for token in path)
+            and "speed" in ghost
+        )
+        if complete:
+            try:
+                values = [float(pixel[0]), float(pixel[1]), float(ghost["speed"])]
+                complete = all(math.isfinite(value) and value >= 0 for value in values)
+            except (ValueError, TypeError, OverflowError):
+                complete = False
+        if not complete:
+            unknown = True
+        elif not _one_step_pixel_safe(level, {"ghosts": [ghost]}, target):
+            return "collision_predicted"
+    return "unknown" if unknown else "clear_estimate"
+
+
 def _future_safe_exits(
     level: LevelDefinition,
     target: Position,
@@ -507,7 +553,10 @@ def _collect_route_safety(
 class EdwardPlanner:
     """Stateful deterministic planner for one Level-1 episode."""
 
-    def __init__(self, level: LevelDefinition | None = None) -> None:
+    def __init__(
+        self, level: LevelDefinition | None = None, *, fallback_mode: str = "refuse"
+    ) -> None:
+        self.fallback_mode = validate_fallback_mode(fallback_mode)
         self.level = level or load_bundled_level(1)
         self.reset()
 
@@ -808,7 +857,63 @@ class EdwardPlanner:
             and ghost.get("state") in _LETHAL_STATES
             and (position := _position(ghost.get("position"))) is not None
         )
+        if self.fallback_mode == "risk_ranked":
+            return self._risk_fallback_candidates(state, player, lethal)
         return (self._emergency_candidate(state, player, lethal),)
+
+    def _risk_fallback_candidates(
+        self,
+        state: Mapping[str, Any],
+        player: Position | None,
+        lethal: tuple[_GhostThreat, ...],
+    ) -> tuple[PlannerCandidate, ...]:
+        """Advertise every physically open move; ranking is not a safety proof.
+
+        A0..A3 retain the existing one-token action support. Only their strategy
+        changes. Unknown motion evidence is explicitly distinct from collision.
+        """
+        if player is None:
+            raise ValueError("planner state must contain a valid Pacman position")
+        legal = set(state.get("open", state.get("legal_actions", ())) or ())
+        choices = []
+        for token in ("U", "D", "L", "R"):
+            if token not in legal:
+                continue
+            target = _transition(self.level, player, _ACTION_BY_TOKEN[token], actor="pacman")
+            if target is None:
+                continue
+            margin = _route_margin(self.level, player, (token,), lethal)
+            clearance = _ghost_distance(self.level, lethal, target)
+            exits = _future_safe_exits(self.level, target, lethal, player_eta=1)
+            motion = _fallback_motion_risk(self.level, state, target)
+            reverse = token == _OPPOSITE.get(self.last_action)
+            dead_end = _degree(self.level, target) <= 1
+            risk = {
+                "motion": motion,
+                "ghost_clearance": clearance,
+                "route_margin": margin if lethal else None,
+                "safe_next_cells": exits,
+                "dead_end": dead_end,
+                "reverse": reverse,
+            }
+            key = (
+                {"clear_estimate": 0, "unknown": 1, "collision_predicted": 2}[motion],
+                -margin, -(clearance if clearance is not None else 10**6),
+                -exits, dead_end, reverse,
+            )
+            choices.append((key, token, target, risk))
+        if not choices:
+            raise EdwardSafetyRefusal("no physically open cardinal fallback action")
+        choices.sort(key=lambda choice: choice[0])  # Stable U,D,L,R tie break.
+        return tuple(
+            PlannerCandidate(
+                option_id=f"A{index}", strategy="RISK_FALLBACK",
+                target=(target.row, target.col), first_action=token,
+                route_distance=1, commit_moves=1,
+                risk={"rank": index + 1, **risk},
+            )
+            for index, (_, token, target, risk) in enumerate(choices)
+        )
 
     def decide(self, state: Mapping[str, Any]) -> PlannerDecision:
         candidates = self.advertised_candidates(state)
@@ -848,6 +953,8 @@ class EdwardPlanner:
         """
 
         player = self.observe(state)
+        if option.strategy == "RISK_FALLBACK":
+            return None, "max_commit"
         target = Position(*option.target)
         if player == target:
             return None, "completed"

@@ -219,6 +219,10 @@ class PacmanAgentConfig(PPOConfig):
             )
         },
     )
+    edward_fallback_mode: str = field(
+        default="refuse",
+        metadata={"help": "refuse preserves legacy emergency handling; risk_ranked advertises all open one-step moves when normal options are empty."},
+    )
     objective_encoding: str = field(
         default="legacy",
         metadata={
