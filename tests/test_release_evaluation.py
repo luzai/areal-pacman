@@ -227,9 +227,22 @@ def test_win_claim_without_real_terminal_event_is_failure(tmp_path, monkeypatch)
     assert report["conclusion"] == "no_completion_observed_on_this_test_set"
 
 
-def test_heldout_cannot_reuse_training_or_validation_seeds(tmp_path):
+@pytest.mark.parametrize("split", ["train_seeds", "validation_seeds"])
+@pytest.mark.parametrize("boundary", [0, -1])
+def test_heldout_cannot_reuse_training_or_validation_seeds(
+    tmp_path, monkeypatch, split, boundary
+):
+    parsed = args(tmp_path)
+    _, settings = EVAL.evaluation_settings(parsed)
+    parsed.seed = settings["recipe_contract"]["data"][split][boundary]
+
+    async def forbidden_service(_):
+        pytest.fail("overlapping seeds must be rejected before contacting the model")
+
+    monkeypatch.setattr(EVAL, "verify_served_model", forbidden_service)
     with pytest.raises(ValueError, match="overlap"):
-        asyncio.run(EVAL.evaluate(args(tmp_path, "--seed", "108")))
+        asyncio.run(EVAL.evaluate(parsed))
+    assert not parsed.output.exists()
 
 
 def test_existing_evaluation_is_not_overwritten(tmp_path, monkeypatch):
@@ -286,11 +299,10 @@ def test_comparison_rejects_mixed_harness_even_with_recomputed_hash(
     tmp_path, monkeypatch
 ):
     _mock_runtime(monkeypatch)
-    report = asyncio.run(
-        EVAL.evaluate(
-            args(tmp_path / "model-a", "--purpose", "validation", "--seed", "108")
-        )
-    )
+    parsed = args(tmp_path / "model-a", "--purpose", "validation")
+    _, settings = EVAL.evaluation_settings(parsed)
+    parsed.seed = settings["recipe_contract"]["data"]["validation_seeds"][0]
+    report = asyncio.run(EVAL.evaluate(parsed))
     (tmp_path / "model-a" / "sampled12.json").write_text(json.dumps(report))
     second = deepcopy(report)
     second["evaluation_contract"]["harness"]["edward_options"] = False

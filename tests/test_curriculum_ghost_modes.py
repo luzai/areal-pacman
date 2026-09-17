@@ -378,7 +378,8 @@ def test_new_config_sections_support_omegaconf_structured_loading(stage):
     ):
         value = OmegaConf.merge(OmegaConf.structured(schema), raw[key])
         instance = OmegaConf.to_object(value)
-        assert vars(instance) == raw[key]
+        assert isinstance(instance, schema)
+        assert vars(instance) == vars(schema(**raw[key]))
 
 
 @pytest.mark.parametrize("stage", [1, 2])
