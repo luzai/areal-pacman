@@ -116,15 +116,53 @@ def build_checkpoint(args: argparse.Namespace) -> dict:
     if unexpected:
         raise ValueError(f"unexpected trained tensor: {sorted(unexpected)[0]}")
     for key in trained_keys:
-        if trained_shapes[key] != base_shapes[key]:
-            raise ValueError(f"trained/base tensor shape or dtype mismatch: {key}")
+        if trained_shapes[key][0] != base_shapes[key][0]:
+            raise ValueError(f"trained/base tensor shape mismatch: {key}")
+    # Dtype may legitimately differ. The trained shards are copied byte for byte
+    # and no base tensor ever enters the bundle, so the exported weights are
+    # exactly the trained ones regardless of how the base stored them. The FSDP
+    # trainer writes linear_attn A_log and norm.weight in bf16 where the released
+    # base keeps fp32; record that in the manifest rather than refusing export.
+    dtype_differences = {
+        key: {"trained": trained_shapes[key][1], "base": base_shapes[key][1]}
+        for key in sorted(trained_keys)
+        if trained_shapes[key][1] != base_shapes[key][1]
+    }
 
+    config_differences: dict = {}
     base_config_file = args.base_dir / "config.json"
     base_config = json.loads(base_config_file.read_text(encoding="utf-8"))
     if (args.trained_dir / "config.json").is_file():
         trained_config = json.loads((args.trained_dir / "config.json").read_text(encoding="utf-8"))
+        # Architectural identity is already proven by the tensor comparison above:
+        # every trained key exists in the base with an identical shape. What is
+        # left here are serialization differences between the transformers
+        # version that wrote each config (5.7.0 serializes sub-config defaults
+        # and names the vision sub-config "qwen3_5_vision"; 4.57 omits both), so
+        # compare the keys both configs actually declare and ignore the version
+        # label. Anything else still fails.
+        VERSION_LABEL_KEYS = {"model_type", "transformers_version", "dtype", "torch_dtype"}
         for field in ("model_type", "text_config", "vision_config", "hidden_size", "vocab_size", "tie_word_embeddings"):
-            if field in trained_config and field in base_config and trained_config[field] != base_config[field]:
+            if field not in trained_config or field not in base_config:
+                continue
+            trained_value, base_value = trained_config[field], base_config[field]
+            if isinstance(trained_value, dict) and isinstance(base_value, dict):
+                shared = set(trained_value) & set(base_value) - VERSION_LABEL_KEYS
+                differing = sorted(k for k in shared if trained_value[k] != base_value[k])
+                if differing:
+                    raise ValueError(
+                        f"trained/base config mismatch: {field}.{differing[0]}"
+                    )
+                config_differences[field] = {
+                    "only_in_trained": sorted(set(trained_value) - set(base_value)),
+                    "only_in_base": sorted(set(base_value) - set(trained_value)),
+                    "version_labels": {
+                        k: {"trained": trained_value.get(k), "base": base_value.get(k)}
+                        for k in sorted(VERSION_LABEL_KEYS & set(trained_value) & set(base_value))
+                        if trained_value[k] != base_value[k]
+                    },
+                }
+            elif trained_value != base_value:
                 raise ValueError(f"trained/base config mismatch: {field}")
     recorded_revision = base_config.get("_commit_hash")
     if args.base_revision and recorded_revision and args.base_revision != recorded_revision:
@@ -207,6 +245,8 @@ def build_checkpoint(args: argparse.Namespace) -> dict:
         "base_architecture_validation": base_validation,
         "omitted_base_auxiliary_tensors": sorted(ignored_auxiliary - trained_keys),
         "trained_key_count": len(trained_keys),
+        "trained_base_dtype_differences": dtype_differences,
+        "trained_base_config_differences": config_differences,
         "restore_all_missing": args.restore_all_missing,
         "restored_base_key_count": len(missing_keys),
         "restored_visual_key_count": sum(

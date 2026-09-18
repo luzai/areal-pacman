@@ -18,9 +18,11 @@ def explicit_synthetic_architecture(monkeypatch):
     )
 
 
-def checkpoint(path, tensors, *, sharded=False):
+def checkpoint(path, tensors, *, sharded=False, config=None):
     path.mkdir()
-    (path / "config.json").write_text(json.dumps({"model_type": "test", "_commit_hash": "base123"}))
+    document = {"model_type": "test", "_commit_hash": "base123"}
+    document.update(config or {})
+    (path / "config.json").write_text(json.dumps(document))
     (path / "tokenizer_config.json").write_text("{}")
     if sharded:
         index = {}
@@ -83,7 +85,7 @@ def test_missing_trainable_weights_never_restored(tmp_path, restore_all):
 def test_shape_mismatch_rejected(tmp_path):
     base = checkpoint(tmp_path / "base", {"model.language.weight": torch.ones(2)})
     trained = checkpoint(tmp_path / "trained", {"model.language.weight": torch.ones(3)})
-    with pytest.raises(ValueError, match="shape or dtype mismatch"):
+    with pytest.raises(ValueError, match="shape mismatch"):
         export(base, trained, tmp_path / "out")
 
 
@@ -144,3 +146,45 @@ def test_export_manifest_cannot_omit_config_even_if_rehashed(tmp_path):
     (output / "merge_manifest.sha256").write_text(checksum + "  merge_manifest.json\n", encoding="ascii")
     with pytest.raises(CheckpointValidationError, match="does not cover"):
         validate_model_checkpoint(output, load_transformers_metadata=False, validate_architecture=False)
+
+
+# The released base model and the FSDP trainer serialize with different
+# transformers versions. Those differences reach the exporter as dtype and
+# config drift on tensors whose shapes still match exactly, and the trained
+# shards are copied byte for byte, so they cannot change the exported weights.
+
+def test_dtype_difference_is_recorded_not_rejected(tmp_path):
+    base = checkpoint(tmp_path / "base", {"model.language.weight": torch.ones(2, dtype=torch.float32)})
+    trained = checkpoint(tmp_path / "trained", {"model.language.weight": torch.ones(2, dtype=torch.bfloat16)})
+    manifest = export(base, trained, tmp_path / "out")
+    assert manifest["trained_base_dtype_differences"] == {
+        "model.language.weight": {"trained": "BF16", "base": "F32"}
+    }
+    assert weight_layout(tmp_path / "out")[1]["model.language.weight"][1] == "BF16"
+
+
+def test_config_serialization_drift_is_recorded_not_rejected(tmp_path):
+    tensors = {"model.language.weight": torch.ones(2)}
+    base = checkpoint(tmp_path / "base", tensors, config={
+        "text_config": {"hidden_size": 8},
+        "vision_config": {"depth": 27, "model_type": "test"},
+    })
+    trained = checkpoint(tmp_path / "trained", tensors, config={
+        "text_config": {"hidden_size": 8, "pad_token_id": 0, "partial_rotary_factor": 0.25},
+        "vision_config": {"depth": 27, "model_type": "test_vision"},
+    })
+    manifest = export(base, trained, tmp_path / "out")
+    differences = manifest["trained_base_config_differences"]
+    assert differences["text_config"]["only_in_trained"] == ["pad_token_id", "partial_rotary_factor"]
+    assert differences["vision_config"]["version_labels"] == {
+        "model_type": {"trained": "test_vision", "base": "test"}
+    }
+
+
+def test_real_config_conflict_still_rejected(tmp_path):
+    tensors = {"model.language.weight": torch.ones(2)}
+    base = checkpoint(tmp_path / "base", tensors, config={"text_config": {"hidden_size": 8}})
+    trained = checkpoint(tmp_path / "trained", tensors, config={"text_config": {"hidden_size": 16}})
+    with pytest.raises(ValueError, match="text_config.hidden_size"):
+        export(base, trained, tmp_path / "out")
+    assert not (tmp_path / "out").exists()
