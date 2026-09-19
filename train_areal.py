@@ -72,6 +72,30 @@ def _apply_smoke_updates(args: list[str]) -> tuple[list[str], int | None]:
     return cleaned, smoke_updates
 
 
+def _parse_exploratory_budget(args: list[str]) -> tuple[list[str], bool]:
+    """Consume explicit intent to run an open-ended exploratory budget.
+
+    The release guard pins the training budget: 40 train rows, 5 epochs, a
+    50-update total, one checkpoint per update and per-epoch validation. Those
+    numbers reproduce the published recipe and must keep failing closed by
+    default. An exploratory run that is meant to be stopped by hand needs
+    different ones, so it says so on the command line instead of quietly
+    editing the constants, which would remove the guard for every formal run
+    too. Everything outside the budget -- protocol, reward, learning rate, KL,
+    group size, GPU split -- stays pinned.
+    """
+    cleaned: list[str] = []
+    exploratory = False
+    for argument in args:
+        if argument == "--exploratory-budget":
+            if exploratory:
+                raise ValueError("--exploratory-budget may be specified only once")
+            exploratory = True
+        else:
+            cleaned.append(argument)
+    return cleaned, exploratory
+
+
 REWARD_ABLATIONS = ("fixed-distance", "binary-outcome")
 
 
@@ -227,7 +251,11 @@ def _validate_reward_objective_contract(config) -> None:
 
 
 def _validate_release_stage_contract(
-    config, *, smoke_updates: int | None = None, reward_ablation: str | None = None
+    config,
+    *,
+    smoke_updates: int | None = None,
+    reward_ablation: str | None = None,
+    exploratory_budget: bool = False,
 ) -> None:
     """Fail closed on drift in either public two-stage training recipe."""
 
@@ -271,16 +299,33 @@ def _validate_release_stage_contract(
         and int(config.dataset_generation.train_episodes) == 4
     )
     expected_train_rows = 80 if protocol == DIRECT_ACTION_PROTOCOL else (4 if is_c2_overfit else 40)
-    require(
-        int(config.dataset_generation.train_episodes) == expected_train_rows,
-        f"{expected_train_rows} train rows",
-    )
     expected_validation_rows = 8 if is_c2_overfit else 4
-    require(
-        int(config.dataset_generation.validation_episodes) == expected_validation_rows,
-        f"{expected_validation_rows} validation rows",
-    )
-    require(int(config.dataset_generation.seed) == 28, "dataset seed 28")
+    if exploratory_budget:
+        # The split may grow and may start above the published seed range so a
+        # holdout stays unseen, but it must not shrink below the release size.
+        # evaluate_level1.py still refuses a heldout seed that overlaps either
+        # split, so the holdout cannot be silently trained on.
+        require(
+            int(config.dataset_generation.train_episodes) >= expected_train_rows,
+            f"at least {expected_train_rows} train rows",
+        )
+        require(
+            int(config.dataset_generation.validation_episodes)
+            >= expected_validation_rows,
+            f"at least {expected_validation_rows} validation rows",
+        )
+        require(int(config.dataset_generation.seed) >= 0, "a non-negative dataset seed")
+    else:
+        require(
+            int(config.dataset_generation.train_episodes) == expected_train_rows,
+            f"{expected_train_rows} train rows",
+        )
+        require(
+            int(config.dataset_generation.validation_episodes)
+            == expected_validation_rows,
+            f"{expected_validation_rows} validation rows",
+        )
+        require(int(config.dataset_generation.seed) == 28, "dataset seed 28")
     require(int(config.train_dataset.batch_size) == 4, "train batch_size=4")
     require(int(config.valid_dataset.batch_size) == 4, "valid batch_size=4")
     require(int(config.gconfig.n_samples) == 12, "gconfig.n_samples=12")
@@ -291,23 +336,33 @@ def _validate_release_stage_contract(
     require(config.actor.backend == "fsdp:d4p1t1", "4 actor GPUs")
     expected_epochs = 20 if is_c2_overfit else 5
     expected_updates = 100 if protocol == DIRECT_ACTION_PROTOCOL else (20 if is_c2_overfit else 50)
-    require(
-        int(config.total_train_epochs) == expected_epochs,
-        f"{expected_epochs} formal training epochs",
-    )
+    if exploratory_budget:
+        # An open-ended run is stopped by hand, so the epoch count is only a
+        # cap. lr_scheduler_type is constant with no warmup, so no schedule
+        # depends on the total.
+        require(
+            int(config.total_train_epochs) >= 1,
+            "a positive training epoch cap",
+        )
+    else:
+        require(
+            int(config.total_train_epochs) == expected_epochs,
+            f"{expected_epochs} formal training epochs",
+        )
     require(
         config.total_train_steps is None if smoke_updates is None
         else 1 <= smoke_updates <= expected_updates
         and config.total_train_steps == smoke_updates,
         "total_train_steps=null unless explicitly set by --smoke-updates",
     )
-    require(
-        expected_train_rows
-        // int(config.train_dataset.batch_size)
-        * int(config.total_train_epochs)
-        == expected_updates,
-        f"a {expected_updates}-update full budget",
-    )
+    if not exploratory_budget:
+        require(
+            expected_train_rows
+            // int(config.train_dataset.batch_size)
+            * int(config.total_train_epochs)
+            == expected_updates,
+            f"a {expected_updates}-update full budget",
+        )
     require(
         math.isclose(float(config.actor.optimizer.lr), 5.0e-7),
         "actor learning rate 5e-7",
@@ -337,7 +392,20 @@ def _validate_release_stage_contract(
     require(config.ref.path == config.actor.path, "ref.path to follow actor.path")
     require(getattr(config, "critic", None) is None, "critic=null")
     require(getattr(config, "teacher", None) is None, "teacher=null")
-    require(config.saver.freq_steps == 1, "saver.freq_steps=1")
+    if exploratory_budget:
+        # A hand-stopped run needs the checkpoint it was stopped for to still
+        # exist, which is a retention question rather than a cadence one.
+        require(
+            config.saver.freq_steps is not None and int(config.saver.freq_steps) >= 1,
+            "a positive saver.freq_steps",
+        )
+        require(
+            int(config.saver.keep_last) > 2,
+            "saver.keep_last above the release value, so a hand-picked "
+            "checkpoint is not pruned before it can be evaluated",
+        )
+    else:
+        require(config.saver.freq_steps == 1, "saver.freq_steps=1")
     if protocol == DIRECT_ACTION_PROTOCOL:
         require(
             all(
@@ -353,13 +421,26 @@ def _validate_release_stage_contract(
                 config.dataset_generation.validation_seed_start == 28,
                 "C2 overfit validation_seed_start=28",
             )
-        require(
-            config.evaluator.freq_epochs == (5 if is_c2_overfit else 1)
-            and config.evaluator.freq_steps is None
-            and config.evaluator.freq_secs is None
-            and config.evaluator.eval_before_train is True,
-            "C2 validation before training and at the configured epoch interval",
-        )
+        if exploratory_budget:
+            # One epoch can now be many updates, so per-epoch validation would
+            # leave the run unobservable for hours at a time and there would be
+            # nothing to stop it on. Require a step interval instead.
+            require(
+                config.evaluator.freq_epochs is None
+                and config.evaluator.freq_steps is not None
+                and int(config.evaluator.freq_steps) >= 1
+                and config.evaluator.freq_secs is None
+                and config.evaluator.eval_before_train is True,
+                "C2 exploratory validation before training and at a step interval",
+            )
+        else:
+            require(
+                config.evaluator.freq_epochs == (5 if is_c2_overfit else 1)
+                and config.evaluator.freq_steps is None
+                and config.evaluator.freq_secs is None
+                and config.evaluator.eval_before_train is True,
+                "C2 validation before training and at the configured epoch interval",
+            )
     require(str(config.recover.mode) == "disabled", "recover.mode=disabled")
     require(config.gconfig.min_new_tokens == 1, "one-token train decoding")
     require(config.gconfig.max_new_tokens == 1, "one-token train decoding")
@@ -618,6 +699,7 @@ def _production_dry_run(
     config_args: list[str] | None = None,
     smoke_updates: int | None = None,
     reward_ablation: str | None = None,
+    exploratory_budget: bool = False,
 ) -> bool:
     text = config_path.read_text(encoding="utf-8")
     recipe_version = _yaml_scalar(text, "recipe_version")
@@ -721,14 +803,17 @@ def _production_dry_run(
     print(f"env_api_version={spec.api_version}")
     print(f"level_revision={spec.level_revision}")
     print(f"action_tokens={','.join(spec.action_tokens)}")
-    if validate_areal or reward_ablation is not None:
+    if validate_areal or reward_ablation is not None or exploratory_budget:
         from areal.api.cli_args import load_expr_config
         from areal_pacman.synthetic.configs import PacmanAgentConfig
 
         config, _ = load_expr_config(effective_args, PacmanAgentConfig)
         _validate_reward_objective_contract(config)
         _validate_release_stage_contract(
-            config, smoke_updates=smoke_updates, reward_ablation=reward_ablation
+            config,
+            smoke_updates=smoke_updates,
+            reward_ablation=reward_ablation,
+            exploratory_budget=exploratory_budget,
         )
         gpu_count = config.cluster.n_gpus_per_node
         if gpu_count not in (4, 6, 8):
@@ -917,6 +1002,7 @@ def _build_group_reward_degeneracy_filter(config) -> str | None:
 def main(args: list[str]) -> None:
     args, smoke_updates = _apply_smoke_updates(args)
     args, reward_ablation = _parse_reward_ablation(args)
+    args, exploratory_budget = _parse_exploratory_budget(args)
     # fixed-distance is a 4-update smoke probe. binary-outcome replaces the whole
     # shaped objective with the terminal win signal, so it needs a full-length run
     # to show whether the win rate moves at all.
@@ -939,11 +1025,14 @@ def main(args: list[str]) -> None:
         config_args=args,
         smoke_updates=smoke_updates,
         reward_ablation=reward_ablation,
+        exploratory_budget=exploratory_budget,
     ):
         if smoke_updates is not None:
             print(f"smoke_updates={smoke_updates}")
         if reward_ablation is not None:
             print(f"reward_ablation={reward_ablation}")
+        if exploratory_budget:
+            print("exploratory_budget=true")
         return
 
     from areal import PPOTrainer
@@ -956,7 +1045,10 @@ def main(args: list[str]) -> None:
     config, _ = load_expr_config(args, PacmanAgentConfig)
     _validate_reward_objective_contract(config)
     _validate_release_stage_contract(
-        config, smoke_updates=smoke_updates, reward_ablation=reward_ablation
+        config,
+        smoke_updates=smoke_updates,
+        reward_ablation=reward_ablation,
+        exploratory_budget=exploratory_budget,
     )
     if config_path is not None:
         _validate_release_dataset_inputs(config_path, config.train_dataset.path, config.valid_dataset.path)
