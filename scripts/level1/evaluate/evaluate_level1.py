@@ -32,6 +32,36 @@ def canonical_sha256(value: Any) -> str:
     ).hexdigest()
 
 
+def exception_chain(error: BaseException) -> list[dict[str, Any]]:
+    """The full __cause__/__context__ chain behind a caught exception.
+
+    str() on a wrapped exception throws the diagnosis away: every
+    openai.APIConnectionError stringifies to the literal "Connection error."
+    whatever the underlying fault was, so a recorded error field alone cannot
+    tell a connect timeout from a server disconnect from a closed socket.
+    Three full evaluation runs were unexplainable for exactly that reason.
+
+    __context__ is followed as well as __cause__ because `raise X from None`
+    suppresses the latter while keeping the former.
+    """
+    chain: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen and len(chain) < 12:
+        seen.add(id(current))
+        chain.append(
+            {
+                "type": f"{type(current).__module__}.{type(current).__name__}",
+                "message": str(current)[:400],
+                "errno": getattr(current, "errno", None),
+            }
+        )
+        current = (
+            current.__cause__ if current.__cause__ is not None else current.__context__
+        )
+    return chain
+
+
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -78,6 +108,13 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--wall-clock-limit-seconds", type=float)
     parser.add_argument("--stuck-no-progress-steps", type=int)
     parser.add_argument("--concurrency", type=int, default=1)
+    # The OpenAI SDK defaults to a 5 second connect timeout, which a local
+    # server under concurrent episode load misses often enough to abort a
+    # quarter of the run. Every abort is scored as an infrastructure error and
+    # silently biases the result, because long episodes offer more chances to
+    # hit it and winning episodes are the long ones.
+    parser.add_argument("--request-timeout-seconds", type=float, default=900.0)
+    parser.add_argument("--connect-timeout-seconds", type=float, default=60.0)
     parser.add_argument(
         "--retries",
         type=int,
@@ -311,6 +348,34 @@ async def evaluate(args):
     semaphore = asyncio.Semaphore(args.concurrency)
     successful, attempts = [], []
 
+    # One client for the whole run, with timeouts sized for a busy local server
+    # rather than the SDK's 5 second connect default. The workflow builds its
+    # AsyncOpenAI with max_retries=0, so a single missed connection would
+    # otherwise discard a whole episode.
+    #
+    # Connection reuse is disabled deliberately. httpcore's has_expired()
+    # (_async/http11.py) consults only the clock and never checks whether a
+    # connection is already assigned to a pending request, so the pool's reap
+    # loop (_async/connection_pool.py) closes a connection out from under the
+    # task holding it whenever the event loop stalls for about keepalive_expiry
+    # seconds -- which this evaluator's pygame work does routinely. That
+    # surfaces as APIConnectionError <- ReadError <- ClosedResourceError.
+    # Tuning keepalive_expiry cannot fix it: too long reuses sockets the server
+    # already closed, too short reaps assigned ones. Measured on H100_1_2:
+    # 40/960 requests failed with keep-alive enabled, 0/480 with it disabled.
+    # See reports/APICONNECTION_ROOT_CAUSE_20260919.md.
+    import httpx
+
+    http_client = httpx.AsyncClient(
+        timeout=httpx.Timeout(
+            args.request_timeout_seconds, connect=args.connect_timeout_seconds
+        ),
+        limits=httpx.Limits(
+            max_connections=max(8, 4 * args.concurrency),
+            max_keepalive_connections=0,
+        ),
+    )
+
     async def run_trial(trial):
         async with semaphore:
             for retry in range(args.retries + 1):
@@ -342,6 +407,7 @@ async def evaluate(args):
                         trajectory_dir=trajectory_dir,
                         wall_clock_limit_seconds=args.wall_clock_limit_seconds,
                         stuck_no_progress_steps=args.stuck_no_progress_steps,
+                        http_client=http_client,
                     )
                     episode = workflow.last_episode
                     if episode is None:
@@ -370,6 +436,7 @@ async def evaluate(args):
                         won=False,
                         error_type=type(error).__name__,
                         error=str(error),
+                        error_chain=exception_chain(error),
                         terminal_reason="infrastructure_or_runtime_error",
                     )
                 attempt["elapsed_seconds"] = time.monotonic() - started
@@ -382,7 +449,10 @@ async def evaluate(args):
                     break
                 await asyncio.sleep(min(2**retry, 8))
 
-    await asyncio.gather(*(run_trial(trial) for trial in plan))
+    try:
+        await asyncio.gather(*(run_trial(trial) for trial in plan))
+    finally:
+        await http_client.aclose()
     wins = sum(bool(attempt.get("won")) for attempt in attempts)
     metrics = summarize_episodes(successful) if successful else {}
     return {
